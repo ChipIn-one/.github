@@ -5,7 +5,7 @@ has no local file of the same kind; a local file overrides the default for that 
 
 | Path | Purpose |
 | --- | --- |
-| `ISSUE_TEMPLATE/` | issue forms: bug, enhancement, docs, tests, research (moved from `chipin-backend` on 2026-09-08) |
+| `.github/ISSUE_TEMPLATE/` | issue forms: bug, enhancement, docs, tests, research (moved from `chipin-backend` on 2026-09-08) |
 | `github-issue-schema.md` | the task model behind the forms — labels, fields, lifecycle |
 
 Product and engineering documentation lives in
