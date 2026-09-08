@@ -1,0 +1,46 @@
+name: Bug report
+description: Something behaves incorrectly
+labels: ["type: bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Add a priority (`P0`–`P3`) and a `severity:` label after creating the issue,
+        plus the `PRE-PROD` milestone if this blocks the first production deploy.
+        See [github-issue-schema.md](https://github.com/ChipIn-one/.github/blob/main/github-issue-schema.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happens, and what should happen instead.
+      placeholder: The validator accepts a truncated JPEG and the API returns 200.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Steps, request/response, or the code path. Say so explicitly if it was found by reading code and never reproduced.
+      placeholder: POST /users/me/avatar with the first 4 bytes of a JPEG and nothing else.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: File/line references, logs, failing output, measurements.
+      placeholder: "common/storage/ImageUploadValidator.kt:41 — validation stops at magic bytes."
+  - type: textarea
+    id: plan
+    attributes:
+      label: Fix plan
+      description: Checklist of what to change. Leave empty if the fix follows from the problem.
+      placeholder: "- [ ] Decode the image before uploading"
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Checklist that decides when this issue closes.
+      placeholder: "- [ ] Truncated payloads are rejected with 400"
+    validations:
+      required: true

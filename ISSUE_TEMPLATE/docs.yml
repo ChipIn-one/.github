@@ -1,0 +1,39 @@
+name: Documentation
+description: Documentation work
+labels: ["type: docs"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Add a priority (`P0`–`P3`) after creating the issue, plus the `PRE-PROD`
+        milestone if this blocks the first production deploy. Severity is for
+        defects only. See [github-issue-schema.md](https://github.com/ChipIn-one/.github/blob/main/github-issue-schema.md).
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why this is needed, and the current state in the code.
+      placeholder: There is no single ledger specification; the knowledge is spread over ten design docs.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: What to do
+      description: The work itself.
+      placeholder: Name the files and the change, not just the goal.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Checklist that decides when this issue closes.
+      placeholder: "- [ ] "
+    validations:
+      required: true
+  - type: textarea
+    id: outofscope
+    attributes:
+      label: Out of scope
+      description: What this issue explicitly does not cover.
