@@ -97,13 +97,15 @@ function evaluateCodeDelivery(input) {
 }
 
 export function evaluateDevReadiness(rawInput) {
+  const source = rawInput ?? {};
+  const blockersRead = Object.hasOwn(source, 'blockers');
   const input = {
     requiredItems: [],
     blockers: [],
     metadataReadable: false,
     projectReadable: false,
     isCompositeParent: false,
-    ...rawInput,
+    ...source,
   };
 
   if (!input.metadataReadable || !input.projectReadable) {
@@ -112,6 +114,10 @@ export function evaluateDevReadiness(rawInput) {
 
   if (!input.repository || !input.currentStatus || !input.workKind) {
     return result('BLOCKED_UNKNOWN', 'Required structured GitHub state is missing.');
+  }
+
+  if (!blockersRead) {
+    return result('BLOCKED_UNKNOWN', 'Blocking relationships were not read explicitly.');
   }
 
   if (!Array.isArray(input.requiredItems) || !Array.isArray(input.blockers)) {
