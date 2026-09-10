@@ -72,8 +72,8 @@ export function evaluateDevReadiness(rawInput) {
   const input = {
     requiredItems: [],
     blockers: [],
-    metadataReadable: true,
-    projectReadable: true,
+    metadataReadable: false,
+    projectReadable: false,
     isCompositeParent: false,
     ...rawInput,
   };
