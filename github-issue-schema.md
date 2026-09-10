@@ -1,110 +1,103 @@
-# GitHub issue schema v1
+# ChipIn GitHub issue schema
 
-Canonical task model for ChipIn after the move off Trello. It is shared by
-`chipin-backend` and `chipin-frontend` so cross-repository conventions stay
-compatible — change it in both or in neither.
+Last reviewed: 2026-09-10
 
-Sources: Trello [#472](https://trello.com/c/CBK778eG) (backend) and
-[#471](https://trello.com/c/nMYb6RI9) (frontend).
+This document defines the shared GitHub task metadata model for ChipIn repositories.
+It does not define repository-specific implementation, review, build, test, deploy, or agent-execution rules.
 
-## Axes
+## Authorities
 
-The four axes are independent. Do not encode any of them in the issue title.
+Keep the axes separate:
 
-| Axis | Where it lives | Values |
-|---|---|---|
-| Priority | label | `P0` `P1` `P2` `P3` |
-| Severity | label, **defects only** | `severity: critical` `severity: major` `severity: minor` |
-| Type | label | `type: bug` `type: enhancement` `type: research` `type: tests` `type: docs` |
-| Release scope | milestone | `PRE-PROD` |
-| Workflow status | GitHub Project field | not a label, not in the title |
+| Concern | Canonical GitHub source | Values / rule |
+| --- | --- | --- |
+| Task specification | Issue body | Problem, Outcome, Acceptance, Dependencies, References |
+| Work kind | Organization Issue Type | `Task`, `Feature`, `Bug` |
+| Priority | Organization Issue Field `Priority` | `P0`, `P1`, `P2`, `P3` |
+| Severity | Organization Issue Field `Severity` | `Critical`, `Major`, `Minor`; use only when relevant |
+| Release scope | Organization Issue Field `Release scope` | `PRE-PROD`, `POST-PROD` |
+| Workflow state | ChipIn Project #5 `Status` | Project workflow only; never infer from issue open/closed state |
+| Parent / decomposition | Native GitHub issue relationships | Parent is optional; cross-repo product parent lives in KB when decomposition is needed |
+| PR implementation relationship | Native GitHub Development relationship | Do not use plain URLs or universal closing keywords as a substitute |
 
-**Priority is when we act. Severity is how bad it is when it happens.** They are
-set independently: a rare data-corruption bug can be `P2` + `severity: critical`,
-and a trivial-but-blocking typo can be `P0` + `severity: minor`.
+Organization Issue Fields and Project fields are different objects. Do not create same-named Project custom fields as fallbacks for Organization Issue Fields.
 
-### Priority
+If Organization Issue Fields are unavailable because of visibility or permission, the value is `UNKNOWN/BLOCKED`. Do not infer it from legacy labels, milestones, title text, issue state, or Project Status.
 
-| | Meaning |
-|---|---|
-| `P0` | Drop other work. Broken invariant, blocked release, or active user harm. |
-| `P1` | Next up. Blocks the release scope or another prioritized task. |
-| `P2` | Normal. Planned work with no date pressure. |
-| `P3` | Backlog. Do it when it becomes cheap or relevant. |
+## Legacy metadata
 
-### Severity
+The following are migration-only and MUST NOT be created for new work:
 
-Applies to `type: bug` only; leave it off everything else.
+- priority labels `P0`, `P1`, `P2`, `P3`;
+- `severity:*` labels;
+- `type:*` labels;
+- the `PRE-PROD` milestone as release-scope metadata.
 
-| | Meaning |
-|---|---|
-| `severity: critical` | Data loss, corruption, or full outage. |
-| `severity: major` | Wrong behaviour with real user impact. |
-| `severity: minor` | Cosmetic or narrow impact. |
+During migration, preserve meaning before cleanup:
 
-### Type
+1. Read the current issue and structured Organization Issue Fields.
+2. Resolve the intended canonical value from the approved migration mapping.
+3. Write and re-read the canonical field / Issue Type.
+4. Verify Project membership and the existing Project Status independently.
+5. Only then remove the corresponding legacy label or milestone.
 
-Exactly one per issue.
+A failed or unavailable structured-field read blocks cleanup. Do not guess a replacement.
 
-### Milestone
+Repository labels may still be used for orthogonal repository-local classification when explicitly documented by that repository. They are not substitutes for the axes above.
 
-`PRE-PROD` means the issue must be closed before the first production deploy.
-It replaces the `[PRE-PROD]` prefix that Trello card titles used to carry.
+## Issue body shape
 
-## Issue body structure
+Use only the relevant durable subset of these sections, in this order:
 
-The body has a fixed skeleton so issues stay comparable. GitHub renders each
-issue-form field label as a **level-3** heading, so the skeleton uses `###`, not
-`##`. Issues written by hand must match.
+### Problem
 
-**Defect** (`type: bug`, form `bug.yml`)
+State the current problem, constraint, or reason for the task. For defects, include enough reproduction/evidence here to make the problem verifiable.
 
-| Section | Holds |
-|---|---|
-| `### Problem` | What is wrong, and what should happen instead. |
-| `### Reproduction` | How to trigger it. Say so explicitly if it was found by reading code and never reproduced. |
-| `### Evidence` | File/line references, logs, failing output, measurements. |
-| `### Fix plan` | Checklist of what to change. Omit when the fix follows from the problem. |
-| `### Acceptance criteria` | Checklist that decides when the issue closes. |
+### Outcome
 
-**Everything else** (forms `enhancement.yml`, `research.yml`, `tests.yml`, `docs.yml`)
+Describe the observable state that should be true when the task is complete. Do not prescribe incidental implementation details unless they are constraints.
 
-| Section | Holds |
-|---|---|
-| `### Context` | Why this is needed and the current state in the code. |
-| `### What to do` | The work itself. |
-| `### Acceptance criteria` | Checklist that decides when the issue closes. |
-| `### Out of scope` | What this issue explicitly does not cover. Optional. |
+### Acceptance
 
-A trailing `### Notes`, `### References` or a named open question is allowed
-after those; subsections inside a section use `####`. Nothing else goes above
-`### Problem` / `### Context` except a first line linking the originating Trello
-card, where one exists.
+Use checkable acceptance criteria.
 
-There is one form per `type:` value rather than a single generic one, because a
-form can only preset a fixed label list — a shared form would leave every
-non-defect issue without its type label.
+### Dependencies
 
-Required fields use `placeholder`, never `value`: prefilled content satisfies
-`validations.required` and would let a form be submitted with an empty checklist.
+Use GitHub-native relationships when available. Put only real blocking/required dependencies here; do not duplicate Project Status.
 
-## What is deliberately absent
+### References
 
-- **No ownership label.** The repository already says whether work is backend or
-  frontend; `backend` / `frontend` labels would only duplicate it.
-- **No status labels.** Status lives in the GitHub Project, so it cannot drift
-  between two places.
-- **No legacy severity words as priority.** The Trello labels `Critical`,
-  `Major`, `Minor`, `Priority` and `PROD CRIT` mixed the two axes. They were
-  reviewed one issue at a time during the migration, not mapped mechanically.
+Link historical Trello cards, specs, ADRs, PRs, evidence, and related non-blocking work. Trello is historical/read-only and is never synchronized back.
 
-## Retained GitHub defaults
+## Issue Forms
 
-`question` (needs a decision before it can be worked), `duplicate`, `invalid`,
-`wontfix`. `good first issue` and `help wanted` are unused but harmless.
+Shared forms live in `.github/ISSUE_TEMPLATE/` and set only the canonical Organization Issue Type:
 
-## After cutover
+| Form | Issue Type |
+| --- | --- |
+| `bug.yml` | `Bug` |
+| `enhancement.yml` | `Feature` |
+| `docs.yml` | `Task` |
+| `research.yml` | `Task` |
+| `tests.yml` | `Task` |
 
-New backend tasks are created only in GitHub. Migrated Trello cards keep a
-comment linking to their issue and are archived on the board; issues that came
-from Trello keep the card link at the top of the body.
+Issue Forms do not create Priority/Severity/Release-scope labels or milestones. After creation, an organization member with access to Organization Issue Fields sets those structured values. If the fields are not visible, leave them unresolved and report the task as blocked for metadata completion.
+
+## Relationships and workflow
+
+Use GitHub-native relationships for workflow meaning:
+
+- A parent is optional for standalone FE/BE work.
+- When one product change is decomposed across repositories, its cross-repository product parent lives in `ChipIn-one/chipin-knowledge-base`.
+- Native sub-issues are required decomposition work under that parent.
+- Native `blocked by` / `blocking` relationships represent true dependencies.
+- A Development-linked PR is implementation evidence for its specific issue or sub-issue.
+- `References` are informational only and never gate status.
+- A plain issue/PR URL is a reference, not a workflow relationship.
+- Closing keywords are not a universal integration signal because their behavior depends on the PR target being the repository default branch.
+
+`DEV` means every required implementation-bearing change is integrated into its configured integration branch: frontend to `dev`, backend to `develop`, and knowledge-base change to `main` when the product specification itself must change. Deployment is separate evidence and does not gate `DEV`.
+
+Code/product work terminates at `PROD`. Standalone non-code research, documentation, and external work may terminate at `Done`. `PROD`, `Done`, and product-parent closure remain manual in v1.
+
+If required work is reopened or required scope changes after `DEV`, report the state as inconsistent for manual review; do not automatically regress status. Ambiguous structured state fails closed.

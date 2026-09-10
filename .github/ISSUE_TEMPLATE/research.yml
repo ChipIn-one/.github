@@ -1,39 +1,45 @@
 name: Research
-description: Investigation or spike with no code deliverable yet
-labels: ["type: research"]
+description: Investigate a bounded question before a decision or implementation
+title: ""
+type: Task
 body:
   - type: markdown
     attributes:
       value: |
-        Add a priority (`P0`–`P3`) after creating the issue, plus the `PRE-PROD`
-        milestone if this blocks the first production deploy. Severity is for
-        defects only. See [github-issue-schema.md](https://github.com/ChipIn-one/.github/blob/main/github-issue-schema.md).
+        Use canonical structured metadata after creation: Organization Issue Fields `Priority` and `Release scope`; `Severity` only when applicable; Project #5 `Status` is workflow state. Do not add legacy metadata labels/milestones. If structured fields are not visible, do not infer fallback values.
   - type: textarea
-    id: context
+    id: problem
     attributes:
-      label: Context
-      description: Why this is needed, and the current state in the code.
-      placeholder: We do not know whether the n+1 suspicion is real or where it bites.
+      label: Problem
+      description: What uncertainty or decision needs evidence?
     validations:
       required: true
   - type: textarea
-    id: scope
+    id: outcome
     attributes:
-      label: What to do
-      description: The work itself.
-      placeholder: Name the files and the change, not just the goal.
+      label: Outcome
+      description: What decision-ready result should the research produce?
     validations:
       required: true
   - type: textarea
     id: acceptance
     attributes:
-      label: Acceptance criteria
-      description: Checklist that decides when this issue closes.
-      placeholder: "- [ ] "
+      label: Acceptance
+      description: Define evidence and completion criteria for the research.
+      placeholder: "- [ ] ..."
     validations:
       required: true
   - type: textarea
-    id: outofscope
+    id: dependencies
     attributes:
-      label: Out of scope
-      description: What this issue explicitly does not cover.
+      label: Dependencies
+      description: List required source material, access, or prior decisions.
+    validations:
+      required: false
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Link source material, related issues, or historical Trello cards.
+    validations:
+      required: false

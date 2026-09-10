@@ -1,39 +1,45 @@
 name: Enhancement
-description: New or improved behaviour
-labels: ["type: enhancement"]
+description: Propose a product or engineering capability
+title: ""
+type: Feature
 body:
   - type: markdown
     attributes:
       value: |
-        Add a priority (`P0`–`P3`) after creating the issue, plus the `PRE-PROD`
-        milestone if this blocks the first production deploy. Severity is for
-        defects only. See [github-issue-schema.md](https://github.com/ChipIn-one/.github/blob/main/github-issue-schema.md).
+        Use canonical structured metadata after creation: Organization Issue Fields `Priority` and `Release scope`; `Severity` only when applicable; Project #5 `Status` is workflow state. Do not add legacy `P*`, `severity:*`, or `type:*` labels, and do not use the `PRE-PROD` milestone as release scope. If structured fields are not visible, do not infer fallback values.
   - type: textarea
-    id: context
+    id: problem
     attributes:
-      label: Context
-      description: Why this is needed, and the current state in the code.
-      placeholder: Balances are recalculated on every request even when nothing changed.
+      label: Problem
+      description: What problem or limitation should this change address?
     validations:
       required: true
   - type: textarea
-    id: scope
+    id: outcome
     attributes:
-      label: What to do
-      description: The work itself.
-      placeholder: Name the files and the change, not just the goal.
+      label: Outcome
+      description: What observable product or engineering outcome should be true?
     validations:
       required: true
   - type: textarea
     id: acceptance
     attributes:
-      label: Acceptance criteria
-      description: Checklist that decides when this issue closes.
-      placeholder: "- [ ] "
+      label: Acceptance
+      description: Add checkable acceptance criteria.
+      placeholder: "- [ ] ..."
     validations:
       required: true
   - type: textarea
-    id: outofscope
+    id: dependencies
     attributes:
-      label: Out of scope
-      description: What this issue explicitly does not cover.
+      label: Dependencies
+      description: List real blocking/required dependencies and use native GitHub relationships where available.
+    validations:
+      required: false
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Link specs, ADRs, PRs, related work, or historical Trello cards.
+    validations:
+      required: false
