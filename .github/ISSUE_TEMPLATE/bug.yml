@@ -1,46 +1,45 @@
 name: Bug report
-description: Something behaves incorrectly
-labels: ["type: bug"]
+description: Report incorrect existing behavior
+title: ""
+type: Bug
 body:
   - type: markdown
     attributes:
       value: |
-        Add a priority (`P0`–`P3`) and a `severity:` label after creating the issue,
-        plus the `PRE-PROD` milestone if this blocks the first production deploy.
-        See [github-issue-schema.md](https://github.com/ChipIn-one/.github/blob/main/github-issue-schema.md).
+        Use canonical structured metadata after creation: Organization Issue Fields `Priority`, `Severity`, and `Release scope`; Project #5 `Status` is workflow state. Do not add legacy `P*`, `severity:*`, or `type:*` labels, and do not use the `PRE-PROD` milestone as release scope. If structured fields are not visible, do not infer fallback values.
   - type: textarea
     id: problem
     attributes:
       label: Problem
-      description: What happens, and what should happen instead.
-      placeholder: The validator accepts a truncated JPEG and the API returns 200.
+      description: Describe the incorrect behavior, expected behavior, reproduction, and relevant evidence.
     validations:
       required: true
   - type: textarea
-    id: reproduction
+    id: outcome
     attributes:
-      label: Reproduction
-      description: Steps, request/response, or the code path. Say so explicitly if it was found by reading code and never reproduced.
-      placeholder: POST /users/me/avatar with the first 4 bytes of a JPEG and nothing else.
+      label: Outcome
+      description: Describe the observable corrected state without prescribing unnecessary implementation detail.
     validations:
       required: true
-  - type: textarea
-    id: evidence
-    attributes:
-      label: Evidence
-      description: File/line references, logs, failing output, measurements.
-      placeholder: "common/storage/ImageUploadValidator.kt:41 — validation stops at magic bytes."
-  - type: textarea
-    id: plan
-    attributes:
-      label: Fix plan
-      description: Checklist of what to change. Leave empty if the fix follows from the problem.
-      placeholder: "- [ ] Decode the image before uploading"
   - type: textarea
     id: acceptance
     attributes:
-      label: Acceptance criteria
-      description: Checklist that decides when this issue closes.
-      placeholder: "- [ ] Truncated payloads are rejected with 400"
+      label: Acceptance
+      description: Add checkable acceptance criteria.
+      placeholder: "- [ ] ..."
     validations:
       required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: List real blocking/required dependencies and use native GitHub relationships where available.
+    validations:
+      required: false
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Link specs, ADRs, PRs, evidence, or historical Trello cards.
+    validations:
+      required: false
