@@ -176,6 +176,18 @@ test('null blockers fail closed instead of throwing', () => {
   assert.equal(result.state, 'BLOCKED_UNKNOWN');
 });
 
+test('omitted blockers fail closed instead of assuming an empty successful read', () => {
+  const result = evaluateDevReadiness({
+    repository: 'ChipIn-one/chipin-frontend',
+    currentStatus: 'In Progress',
+    workKind: 'Feature',
+    requiredItems: [{ kind: 'pr', state: 'merged', baseBranch: 'dev' }],
+    metadataReadable: true,
+    projectReadable: true,
+  });
+  assert.equal(result.state, 'BLOCKED_UNKNOWN');
+});
+
 test('missing readability flags fail closed', () => {
   const result = evaluateDevReadiness({
     repository: 'ChipIn-one/chipin-frontend',
