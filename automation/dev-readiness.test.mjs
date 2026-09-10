@@ -85,3 +85,13 @@ test('ambiguous Task fails closed', () => {
   });
   assert.equal(result.state, 'BLOCKED_UNKNOWN');
 });
+
+test('missing readability flags fail closed', () => {
+  const result = evaluateDevReadiness({
+    repository: 'ChipIn-one/chipin-frontend',
+    currentStatus: 'In Progress',
+    workKind: 'Feature',
+    requiredItems: [{ kind: 'pr', state: 'merged', baseBranch: 'dev' }],
+  });
+  assert.equal(result.state, 'BLOCKED_UNKNOWN');
+});
