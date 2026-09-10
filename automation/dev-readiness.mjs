@@ -4,7 +4,16 @@ const INTEGRATION_BRANCHES = Object.freeze({
   'ChipIn-one/chipin-knowledge-base': 'main',
 });
 
-const COMPLETE_SUBISSUE_STATES = new Set(['DEV', 'PROD', 'Done']);
+const KNOWN_PROJECT_STATUSES = new Set([
+  'Backlog',
+  'Todo',
+  'In Progress',
+  'DEV',
+  'PROD',
+  'Done',
+]);
+
+const COMPLETE_DEPENDENCY_STATUSES = new Set(['DEV', 'PROD', 'Done']);
 
 function result(state, reason) {
   return { state, reason };
@@ -18,9 +27,26 @@ function blockerState(input) {
   if (hasUnreadableRelation(input.blockers)) {
     return result('BLOCKED_UNKNOWN', 'A blocking relationship is unreadable.');
   }
-  if (input.blockers.some((blocker) => blocker.state !== 'closed')) {
-    return result('NOT_READY', 'At least one required blocker is still open.');
+
+  for (const blocker of input.blockers) {
+    if (blocker.state === 'closed') {
+      continue;
+    }
+
+    if (
+      blocker.projectStatus !== undefined
+      && !KNOWN_PROJECT_STATUSES.has(blocker.projectStatus)
+    ) {
+      return result('BLOCKED_UNKNOWN', 'A blocker has an unknown Project status.');
+    }
+
+    if (COMPLETE_DEPENDENCY_STATUSES.has(blocker.projectStatus)) {
+      continue;
+    }
+
+    return result('NOT_READY', 'At least one required blocker is not integrated yet.');
   }
+
   return null;
 }
 
@@ -42,7 +68,7 @@ function evaluateComposite(input) {
     return result('BLOCKED_UNKNOWN', 'A required sub-issue is unreadable.');
   }
   const complete = input.requiredItems.every(
-    (item) => item.kind === 'subissue' && COMPLETE_SUBISSUE_STATES.has(item.state),
+    (item) => item.kind === 'subissue' && COMPLETE_DEPENDENCY_STATUSES.has(item.state),
   );
   return complete
     ? result('READY_FOR_DEV', 'All required sub-issues are complete for DEV roll-up.')
@@ -86,6 +112,10 @@ export function evaluateDevReadiness(rawInput) {
     return result('BLOCKED_UNKNOWN', 'Required structured GitHub state is missing.');
   }
 
+  if (!KNOWN_PROJECT_STATUSES.has(input.currentStatus)) {
+    return result('BLOCKED_UNKNOWN', 'Project status is unknown.');
+  }
+
   const blocked = blockerState(input);
   const deliveryClass = classifyDelivery(input);
   let readiness;
@@ -100,11 +130,21 @@ export function evaluateDevReadiness(rawInput) {
     readiness = blocked ?? evaluateCodeDelivery(input);
   }
 
-  if (input.currentStatus === 'DEV' && readiness.state !== 'READY_FOR_DEV') {
-    return result('INCONSISTENT', `Current status is DEV but readiness recomputation is ${readiness.state}.`);
+  if (input.currentStatus === 'DEV' || input.currentStatus === 'PROD') {
+    if (readiness.state !== 'READY_FOR_DEV') {
+      return result(
+        'INCONSISTENT',
+        `Current status is ${input.currentStatus} but readiness recomputation is ${readiness.state}.`,
+      );
+    }
+    return result('NOT_READY', `Current status is already ${input.currentStatus}; no DEV transition is allowed.`);
+  }
+
+  if (input.currentStatus === 'Done') {
+    return result('NOT_READY', 'Current status is Done; DEV automation must not change a manual terminal state.');
   }
 
   return readiness;
 }
 
-export { INTEGRATION_BRANCHES };
+export { INTEGRATION_BRANCHES, KNOWN_PROJECT_STATUSES };
