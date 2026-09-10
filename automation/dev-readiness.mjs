@@ -16,6 +16,7 @@ const KNOWN_PROJECT_STATUSES = new Set([
 const KNOWN_WORK_KINDS = new Set(['Task', 'Feature', 'Bug']);
 const KNOWN_DELIVERY_CLASSES = new Set(['code', 'non-code']);
 const KNOWN_BLOCKER_STATES = new Set(['open', 'closed']);
+const KNOWN_PR_STATES = new Set(['open', 'closed', 'merged']);
 const COMPLETE_DEPENDENCY_STATUSES = new Set(['DEV', 'PROD', 'Done']);
 
 function result(state, reason) {
@@ -74,8 +75,15 @@ function evaluateComposite(input) {
   if (hasUnreadableRelation(input.requiredItems)) {
     return result('BLOCKED_UNKNOWN', 'A required sub-issue is unreadable.');
   }
+
+  for (const item of input.requiredItems) {
+    if (item.kind !== 'subissue' || !KNOWN_PROJECT_STATUSES.has(item.state)) {
+      return result('BLOCKED_UNKNOWN', 'A required sub-issue has unsupported structured state.');
+    }
+  }
+
   const complete = input.requiredItems.every(
-    (item) => item.kind === 'subissue' && COMPLETE_DEPENDENCY_STATUSES.has(item.state),
+    (item) => COMPLETE_DEPENDENCY_STATUSES.has(item.state),
   );
   return complete
     ? result('READY_FOR_DEV', 'All required sub-issues are complete for DEV roll-up.')
@@ -93,8 +101,20 @@ function evaluateCodeDelivery(input) {
   if (hasUnreadableRelation(input.requiredItems)) {
     return result('BLOCKED_UNKNOWN', 'A required implementation relationship is unreadable.');
   }
+
+  for (const item of input.requiredItems) {
+    if (
+      item.kind !== 'pr'
+      || !KNOWN_PR_STATES.has(item.state)
+      || typeof item.baseBranch !== 'string'
+      || item.baseBranch.length === 0
+    ) {
+      return result('BLOCKED_UNKNOWN', 'A required implementation PR has incomplete or unsupported structured state.');
+    }
+  }
+
   const allIntegrated = input.requiredItems.every(
-    (item) => item.kind === 'pr' && item.state === 'merged' && item.baseBranch === expectedBranch,
+    (item) => item.state === 'merged' && item.baseBranch === expectedBranch,
   );
   return allIntegrated
     ? result('READY_FOR_DEV', `All required PRs are merged to ${expectedBranch}.`)
@@ -104,6 +124,7 @@ function evaluateCodeDelivery(input) {
 export function evaluateDevReadiness(rawInput) {
   const source = rawInput ?? {};
   const blockersRead = Object.hasOwn(source, 'blockers');
+  const requiredItemsRead = Object.hasOwn(source, 'requiredItems');
   const input = {
     requiredItems: [],
     blockers: [],
@@ -152,6 +173,8 @@ export function evaluateDevReadiness(rawInput) {
     readiness = result('BLOCKED_UNKNOWN', 'Task delivery class is ambiguous.');
   } else if (deliveryClass === 'non-code') {
     readiness = result('NOT_READY', 'Standalone non-code work terminates at Done manually, not DEV.');
+  } else if (!requiredItemsRead) {
+    readiness = result('BLOCKED_UNKNOWN', 'Required implementation relationships were not read explicitly.');
   } else if (input.isCompositeParent) {
     readiness = blocked ?? evaluateComposite(input);
   } else {
