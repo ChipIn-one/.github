@@ -52,6 +52,16 @@ test('open blocker prevents DEV readiness', () => {
   assert.equal(result.state, 'NOT_READY');
 });
 
+test('open blocker already at DEV no longer blocks integration readiness', () => {
+  const result = evaluateDevReadiness({
+    ...base,
+    repository: 'ChipIn-one/chipin-frontend',
+    requiredItems: [{ kind: 'pr', state: 'merged', baseBranch: 'dev' }],
+    blockers: [{ state: 'open', projectStatus: 'DEV' }],
+  });
+  assert.equal(result.state, 'READY_FOR_DEV');
+});
+
 test('unreadable structured metadata fails closed', () => {
   const result = evaluateDevReadiness({ ...base, metadataReadable: false });
   assert.equal(result.state, 'BLOCKED_UNKNOWN');
@@ -65,6 +75,36 @@ test('reopened required work after DEV is inconsistent', () => {
     requiredItems: [{ kind: 'pr', state: 'open', baseBranch: 'dev' }],
   });
   assert.equal(result.state, 'INCONSISTENT');
+});
+
+test('reopened required work after PROD is inconsistent', () => {
+  const result = evaluateDevReadiness({
+    ...base,
+    currentStatus: 'PROD',
+    repository: 'ChipIn-one/chipin-frontend',
+    requiredItems: [{ kind: 'pr', state: 'open', baseBranch: 'dev' }],
+  });
+  assert.equal(result.state, 'INCONSISTENT');
+});
+
+test('already DEV delivery does not propose another DEV transition', () => {
+  const result = evaluateDevReadiness({
+    ...base,
+    currentStatus: 'DEV',
+    repository: 'ChipIn-one/chipin-frontend',
+    requiredItems: [{ kind: 'pr', state: 'merged', baseBranch: 'dev' }],
+  });
+  assert.equal(result.state, 'NOT_READY');
+});
+
+test('PROD delivery never proposes a DEV transition', () => {
+  const result = evaluateDevReadiness({
+    ...base,
+    currentStatus: 'PROD',
+    repository: 'ChipIn-one/chipin-frontend',
+    requiredItems: [{ kind: 'pr', state: 'merged', baseBranch: 'dev' }],
+  });
+  assert.equal(result.state, 'NOT_READY');
 });
 
 test('standalone non-code task never auto-transitions to DEV', () => {
@@ -82,6 +122,16 @@ test('ambiguous Task fails closed', () => {
     ...base,
     workKind: 'Task',
     repository: 'ChipIn-one/chipin-frontend',
+  });
+  assert.equal(result.state, 'BLOCKED_UNKNOWN');
+});
+
+test('unknown Project status fails closed', () => {
+  const result = evaluateDevReadiness({
+    ...base,
+    currentStatus: 'Unknown status',
+    repository: 'ChipIn-one/chipin-frontend',
+    requiredItems: [{ kind: 'pr', state: 'merged', baseBranch: 'dev' }],
   });
   assert.equal(result.state, 'BLOCKED_UNKNOWN');
 });
