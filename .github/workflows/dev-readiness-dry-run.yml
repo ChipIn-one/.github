@@ -1,0 +1,25 @@
+name: DEV readiness policy tests
+
+on:
+  pull_request:
+    paths:
+      - 'automation/**'
+      - '.github/workflows/dev-readiness-dry-run.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate-fixtures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run DEV readiness tests
+        run: node --test automation/*.test.mjs
