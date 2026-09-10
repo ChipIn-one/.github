@@ -13,13 +13,15 @@ const KNOWN_PROJECT_STATUSES = new Set([
   'Done',
 ]);
 
+const KNOWN_WORK_KINDS = new Set(['Task', 'Feature', 'Bug']);
+const KNOWN_DELIVERY_CLASSES = new Set(['code', 'non-code']);
 const COMPLETE_DEPENDENCY_STATUSES = new Set(['DEV', 'PROD', 'Done']);
 
 function result(state, reason) {
   return { state, reason };
 }
 
-function hasUnreadableRelation(items = []) {
+function hasUnreadableRelation(items) {
   return items.some((item) => item?.readable === false || !item?.state);
 }
 
@@ -51,7 +53,7 @@ function blockerState(input) {
 }
 
 function classifyDelivery(input) {
-  if (input.deliveryClass === 'code' || input.deliveryClass === 'non-code') {
+  if (input.deliveryClass !== undefined) {
     return input.deliveryClass;
   }
   if (input.workKind === 'Bug' || input.workKind === 'Feature') {
@@ -112,8 +114,23 @@ export function evaluateDevReadiness(rawInput) {
     return result('BLOCKED_UNKNOWN', 'Required structured GitHub state is missing.');
   }
 
+  if (!Array.isArray(input.requiredItems) || !Array.isArray(input.blockers)) {
+    return result('BLOCKED_UNKNOWN', 'Required relationship collections are unreadable.');
+  }
+
   if (!KNOWN_PROJECT_STATUSES.has(input.currentStatus)) {
     return result('BLOCKED_UNKNOWN', 'Project status is unknown.');
+  }
+
+  if (!KNOWN_WORK_KINDS.has(input.workKind)) {
+    return result('BLOCKED_UNKNOWN', 'Work kind is unknown.');
+  }
+
+  if (
+    input.deliveryClass !== undefined
+    && !KNOWN_DELIVERY_CLASSES.has(input.deliveryClass)
+  ) {
+    return result('BLOCKED_UNKNOWN', 'Delivery class is unknown.');
   }
 
   const blocked = blockerState(input);
@@ -147,4 +164,8 @@ export function evaluateDevReadiness(rawInput) {
   return readiness;
 }
 
-export { INTEGRATION_BRANCHES, KNOWN_PROJECT_STATUSES };
+export {
+  INTEGRATION_BRANCHES,
+  KNOWN_PROJECT_STATUSES,
+  KNOWN_WORK_KINDS,
+};
