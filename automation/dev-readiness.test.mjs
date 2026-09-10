@@ -62,6 +62,16 @@ test('open blocker already at DEV no longer blocks integration readiness', () =>
   assert.equal(result.state, 'READY_FOR_DEV');
 });
 
+test('unsupported blocker state fails closed even when Project status is DEV', () => {
+  const result = evaluateDevReadiness({
+    ...base,
+    repository: 'ChipIn-one/chipin-frontend',
+    requiredItems: [{ kind: 'pr', state: 'merged', baseBranch: 'dev' }],
+    blockers: [{ state: 'archived', projectStatus: 'DEV' }],
+  });
+  assert.equal(result.state, 'BLOCKED_UNKNOWN');
+});
+
 test('unreadable structured metadata fails closed', () => {
   const result = evaluateDevReadiness({ ...base, metadataReadable: false });
   assert.equal(result.state, 'BLOCKED_UNKNOWN');
