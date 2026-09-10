@@ -198,6 +198,27 @@ test('omitted blockers fail closed instead of assuming an empty successful read'
   assert.equal(result.state, 'BLOCKED_UNKNOWN');
 });
 
+test('omitted required items fail closed instead of assuming an empty successful read', () => {
+  const result = evaluateDevReadiness({
+    repository: 'ChipIn-one/chipin-frontend',
+    currentStatus: 'In Progress',
+    workKind: 'Feature',
+    blockers: [],
+    metadataReadable: true,
+    projectReadable: true,
+  });
+  assert.equal(result.state, 'BLOCKED_UNKNOWN');
+});
+
+test('required merged PR without base branch fails closed', () => {
+  const result = evaluateDevReadiness({
+    ...base,
+    repository: 'ChipIn-one/chipin-frontend',
+    requiredItems: [{ kind: 'pr', state: 'merged' }],
+  });
+  assert.equal(result.state, 'BLOCKED_UNKNOWN');
+});
+
 test('missing readability flags fail closed', () => {
   const result = evaluateDevReadiness({
     repository: 'ChipIn-one/chipin-frontend',
