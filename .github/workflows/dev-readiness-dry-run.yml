@@ -1,6 +1,10 @@
-name: DEV readiness dry-run
+name: DEV readiness policy tests
 
 on:
+  pull_request:
+    paths:
+      - 'automation/**'
+      - '.github/workflows/dev-readiness-dry-run.yml'
   workflow_dispatch:
 
 permissions:
