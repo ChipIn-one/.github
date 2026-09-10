@@ -136,6 +136,46 @@ test('unknown Project status fails closed', () => {
   assert.equal(result.state, 'BLOCKED_UNKNOWN');
 });
 
+test('unknown work kind fails closed even with explicit delivery class', () => {
+  const result = evaluateDevReadiness({
+    ...base,
+    workKind: 'Incident',
+    deliveryClass: 'code',
+    repository: 'ChipIn-one/chipin-frontend',
+    requiredItems: [{ kind: 'pr', state: 'merged', baseBranch: 'dev' }],
+  });
+  assert.equal(result.state, 'BLOCKED_UNKNOWN');
+});
+
+test('unsupported delivery class fails closed', () => {
+  const result = evaluateDevReadiness({
+    ...base,
+    deliveryClass: 'mixed',
+    repository: 'ChipIn-one/chipin-frontend',
+    requiredItems: [{ kind: 'pr', state: 'merged', baseBranch: 'dev' }],
+  });
+  assert.equal(result.state, 'BLOCKED_UNKNOWN');
+});
+
+test('null required items fail closed instead of throwing', () => {
+  const result = evaluateDevReadiness({
+    ...base,
+    repository: 'ChipIn-one/chipin-frontend',
+    requiredItems: null,
+  });
+  assert.equal(result.state, 'BLOCKED_UNKNOWN');
+});
+
+test('null blockers fail closed instead of throwing', () => {
+  const result = evaluateDevReadiness({
+    ...base,
+    repository: 'ChipIn-one/chipin-frontend',
+    requiredItems: [{ kind: 'pr', state: 'merged', baseBranch: 'dev' }],
+    blockers: null,
+  });
+  assert.equal(result.state, 'BLOCKED_UNKNOWN');
+});
+
 test('missing readability flags fail closed', () => {
   const result = evaluateDevReadiness({
     repository: 'ChipIn-one/chipin-frontend',
