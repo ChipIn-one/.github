@@ -15,6 +15,7 @@ const KNOWN_PROJECT_STATUSES = new Set([
 
 const KNOWN_WORK_KINDS = new Set(['Task', 'Feature', 'Bug']);
 const KNOWN_DELIVERY_CLASSES = new Set(['code', 'non-code']);
+const KNOWN_BLOCKER_STATES = new Set(['open', 'closed']);
 const COMPLETE_DEPENDENCY_STATUSES = new Set(['DEV', 'PROD', 'Done']);
 
 function result(state, reason) {
@@ -31,6 +32,10 @@ function blockerState(input) {
   }
 
   for (const blocker of input.blockers) {
+    if (!KNOWN_BLOCKER_STATES.has(blocker.state)) {
+      return result('BLOCKED_UNKNOWN', 'A blocker has an unknown issue state.');
+    }
+
     if (blocker.state === 'closed') {
       continue;
     }
