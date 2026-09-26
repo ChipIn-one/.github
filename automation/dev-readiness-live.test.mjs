@@ -204,7 +204,7 @@ test('native blockers use Project integration state and plain References do not 
   assert.equal(result.decision.state, 'READY_FOR_DEV');
 });
 
-test('KB composite parent rolls up native sub-issue statuses', async () => {
+test('KB composite parent rolls up native sub-issue statuses and ignores parent Development PRs', async () => {
   const snapshot = issueSnapshot({
     type: 'Task', typeId: 10,
     subIssues: [{ repository: 'ChipIn-one/chipin-frontend', number: 2, state: 'open' }],
@@ -214,7 +214,7 @@ test('KB composite parent rolls up native sub-issue statuses', async () => {
     { repository: 'ChipIn-one/chipin-frontend', number: 2, status: 'DEV' },
   ]);
   const result = await evaluateLiveIssue(
-    fakeClient({ snapshot, pullRequests: [] }),
+    fakeClient({ snapshot, pullRequests: [pr({ repository: 'ChipIn-one/chipin-knowledge-base', baseRefName: 'main', number: 300 })] }),
     config,
     ctx,
     'ChipIn-one/chipin-knowledge-base',

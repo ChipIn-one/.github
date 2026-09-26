@@ -314,7 +314,7 @@ export async function evaluateLiveIssue(client, config, liveContext, repository,
   const subIssues = snapshot ? normalizeSubIssues(snapshot, liveContext.projectIndex) : [];
   const isCompositeParent = subIssues.length > 0;
   const requiredItems = isCompositeParent
-    ? [...subIssues, ...normalizedDevelopment.pullRequests]
+    ? subIssues
     : normalizedDevelopment.pullRequests;
   const blockers = snapshot ? normalizeBlockers(snapshot, liveContext.projectIndex) : [{ readable: false, state: null }];
   const deliveryClass = deliveryClassFor({ repository, workKind: metadata.workKind, isCompositeParent });
