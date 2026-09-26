@@ -3,7 +3,6 @@
   "organization": "ChipIn-one",
   "project": {
     "number": 5,
-    "expectedItemCount": 98,
     "statusField": "Status",
     "statusValues": ["Backlog", "Todo", "In Progress", "DEV", "PROD", "Done"]
   },

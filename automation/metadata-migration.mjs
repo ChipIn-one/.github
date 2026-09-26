@@ -44,12 +44,16 @@ export function verifyOrgSchema(config, fields, types) {
   return blockers;
 }
 
+export function projectAudit(config, project) {
+  return {
+    number: config.project.number,
+    totalCount: project?.totalCount ?? null,
+  };
+}
+
 export function verifyProjectSnapshot(config, project) {
   const blockers = [];
   if (!project) return [`Project #${config.project.number} is unreadable`];
-  if (project.totalCount !== config.project.expectedItemCount) {
-    blockers.push(`Project #${config.project.number} item count changed: expected ${config.project.expectedItemCount}, got ${project.totalCount}`);
-  }
   for (const [name, expected] of Object.entries(config.issueFields)) {
     const matches = project.fields.filter((field) => field.name === name);
     if (matches.length !== 1) {
@@ -375,7 +379,14 @@ export async function run(argv = process.argv.slice(2), env = process.env) {
 
   const projectIndex = new Map((project?.items ?? []).filter((item) => item.repository && item.number)
     .map((item) => [`${item.repository}#${item.number}`, item]));
-  const result = { schemaVersion: 1, mode: args.mode, generatedAt: new Date().toISOString(), globalBlockers, issues: [] };
+  const result = {
+    schemaVersion: 1,
+    mode: args.mode,
+    generatedAt: new Date().toISOString(),
+    project: projectAudit(config, project),
+    globalBlockers,
+    issues: [],
+  };
 
   for (const [repository, repoConfig] of Object.entries(config.repositories)) {
     for (const [numberText, mapping] of Object.entries(repoConfig.issues)) {
