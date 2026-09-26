@@ -102,7 +102,7 @@ function fakeClient({ snapshot = issueSnapshot(), pullRequests = [pr()], branche
 
 test('issue identities are exact owner/repository#number values', () => {
   assert.deepEqual(parseIssueRef('ChipIn-one/chipin-frontend#164'), { repository: 'ChipIn-one/chipin-frontend', number: 164 });
-  assert.throws(() => parseIssueRef('https://github.com/ChipIn-one/chipin-frontend/issues/164'), /Invalid issue identity/);
+  assert.throws(() => parseIssueRef('https://github.com/ChipIn-one/chipin-frontend/issues/164'), /Invalid issue identity/);\n  assert.throws(() => parseIssueRef('ChipIn-one/extra/chipin-frontend#164'), /Invalid issue identity/);
 });
 
 test('Project indexing exposes duplicate issue membership instead of overwriting it', () => {

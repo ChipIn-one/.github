@@ -11,7 +11,7 @@ This directory contains narrow, fail-closed automation for ChipIn GitHub coordin
 - Organization Issue Fields / Issue Types and Project #5 schema are verified before eligibility can be positive.
 - canonical Priority, Release scope, and Issue Type are read from structured GitHub metadata only; labels, milestones, body URLs, and `References` are never fallbacks.
 - native blocked-by, parent, and sub-issue relationships come from GitHub relationship APIs and are paginated by the shared client.
-- Development-linked PRs come from GitHub's Development relationship, with complete GraphQL pagination.
+- Development-linked PRs come from GitHub's manual/native Development relationship, with complete GraphQL pagination; closing-keyword-only references are explicitly excluded.
 - direct merges are checked against the repository integration branch; stacked merged PRs are accepted only when their merge SHA is reachable from that integration branch.
 - unreadable relationships, duplicate Project membership, schema drift, unsupported canonical values, or incomplete integration evidence fail closed.
 - the adapter contains no write path.

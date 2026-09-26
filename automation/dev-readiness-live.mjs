@@ -22,7 +22,7 @@ const DEVELOPMENT_PRS_QUERY = `
 query DevReadinessPullRequests($owner: String!, $repo: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $repo) {
     issue(number: $number) {
-      closedByPullRequestsReferences(first: 100, after: $after, includeClosedPrs: true) {
+      closedByPullRequestsReferences(first: 100, after: $after, includeClosedPrs: true, userLinkedOnly: true) {
         nodes {
           number
           state
@@ -63,7 +63,7 @@ function issueKey(repository, number) {
 }
 
 export function parseIssueRef(value) {
-  const match = /^(?<repository>[^\s#]+\/[^\s#]+)#(?<number>[1-9]\d*)$/.exec(value ?? '');
+  const match = /^(?<repository>[^\s#/]+\/[^\s#/]+)#(?<number>[1-9]\d*)$/.exec(value ?? '');
   if (!match) throw new Error(`Invalid issue identity: ${value}`);
   return { repository: match.groups.repository, number: Number(match.groups.number) };
 }

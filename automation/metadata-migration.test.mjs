@@ -71,6 +71,68 @@ test("Project growth is allowed; field linkage remains authoritative", () => {
   assert.match(verifyProjectSnapshot(config, { totalCount: 107, fields }).join("\n"), /not linked/);
 });
 
+test("Project reader paginates fields and items independently", async () => {
+  let calls = 0;
+  const fieldPages = {
+    root: {
+      totalCount: 2,
+      nodes: [{ name: "Priority" }],
+      pageInfo: { hasNextPage: true, endCursor: "F1" },
+    },
+    F1: {
+      totalCount: 2,
+      nodes: [{ name: "Status" }],
+      pageInfo: { hasNextPage: false, endCursor: "F2" },
+    },
+    F2: {
+      totalCount: 2,
+      nodes: [],
+      pageInfo: { hasNextPage: false, endCursor: null },
+    },
+  };
+  const item = (number, status) => ({
+    id: `I${number}`,
+    content: { __typename: "Issue", number, repository: { nameWithOwner: "ChipIn-one/chipin-backend" } },
+    fieldValueByName: { name: status },
+  });
+  const itemPages = {
+    root: {
+      totalCount: 3,
+      nodes: [item(1, "Todo")],
+      pageInfo: { hasNextPage: true, endCursor: "I1" },
+    },
+    I1: {
+      totalCount: 3,
+      nodes: [item(2, "In Progress")],
+      pageInfo: { hasNextPage: true, endCursor: "I2" },
+    },
+    I2: {
+      totalCount: 3,
+      nodes: [item(3, "DEV")],
+      pageInfo: { hasNextPage: false, endCursor: "I3" },
+    },
+  };
+  const client = {
+    async graphql(_query, variables) {
+      calls += 1;
+      return {
+        organization: {
+          projectV2: {
+            fields: fieldPages[variables.fieldsAfter ?? "root"],
+            items: itemPages[variables.itemsAfter ?? "root"],
+          },
+        },
+      };
+    },
+  };
+
+  const snapshot = await readProjectSnapshot(client, { organization: "ChipIn-one", project: { number: 5 } });
+  assert.equal(calls, 3);
+  assert.deepEqual(snapshot.fields.map((field) => field.name), ["Priority", "Status"]);
+  assert.deepEqual(snapshot.items.map((entry) => entry.number), [1, 2, 3]);
+  assert.equal(snapshot.totalCount, 3);
+});
+
 test("idempotent canonical state produces no writes", () => {
   const plan = buildIssuePlan({ config, repository: "ChipIn-one/chipin-backend", number: 101, mapping, snapshot: snapshot(), projectItem });
   assert.deepEqual(plan.operations, []);
