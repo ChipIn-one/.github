@@ -6,6 +6,6 @@ Canonical AI routing:
 4. On that record's `integrationBranch`, read target `AGENTS.md`, then `.ai/context.md`.
 5. Read relevant `.ai/decisions.md`, task files, and required declared `contextDependencies`; block if required dependency context is unavailable.
 
-Use GitHub records only. Legacy `projects/<project>/` contexts are migration-only; do not auto-discover repositories.
+GitHub Issue/PR entry never bypasses this route; use GitHub records only, no auto-discovery; legacy contexts are migration-only.
 Canonical root: ~/Desktop/WORK
 <!-- ai-workflow:agents-routing:end -->
