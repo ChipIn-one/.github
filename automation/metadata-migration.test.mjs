@@ -225,26 +225,31 @@ test("resume trusts the checkpoint only after a fresh clean read", async () => {
 });
 
 test("stale Project membership blocks cleanup after canonical read-back", async () => {
-  let projectReads = 0;
-  let cleanupWrites = 0;
-  const legacy = snapshot({ labels: ["P1"] });
-  const result = await run(["apply", "--activate", "issue-117"], { CHIPIN_METADATA_APPLY: "1" }, {
-    config: lifecycleConfig(),
-    state: { schemaVersion: 1, issues: {} },
-    client: organizationClient(),
-    readProjectSnapshot: async () => {
-      projectReads += 1;
-      return projectReads === 1 ? projectSnapshot() : projectSnapshot({ includeIssue: false });
-    },
-    readIssueSnapshot: async () => legacy,
-    writeCanonical: async () => {},
-    writeCleanup: async () => { cleanupWrites += 1; },
-    writeJson: async () => {},
-  });
+  const originalExitCode = process.exitCode;
+  try {
+    let projectReads = 0;
+    let cleanupWrites = 0;
+    const legacy = snapshot({ labels: ["P1"] });
+    const result = await run(["apply", "--activate", "issue-117"], { CHIPIN_METADATA_APPLY: "1" }, {
+      config: lifecycleConfig(),
+      state: { schemaVersion: 1, issues: {} },
+      client: organizationClient(),
+      readProjectSnapshot: async () => {
+        projectReads += 1;
+        return projectReads === 1 ? projectSnapshot() : projectSnapshot({ includeIssue: false });
+      },
+      readIssueSnapshot: async () => legacy,
+      writeCanonical: async () => {},
+      writeCleanup: async () => { cleanupWrites += 1; },
+      writeJson: async () => {},
+    });
 
-  assert.equal(result.issues[0].apply.status, "cleanup-blocked-after-project-refresh");
-  assert.match(result.issues[0].blockers.join("\n"), /membership is unreadable or missing/);
-  assert.equal(cleanupWrites, 0);
+    assert.equal(result.issues[0].apply.status, "cleanup-blocked-after-project-refresh");
+    assert.match(result.issues[0].blockers.join("\n"), /membership is unreadable or missing/);
+    assert.equal(cleanupWrites, 0);
+  } finally {
+    process.exitCode = originalExitCode;
+  }
 });
 
 test("partial cleanup failure never checkpoints completion", async () => {
