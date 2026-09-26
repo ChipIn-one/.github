@@ -42,7 +42,11 @@ jobs:
               fi
               ;;
             workflow_dispatch)
-              git show --check --format= "$HEAD_SHA"
+              if git rev-parse "$HEAD_SHA^1" >/dev/null 2>&1; then
+                git diff --check "$HEAD_SHA^1..$HEAD_SHA"
+              else
+                git show --check --format= "$HEAD_SHA"
+              fi
               ;;
             *)
               echo "Unsupported event for whitespace validation: $EVENT_NAME"
