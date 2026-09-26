@@ -6,6 +6,7 @@ import {
   canonicalWriteEligible,
   cleanupEligible,
   projectAudit,
+  readProjectSnapshot,
   run,
   verifyOrgSchema,
   verifyProjectSnapshot,

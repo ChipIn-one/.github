@@ -130,6 +130,7 @@ test('Development pagination reads every PR page', async () => {
   const client = {
     async graphql(query, variables) {
       if (query.includes('DevReadinessPullRequests')) {
+        assert.match(query, /userLinkedOnly:\s*true/);
         prCalls += 1;
         if (!variables.after) return { repository: { issue: { closedByPullRequestsReferences: { nodes: [pr({ number: 1 })], pageInfo: { hasNextPage: true, endCursor: 'next' } } } } };
         return { repository: { issue: { closedByPullRequestsReferences: { nodes: [pr({ number: 2 })], pageInfo: { hasNextPage: false, endCursor: null } } } } };
