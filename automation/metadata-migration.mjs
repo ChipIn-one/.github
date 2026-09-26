@@ -352,12 +352,17 @@ async function writeJson(path, value) {
   await rename(temp, target);
 }
 
-export async function run(argv = process.argv.slice(2), env = process.env) {
+export async function run(argv = process.argv.slice(2), env = process.env, overrides = {}) {
   const args = parseArgs(argv);
   assertApplyActivation({ mode: args.mode, activate: args.activate, env });
-  const config = await readJson(args.config);
-  const state = await readState(args.state);
-  const client = new GitHubClient(env.GITHUB_TOKEN);
+  const config = overrides.config ?? await readJson(args.config);
+  const state = overrides.state ?? await readState(args.state);
+  const client = overrides.client ?? new GitHubClient(env.GITHUB_TOKEN);
+  const readProject = overrides.readProjectSnapshot ?? readProjectSnapshot;
+  const readIssue = overrides.readIssueSnapshot ?? readIssueSnapshot;
+  const writeCanonicalState = overrides.writeCanonical ?? writeCanonical;
+  const writeCleanupState = overrides.writeCleanup ?? writeCleanup;
+  const persistJson = overrides.writeJson ?? writeJson;
   const globalBlockers = [];
   let project = null;
 
@@ -371,7 +376,7 @@ export async function run(argv = process.argv.slice(2), env = process.env) {
     globalBlockers.push(`Organization schema unreadable: ${error.message}`);
   }
   try {
-    project = await readProjectSnapshot(client, config);
+    project = await readProject(client, config);
     globalBlockers.push(...verifyProjectSnapshot(config, project));
   } catch (error) {
     globalBlockers.push(`Project #${config.project.number} unreadable: ${error.message}`);
@@ -394,7 +399,7 @@ export async function run(argv = process.argv.slice(2), env = process.env) {
       const key = `${repository}#${number}`;
       let snapshot;
       try {
-        snapshot = await readIssueSnapshot(client, repository, number);
+        snapshot = await readIssue(client, repository, number);
       } catch (error) {
         result.issues.push({ issue: key, blockers: [`Issue state unreadable: ${error.message}`], operations: [], cleanup: [] });
         continue;
@@ -415,16 +420,45 @@ export async function run(argv = process.argv.slice(2), env = process.env) {
         continue;
       }
 
-      await writeCanonical(client, repository, number, plan.operations);
-      snapshot = await readIssueSnapshot(client, repository, number);
+      await writeCanonicalState(client, repository, number, plan.operations);
+      snapshot = await readIssue(client, repository, number);
       plan = buildIssuePlan({ ...planArgs, snapshot });
       if (!cleanupEligible({ plan, globalBlockers })) {
         result.issues.push({ ...plan, apply: { status: "cleanup-blocked-after-read-back" } });
         continue;
       }
 
-      await writeCleanup(client, repository, number, plan.cleanup);
-      const finalSnapshot = await readIssueSnapshot(client, repository, number);
+      if (plan.cleanup.length) {
+        let cleanupProject;
+        try {
+          cleanupProject = await readProject(client, config);
+        } catch (error) {
+          result.issues.push({
+            ...plan,
+            blockers: [...plan.blockers, `Project #${config.project.number} refresh failed: ${error.message}`],
+            apply: { status: "cleanup-blocked-after-project-refresh" },
+          });
+          continue;
+        }
+        const cleanupProjectBlockers = verifyProjectSnapshot(config, cleanupProject);
+        const cleanupProjectIndex = new Map((cleanupProject?.items ?? []).filter((item) => item.repository && item.number)
+          .map((item) => [`${item.repository}#${item.number}`, item]));
+        plan = buildIssuePlan({
+          ...planArgs,
+          snapshot,
+          projectItem: cleanupProjectIndex.get(key),
+        });
+        if (cleanupProjectBlockers.length) {
+          plan = { ...plan, blockers: [...plan.blockers, ...cleanupProjectBlockers] };
+        }
+        if (!cleanupEligible({ plan, globalBlockers })) {
+          result.issues.push({ ...plan, apply: { status: "cleanup-blocked-after-project-refresh" } });
+          continue;
+        }
+      }
+
+      await writeCleanupState(client, repository, number, plan.cleanup);
+      const finalSnapshot = await readIssue(client, repository, number);
       const finalPlan = buildIssuePlan({ ...planArgs, snapshot: finalSnapshot });
       if (finalPlan.operations.length || finalPlan.cleanup.length || finalPlan.blockers.length) {
         throw new Error(`${key}: final read-back is not clean`);
@@ -432,12 +466,12 @@ export async function run(argv = process.argv.slice(2), env = process.env) {
       result.issues.push({ ...finalPlan, apply: { status: "complete" } });
       if (args.state) {
         state.issues[key] = { status: "complete", updatedAt: new Date().toISOString() };
-        await writeJson(args.state, state);
+        await persistJson(args.state, state);
       }
     }
   }
 
-  if (args.output) await writeJson(args.output, result);
+  if (args.output) await persistJson(args.output, result);
   else process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   if (globalBlockers.length || result.issues.some((item) => item.blockers?.length || String(item.apply?.status ?? "").includes("blocked"))) {
     process.exitCode = 2;

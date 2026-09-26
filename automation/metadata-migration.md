@@ -31,7 +31,7 @@ CHIPIN_METADATA_APPLY=1 GITHUB_TOKEN=... \
   --output /tmp/chipin-metadata-apply.json
 ```
 
-Apply writes canonical Issue Fields / Issue Type first, re-reads them, and only then removes legacy labels or the PRE-PROD milestone. After cleanup it performs a final read-back. The state file checkpoints completed issues; a resumed run re-reads completed issues and skips them only while they remain clean.
+Apply writes canonical Issue Fields / Issue Type first, re-reads them, then refreshes Project #5 and revalidates field linkage plus the mapped issue's membership/Status before any legacy cleanup. After cleanup it performs a final read-back. The state file checkpoints completed issues only after that final clean read; a resumed run re-reads completed issues and skips them only while they remain clean.
 
 The token used for an operator run needs read access to organization Issue Fields, Issue Types and Project #5, plus issue write access for the backend repository. No credential is stored in this repository.
 
