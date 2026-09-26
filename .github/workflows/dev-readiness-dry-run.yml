@@ -24,16 +24,31 @@ jobs:
           persist-credentials: false
       - name: Check whitespace
         env:
+          EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
-            git show --check --format= "$HEAD_SHA"
-          else
-            git diff --check "$BASE_SHA..$HEAD_SHA"
-          fi
+          case "$EVENT_NAME" in
+            pull_request)
+              git diff --check "$BASE_SHA...$HEAD_SHA"
+              ;;
+            push)
+              if [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+                git show --check --format= "$HEAD_SHA"
+              else
+                git diff --check "$BASE_SHA..$HEAD_SHA"
+              fi
+              ;;
+            workflow_dispatch)
+              git show --check --format= "$HEAD_SHA"
+              ;;
+            *)
+              echo "Unsupported event for whitespace validation: $EVENT_NAME"
+              exit 1
+              ;;
+          esac
       - name: Use Node.js
         uses: actions/setup-node@v7
         with:
