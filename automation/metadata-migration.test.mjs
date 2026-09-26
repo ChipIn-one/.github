@@ -10,7 +10,7 @@ import {
 } from "./metadata-migration.mjs";
 
 const config = {
-  project: { number: 5, expectedItemCount: 98, statusField: "Status", statusValues: ["Backlog", "Todo", "In Progress", "DEV", "PROD", "Done"] },
+  project: { number: 5, statusField: "Status", statusValues: ["Backlog", "Todo", "In Progress", "DEV", "PROD", "Done"] },
   issueFields: {
     Priority: { id: 1, dataType: "single_select", options: ["P0", "P1"] },
     Severity: { id: 2, dataType: "single_select", options: ["Critical", "Major", "Minor"] },
@@ -51,16 +51,17 @@ test("organization field and issue type IDs are authoritative", () => {
   assert.match(verifyOrgSchema(config, fields, types).join("\n"), /Priority id=1/);
 });
 
-test("empty Project options are valid only when linked to the authoritative org field", () => {
+test("Project growth is allowed; field linkage remains authoritative", () => {
   const fields = [
     ...Object.entries(config.issueFields).map(([name, field]) => ({
       name, isIssueField: true, issueField: { fullDatabaseId: String(field.id), name }, options: [],
     })),
     { name: "Status", isIssueField: false, options: config.project.statusValues.map((name) => ({ name })) },
   ];
-  assert.deepEqual(verifyProjectSnapshot(config, { totalCount: 98, fields }), []);
+  assert.deepEqual(verifyProjectSnapshot(config, { totalCount: 99, fields }), []);
+  assert.deepEqual(verifyProjectSnapshot(config, { totalCount: 107, fields }), []);
   fields[0] = { ...fields[0], isIssueField: false, issueField: null };
-  assert.match(verifyProjectSnapshot(config, { totalCount: 98, fields }).join("\n"), /not linked/);
+  assert.match(verifyProjectSnapshot(config, { totalCount: 107, fields }).join("\n"), /not linked/);
 });
 
 test("idempotent canonical state produces no writes", () => {

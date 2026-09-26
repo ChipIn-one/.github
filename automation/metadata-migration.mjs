@@ -47,9 +47,6 @@ export function verifyOrgSchema(config, fields, types) {
 export function verifyProjectSnapshot(config, project) {
   const blockers = [];
   if (!project) return [`Project #${config.project.number} is unreadable`];
-  if (project.totalCount !== config.project.expectedItemCount) {
-    blockers.push(`Project #${config.project.number} item count changed: expected ${config.project.expectedItemCount}, got ${project.totalCount}`);
-  }
   for (const [name, expected] of Object.entries(config.issueFields)) {
     const matches = project.fields.filter((field) => field.name === name);
     if (matches.length !== 1) {

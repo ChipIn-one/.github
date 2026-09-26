@@ -16,7 +16,7 @@ Issue Type IDs are also pinned and re-verified before mutation:
 - Bug: `26867546`
 - Feature: `26867547`
 
-Project #5 is expected to contain 98 items at activation time. The migration verifies that the Project fields named Priority, Severity, and Release scope are issue-field projections whose `issueField.fullDatabaseId` matches the organization field ID. Empty Project option arrays are not used to infer anything and are not a reason to recreate a field. A count change, duplicate/missing field, unreadable field relationship, missing Project membership, unreadable Status, or unreadable native relationship blocks cleanup.
+Project #5 item count is read and reported, but normal project growth does not block migration. Safety is based on the mapped issue's actual Project membership/Status plus authoritative field linkage. The migration verifies that the Project fields named Priority, Severity, and Release scope are issue-field projections whose `issueField.fullDatabaseId` matches the organization field ID. Empty Project option arrays are not used to infer anything and are not a reason to recreate a field. A duplicate/missing field, unreadable field relationship, missing mapped-issue Project membership, unreadable Status, or unreadable native relationship blocks writes and cleanup.
 
 `apply` is intentionally double-gated and is not run by CI:
 
