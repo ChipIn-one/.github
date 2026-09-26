@@ -5,6 +5,7 @@ import {
   buildIssuePlan,
   canonicalWriteEligible,
   cleanupEligible,
+  projectAudit,
   verifyOrgSchema,
   verifyProjectSnapshot,
 } from "./metadata-migration.mjs";
@@ -49,6 +50,11 @@ test("organization field and issue type IDs are authoritative", () => {
   assert.deepEqual(verifyOrgSchema(config, fields, types), []);
   fields[0].id = 999;
   assert.match(verifyOrgSchema(config, fields, types).join("\n"), /Priority id=1/);
+});
+
+test("Project audit reports current count without making growth a blocker", () => {
+  assert.deepEqual(projectAudit(config, { totalCount: 99 }), { number: 5, totalCount: 99 });
+  assert.deepEqual(projectAudit(config, null), { number: 5, totalCount: null });
 });
 
 test("Project growth is allowed; field linkage remains authoritative", () => {
