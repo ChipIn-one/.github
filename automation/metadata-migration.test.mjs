@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   assertApplyActivation,
   buildIssuePlan,
+  canonicalWriteEligible,
   cleanupEligible,
   verifyOrgSchema,
   verifyProjectSnapshot,
@@ -79,16 +80,18 @@ test("cleanup is separate and preserves orthogonal question label", () => {
   assert.equal(plan.cleanup.some((item) => item.label === "question"), false);
 });
 
-test("unreadable native relationships or Status block cleanup", () => {
+test("unreadable native relationships or Status block canonical writes and cleanup", () => {
   const missingRelations = buildIssuePlan({
     config, repository: "ChipIn-one/chipin-backend", number: 101, mapping,
     snapshot: snapshot({ relationsReadable: false }), projectItem,
   });
+  assert.equal(canonicalWriteEligible({ plan: missingRelations }), false);
   assert.equal(cleanupEligible({ plan: missingRelations }), false);
   const missingStatus = buildIssuePlan({
     config, repository: "ChipIn-one/chipin-backend", number: 101, mapping,
     snapshot: snapshot(), projectItem: { ...projectItem, status: null },
   });
+  assert.equal(canonicalWriteEligible({ plan: missingStatus }), false);
   assert.equal(cleanupEligible({ plan: missingStatus }), false);
 });
 

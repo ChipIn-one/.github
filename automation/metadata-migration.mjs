@@ -140,8 +140,12 @@ export function buildIssuePlan({ config, repository, number, mapping, snapshot, 
   };
 }
 
+export function canonicalWriteEligible({ plan, globalBlockers = [] }) {
+  return globalBlockers.length === 0 && plan.blockers.length === 0;
+}
+
 export function cleanupEligible({ plan, globalBlockers = [] }) {
-  return globalBlockers.length === 0 && plan.blockers.length === 0 && plan.operations.length === 0;
+  return canonicalWriteEligible({ plan, globalBlockers }) && plan.operations.length === 0;
 }
 
 export class GitHubClient {
@@ -394,8 +398,9 @@ export async function run(argv = process.argv.slice(2), env = process.env) {
         result.issues.push({ ...plan, apply: { status: "resumed-complete" } });
         continue;
       }
-      if (globalBlockers.length) {
-        result.issues.push({ ...plan, apply: { status: "blocked", reason: "global preflight failed" } });
+      if (!canonicalWriteEligible({ plan, globalBlockers })) {
+        const reason = globalBlockers.length ? "global preflight failed" : "issue preflight failed";
+        result.issues.push({ ...plan, apply: { status: "blocked", reason } });
         continue;
       }
 
