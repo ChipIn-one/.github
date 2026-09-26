@@ -1,34 +1,29 @@
-# DEV readiness policy evaluator
+# GitHub coordination automation
 
-This directory contains the pure, read-only decision logic for the future ChipIn Project `→ DEV` automation.
+This directory contains narrow, fail-closed automation for ChipIn GitHub coordination.
 
-This PR is the policy layer only. It does not call GitHub APIs and cannot mutate issues, Projects, fields, statuses, PRs, or relationships. A later read-only adapter will feed real GitHub issue/PR/Project state into this evaluator before any live mutation is considered.
+## DEV readiness
 
-## States
+`dev-readiness.mjs` is the pure read-only policy evaluator for the future Project `→ DEV` automation. It does not call GitHub APIs or mutate state. Its fixture/unit tests run in the repository-local `DEV readiness policy tests` workflow.
 
-- `READY_FOR_DEV` — deterministic delivery requirements are integrated and the current Project status is still before `DEV`.
-- `NOT_READY` — no DEV transition should happen now; required work may be incomplete, the task may be manual/non-code, or the item may already be at a terminal/integrated status.
-- `BLOCKED_UNKNOWN` — required structured state is missing, unreadable, ambiguous, or unsupported.
-- `INCONSISTENT` — an item already at `DEV` or `PROD` no longer satisfies DEV readiness and needs human review.
+## Metadata migration
 
-## Integration branches
+`metadata-migration.mjs` implements task #6 / backend #117 as an auditable, resumable `plan` / `apply` migration.
 
-- frontend: `dev`
-- backend: `develop`
-- knowledge base: `main`
+- Organization Issue Field IDs and Issue Type IDs are pinned in `metadata-migration.config.json` and verified from live organization metadata before apply.
+- Project #5 Priority/Severity/Release scope fields must prove their `issueField.fullDatabaseId` relationship to those organization fields; display names or empty Project option arrays are never treated as authority.
+- Issue Type, Project membership, native dependencies/parent/sub-issues, and Project Status are read independently.
+- canonical writes are re-read before any legacy cleanup.
+- inaccessible or inconsistent structured state fails closed.
+- `apply` requires both `--activate issue-117` and `CHIPIN_METADATA_APPLY=1`; CI never supplies either.
+- a state file checkpoints completed issues for resumable operator runs.
 
-A blocking issue is considered satisfied for DEV readiness when the blocker itself is closed or its readable Project status is `DEV`, `PROD`, or `Done`. An unresolved/open blocker without an integrated Project status still blocks.
-
-Deployment and informational `References` never gate `DEV`. `PROD`, `Done`, and parent closure remain manual in v1, and the evaluator never proposes a transition back from those statuses.
-
-## Why not Boardly
-
-Boardly was reviewed before implementing this evaluator. It provides GitHub Projects v2 dry-run and sub-issue gating, but its built-in model does not express ChipIn's required Development-linked PR integration checks against repository-specific integration branches or the post-DEV inconsistency rule. Reusing it would require a larger customization layer than this isolated pure evaluator.
+See [metadata-migration.md](./metadata-migration.md) for the prepared diff, permissions, and activation procedure.
 
 ## Tests
-
-The GitHub Actions workflow runs on pull requests that touch `automation/**` or the workflow itself, and can also be started manually. It has only `contents: read` permission.
 
 ```sh
 node --test automation/*.test.mjs
 ```
+
+The tests include the existing DEV-readiness fixtures, migration safety/idempotency coverage, and a consistency check for all supported shared Issue Forms.

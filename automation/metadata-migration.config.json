@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "organization": "ChipIn-one",
+  "project": {
+    "number": 5,
+    "expectedItemCount": 98,
+    "statusField": "Status",
+    "statusValues": ["Backlog", "Todo", "In Progress", "DEV", "PROD", "Done"]
+  },
+  "issueFields": {
+    "Priority": {"id": 46621432, "dataType": "single_select", "options": ["P0", "P1", "P2", "P3"]},
+    "Severity": {"id": 46621453, "dataType": "single_select", "options": ["Critical", "Major", "Minor"]},
+    "Release scope": {"id": 46621522, "dataType": "single_select", "options": ["PRE-PROD", "POST-PROD"]}
+  },
+  "issueTypes": {"Task": 26867545, "Bug": 26867546, "Feature": 26867547},
+  "repositories": {
+    "ChipIn-one/chipin-backend": {
+      "sourceIssue": "ChipIn-one/chipin-backend#117",
+      "preserveLabels": ["question"],
+      "issues": {
+        "9":{"priority":"P3","severity":null,"releaseScope":"POST-PROD","issueType":"Task"},
+        "91":{"priority":"P0","severity":"Critical","releaseScope":"PRE-PROD","issueType":"Bug"},
+        "92":{"priority":"P3","severity":null,"releaseScope":"POST-PROD","issueType":"Feature"},
+        "93":{"priority":"P2","severity":null,"releaseScope":"POST-PROD","issueType":"Feature"},
+        "94":{"priority":"P1","severity":null,"releaseScope":"PRE-PROD","issueType":"Task"},
+        "95":{"priority":"P2","severity":null,"releaseScope":"POST-PROD","issueType":"Feature"},
+        "96":{"priority":"P1","severity":"Major","releaseScope":"PRE-PROD","issueType":"Bug"},
+        "97":{"priority":"P2","severity":null,"releaseScope":"POST-PROD","issueType":"Feature"},
+        "98":{"priority":"P2","severity":"Major","releaseScope":"POST-PROD","issueType":"Bug"},
+        "99":{"priority":"P2","severity":"Major","releaseScope":"POST-PROD","issueType":"Bug"},
+        "100":{"priority":"P3","severity":"Minor","releaseScope":"POST-PROD","issueType":"Bug"},
+        "101":{"priority":"P2","severity":null,"releaseScope":"POST-PROD","issueType":"Feature"},
+        "102":{"priority":"P1","severity":null,"releaseScope":"PRE-PROD","issueType":"Task"},
+        "103":{"priority":"P3","severity":null,"releaseScope":"POST-PROD","issueType":"Task"},
+        "104":{"priority":"P3","severity":null,"releaseScope":"POST-PROD","issueType":"Task"},
+        "105":{"priority":"P3","severity":null,"releaseScope":"POST-PROD","issueType":"Task"},
+        "106":{"priority":"P2","severity":null,"releaseScope":"POST-PROD","issueType":"Task"},
+        "107":{"priority":"P3","severity":null,"releaseScope":"POST-PROD","issueType":"Task"},
+        "108":{"priority":"P3","severity":null,"releaseScope":"POST-PROD","issueType":"Task"},
+        "109":{"priority":"P2","severity":null,"releaseScope":"POST-PROD","issueType":"Task"},
+        "110":{"priority":"P3","severity":null,"releaseScope":"POST-PROD","issueType":"Task"},
+        "111":{"priority":"P3","severity":null,"releaseScope":"POST-PROD","issueType":"Task"},
+        "112":{"priority":"P3","severity":null,"releaseScope":"POST-PROD","issueType":"Task"},
+        "115":{"priority":"P2","severity":null,"releaseScope":"POST-PROD","issueType":"Task"}
+      }
+    }
+  }
+}
