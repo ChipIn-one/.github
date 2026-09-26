@@ -6,6 +6,7 @@ import {
   canonicalWriteEligible,
   cleanupEligible,
   projectAudit,
+  run,
   verifyOrgSchema,
   verifyProjectSnapshot,
 } from "./metadata-migration.mjs";
@@ -109,4 +110,171 @@ test("canonical mismatch must be read back before cleanup", () => {
   });
   assert.equal(cleanupEligible({ plan }), false);
   assert.equal(plan.operations[0].field, "Priority");
+});
+
+
+function lifecycleConfig() {
+  return {
+    ...config,
+    organization: "ChipIn-one",
+    repositories: {
+      "ChipIn-one/chipin-backend": {
+        preserveLabels: ["question"],
+        issues: { "101": mapping },
+      },
+    },
+  };
+}
+
+function organizationClient() {
+  const fields = [
+    { id: 1, name: "Priority", data_type: "single_select", options: [{ name: "P0" }, { name: "P1" }] },
+    { id: 2, name: "Severity", data_type: "single_select", options: [{ name: "Critical" }, { name: "Major" }, { name: "Minor" }] },
+    { id: 3, name: "Release scope", data_type: "single_select", options: [{ name: "PRE-PROD" }, { name: "POST-PROD" }] },
+  ];
+  const types = [{ id: 10, name: "Task" }, { id: 11, name: "Bug" }, { id: 12, name: "Feature" }];
+  return {
+    async listAll(path) {
+      assert.match(path, /issue-fields/);
+      return fields;
+    },
+    async request(path) {
+      assert.match(path, /issue-types/);
+      return types;
+    },
+  };
+}
+
+function projectSnapshot({ includeIssue = true, status = "Todo" } = {}) {
+  return {
+    totalCount: 107,
+    fields: [
+      ...Object.entries(config.issueFields).map(([name, field]) => ({
+        name,
+        isIssueField: true,
+        issueField: { fullDatabaseId: String(field.id), name },
+        options: [],
+      })),
+      { name: "Status", isIssueField: false, options: config.project.statusValues.map((name) => ({ name })) },
+    ],
+    items: includeIssue ? [{ repository: "ChipIn-one/chipin-backend", number: 101, status }] : [],
+  };
+}
+
+test("apply lifecycle re-reads canonical state and refreshes Project before cleanup", async () => {
+  const events = [];
+  let issueReads = 0;
+  let projectReads = 0;
+  const issueSnapshots = [
+    snapshot({ priority: "P0", labels: ["P1", "type: enhancement"], milestone: { title: "PRE-PROD" } }),
+    snapshot({ labels: ["P1", "type: enhancement"], milestone: { title: "PRE-PROD" } }),
+    snapshot(),
+  ];
+  const result = await run(["apply", "--activate", "issue-117"], { CHIPIN_METADATA_APPLY: "1" }, {
+    config: lifecycleConfig(),
+    state: { schemaVersion: 1, issues: {} },
+    client: organizationClient(),
+    readProjectSnapshot: async () => {
+      projectReads += 1;
+      events.push(`project:${projectReads}`);
+      return projectSnapshot();
+    },
+    readIssueSnapshot: async () => {
+      issueReads += 1;
+      events.push(`issue:${issueReads}`);
+      return issueSnapshots[issueReads - 1];
+    },
+    writeCanonical: async (_client, _repository, _number, operations) => {
+      events.push(`canonical:${operations.length}`);
+    },
+    writeCleanup: async (_client, _repository, _number, cleanup) => {
+      events.push(`cleanup:${cleanup.length}`);
+    },
+    writeJson: async () => {},
+  });
+
+  assert.equal(result.issues[0].apply.status, "complete");
+  assert.deepEqual(events, [
+    "project:1",
+    "issue:1",
+    "canonical:1",
+    "issue:2",
+    "project:2",
+    "cleanup:3",
+    "issue:3",
+  ]);
+});
+
+test("resume trusts the checkpoint only after a fresh clean read", async () => {
+  let canonicalWrites = 0;
+  let cleanupWrites = 0;
+  const result = await run(["apply", "--activate", "issue-117"], { CHIPIN_METADATA_APPLY: "1" }, {
+    config: lifecycleConfig(),
+    state: { schemaVersion: 1, issues: { "ChipIn-one/chipin-backend#101": { status: "complete" } } },
+    client: organizationClient(),
+    readProjectSnapshot: async () => projectSnapshot(),
+    readIssueSnapshot: async () => snapshot(),
+    writeCanonical: async () => { canonicalWrites += 1; },
+    writeCleanup: async () => { cleanupWrites += 1; },
+    writeJson: async () => {},
+  });
+
+  assert.equal(result.issues[0].apply.status, "resumed-complete");
+  assert.equal(canonicalWrites, 0);
+  assert.equal(cleanupWrites, 0);
+});
+
+test("stale Project membership blocks cleanup after canonical read-back", async () => {
+  const originalExitCode = process.exitCode;
+  try {
+    let projectReads = 0;
+    let cleanupWrites = 0;
+    const legacy = snapshot({ labels: ["P1"] });
+    const result = await run(["apply", "--activate", "issue-117"], { CHIPIN_METADATA_APPLY: "1" }, {
+      config: lifecycleConfig(),
+      state: { schemaVersion: 1, issues: {} },
+      client: organizationClient(),
+      readProjectSnapshot: async () => {
+        projectReads += 1;
+        return projectReads === 1 ? projectSnapshot() : projectSnapshot({ includeIssue: false });
+      },
+      readIssueSnapshot: async () => legacy,
+      writeCanonical: async () => {},
+      writeCleanup: async () => { cleanupWrites += 1; },
+      writeJson: async () => {},
+    });
+
+    assert.equal(result.issues[0].apply.status, "cleanup-blocked-after-project-refresh");
+    assert.match(result.issues[0].blockers.join("\n"), /membership is unreadable or missing/);
+    assert.equal(cleanupWrites, 0);
+  } finally {
+    process.exitCode = originalExitCode;
+  }
+});
+
+test("partial cleanup failure never checkpoints completion", async () => {
+  const state = { schemaVersion: 1, issues: {} };
+  let issueReads = 0;
+  await assert.rejects(
+    run(["apply", "--activate", "issue-117"], { CHIPIN_METADATA_APPLY: "1" }, {
+      config: lifecycleConfig(),
+      state,
+      client: organizationClient(),
+      readProjectSnapshot: async () => projectSnapshot(),
+      readIssueSnapshot: async () => {
+        issueReads += 1;
+        return snapshot({ labels: ["P1"] });
+      },
+      writeCanonical: async () => {},
+      writeCleanup: async () => {
+        throw new Error("simulated partial cleanup failure");
+      },
+      writeJson: async () => {
+        throw new Error("checkpoint must not be written");
+      },
+    }),
+    /simulated partial cleanup failure/,
+  );
+  assert.deepEqual(state.issues, {});
+  assert.equal(issueReads, 2);
 });
