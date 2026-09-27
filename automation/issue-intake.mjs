@@ -335,13 +335,26 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
           if (state.classification && !sameClassification(state.classification, checked.classification)) throw new Error('State classification differs from this retry.');
           if (state.title && state.title !== args.title) throw new Error('State title differs from this retry.');
           result.applied.push('resume-existing-issue');
+        } else if (state) {
+          throw new Error('Create checkpoint exists without issue identity; creation outcome is uncertain. Recover the issue manually before retrying to avoid a duplicate.');
         } else {
+          const writeState = overrides.writeCreateState || atomicWriteJson;
+          await writeState(args.state, {
+            schemaVersion: 1,
+            repository: args.target,
+            classification: checked.classification,
+            title: args.title,
+            phase: 'reserved-before-create',
+            reservedAt: new Date().toISOString(),
+          });
+          result.applied.push('create-checkpoint-reserved');
+
           let body = args.body || '';
           if (args.bodyFile) body = await (overrides.readFile || readFile)(resolve(args.bodyFile), 'utf8');
           const created = await (overrides.createIssue || createIssue)(client, config, args.target, checked.classification, { title: args.title, body });
           if (!Number.isInteger(created?.number)) throw new Error('Create API did not return an issue number.');
           target = { repository: args.target, number: created.number };
-          await (overrides.writeCreateState || atomicWriteJson)(args.state, {
+          await writeState(args.state, {
             schemaVersion: 1, repository: args.target, issueRef: key(args.target, created.number),
             issueUrl: created.html_url || created.url || null, classification: checked.classification,
             title: args.title, createdAt: new Date().toISOString(),
