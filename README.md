@@ -45,7 +45,7 @@ Every workflow run writes `dev-readiness-transition.json` and uploads it from th
 
 Receipt outcomes deliberately distinguish normal scheduling from uncertain mutations:
 
-- `complete`, clean `noop` / `noop-after-refresh`, routine `NOT_READY`, and `skipped-write-cap` do not make an `--all` scan fail;
+- `complete`, clean `noop` / `noop-after-refresh`, routine `NOT_READY`, and `skipped-write-cap` do not make an `--all` scan fail; an exact apply that skips an explicitly requested issue because of the cap is reported as blocked/nonzero;
 - `applied-but-read-back-inconsistent`, `applied-read-back-uncertain`, `mutation-outcome-uncertain`, and operational read exceptions require attention and make the run nonzero;
 - before a mutation, the writer persists `mutation-intent-recorded`; after GitHub acknowledges the expected Project item it persists `mutation-returned-read-back-pending` before final verification.
 
