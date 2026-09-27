@@ -1,0 +1,128 @@
+name: Issue metadata finalizer
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_ref:
+        description: "Exact issue identity (owner/repository#number) created from a shared Issue Form"
+        required: true
+        type: string
+      issue_type:
+        description: "Canonical organization Issue Type"
+        required: true
+        type: choice
+        options:
+          - Task
+          - Feature
+          - Bug
+      priority:
+        description: "Canonical organization Priority"
+        required: true
+        type: choice
+        options:
+          - P0
+          - P1
+          - P2
+          - P3
+      release_scope:
+        description: "Canonical organization Release scope"
+        required: true
+        type: choice
+        options:
+          - PRE-PROD
+          - POST-PROD
+      severity:
+        description: "Severity; Bug requires a value, use none when not applicable"
+        required: true
+        default: none
+        type: choice
+        options:
+          - none
+          - Critical
+          - Major
+          - Minor
+      apply:
+        description: "Apply missing canonical metadata/project state (false = read-only plan)"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-metadata-finalizer
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ISSUE_REF: ${{ inputs.issue_ref }}
+      ISSUE_TYPE: ${{ inputs.issue_type }}
+      PRIORITY: ${{ inputs.priority }}
+      RELEASE_SCOPE: ${{ inputs.release_scope }}
+      SEVERITY: ${{ inputs.severity }}
+      OUTPUT_PATH: issue-intake-receipt.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.21.0'
+
+      - name: Run intake tests
+        run: node --test automation/*.test.mjs
+
+      - name: Read-only plan
+        if: inputs.apply != true
+        env:
+          GITHUB_TOKEN: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${GITHUB_TOKEN:-}" ]; then
+            echo "CHIPIN_DEV_READ_TOKEN is not configured."
+            exit 1
+          fi
+          node automation/issue-intake.mjs plan reconcile "$ISSUE_REF" \
+            --type "$ISSUE_TYPE" \
+            --priority "$PRIORITY" \
+            --release-scope "$RELEASE_SCOPE" \
+            --severity "$SEVERITY" \
+            --output "$OUTPUT_PATH"
+
+      - name: Guarded apply
+        if: inputs.apply == true
+        env:
+          GITHUB_TOKEN: ${{ secrets.CHIPIN_ISSUE_WRITE_TOKEN }}
+          CHIPIN_ISSUE_WRITE: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${GITHUB_TOKEN:-}" ]; then
+            echo "CHIPIN_ISSUE_WRITE_TOKEN is not configured."
+            exit 1
+          fi
+          node automation/issue-intake.mjs apply reconcile "$ISSUE_REF" \
+            --type "$ISSUE_TYPE" \
+            --priority "$PRIORITY" \
+            --release-scope "$RELEASE_SCOPE" \
+            --severity "$SEVERITY" \
+            --activate issue-intake-v1 \
+            --output "$OUTPUT_PATH"
+
+      - name: Upload receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-intake-${{ github.run_id }}
+          path: issue-intake-receipt.json
+          if-no-files-found: warn
+          retention-days: 30
