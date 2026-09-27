@@ -19,6 +19,8 @@ for (const [file, issueType] of Object.entries(forms)) {
     assert.match(text, new RegExp(`^type: ${issueType}$`, "m"));
     assert.doesNotMatch(text, /^labels:/m);
     assert.doesNotMatch(text, /^milestone:/m);
+    assert.doesNotMatch(text, /^projects:/m);
+    assert.match(text, /Issue metadata finalizer/);
     for (const heading of ["Problem", "Outcome", "Acceptance", "Dependencies", "References"]) {
       assert.match(text, new RegExp(`label: ${heading}`));
     }
