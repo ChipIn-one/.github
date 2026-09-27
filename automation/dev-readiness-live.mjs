@@ -283,18 +283,23 @@ export async function evaluateLiveIssue(client, config, liveContext, repository,
   const observedAt = new Date().toISOString();
   const evidence = { issue: key, parent: null, developmentBranches: [], developmentPullRequests: [] };
   const adapterBlockers = [...liveContext.schemaBlockers];
+  const readErrors = [];
   let snapshot = null;
   let development = null;
 
   try {
     snapshot = await readIssueSnapshot(client, repository, number);
   } catch (error) {
-    adapterBlockers.push(`Issue state unreadable: ${error.message}`);
+    const message = `Issue state unreadable: ${error.message}`;
+    readErrors.push(message);
+    adapterBlockers.push(message);
   }
   try {
     development = await readDevelopmentSnapshot(client, repository, number);
   } catch (error) {
-    adapterBlockers.push(`Development relationships unreadable: ${error.message}`);
+    const message = `Development relationships unreadable: ${error.message}`;
+    readErrors.push(message);
+    adapterBlockers.push(message);
   }
 
   const metadata = snapshot ? canonicalMetadata(config, snapshot) : { workKind: null, fields: {}, blockers: ['Canonical metadata unreadable.'] };
@@ -304,7 +309,14 @@ export async function evaluateLiveIssue(client, config, liveContext, repository,
   else if (!projectItem.status) adapterBlockers.push(`Project #${config.project.number} Status is unreadable.`);
 
   let normalizedDevelopment = { pullRequests: [{ kind: 'pr', readable: false, state: null, baseBranch: null }], branches: [] };
-  if (development) normalizedDevelopment = await normalizeDevelopment(client, repository, development);
+  if (development) {
+    normalizedDevelopment = await normalizeDevelopment(client, repository, development);
+    if (normalizedDevelopment.pullRequests.some((item) => item.readable === false)) {
+      const message = 'Development evidence is unreadable.';
+      readErrors.push(message);
+      adapterBlockers.push(message);
+    }
+  }
   evidence.developmentPullRequests = normalizedDevelopment.pullRequests;
   evidence.developmentBranches = normalizedDevelopment.branches;
   evidence.parent = snapshot?.parent ?? null;
@@ -336,6 +348,7 @@ export async function evaluateLiveIssue(client, config, liveContext, repository,
     issue: key,
     decision,
     adapterBlockers,
+    readErrors,
     canonical: metadata.fields,
     projectStatus: projectItem?.status ?? null,
     evidence,

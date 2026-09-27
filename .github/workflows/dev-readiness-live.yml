@@ -71,11 +71,26 @@ jobs:
           console.log(`generatedAt: ${data.generatedAt}`);
           console.log(`Project #${data.project?.number}: ${data.project?.totalCount ?? 'unknown'} items`);
           console.log(`schema blockers: ${data.schemaBlockers.length}`);
-          for (const item of data.decisions ?? []) {
-            console.log(`${item.issue}: ${item.decision?.state ?? 'UNKNOWN'} (Project: ${item.projectStatus ?? 'unreadable'}, blockers: ${item.adapterBlockers?.length ?? 0})`);
+          if (!Array.isArray(data.decisions) || data.decisions.length === 0) {
+            throw new Error('Live receipt contains no decisions');
           }
-          if (data.schemaBlockers.length > 0) {
-            console.error(JSON.stringify(data.schemaBlockers, null, 2));
+          const readFailures = [];
+          for (const item of data.decisions) {
+            if (!Array.isArray(item.readErrors)) {
+              throw new Error(`${item.issue ?? 'unknown issue'}: readErrors is unreadable`);
+            }
+            console.log(`${item.issue}: ${item.decision?.state ?? 'UNKNOWN'} (Project: ${item.projectStatus ?? 'unreadable'}, blockers: ${item.adapterBlockers?.length ?? 0}, read errors: ${item.readErrors.length})`);
+            if (item.readErrors.length > 0) {
+              readFailures.push({ issue: item.issue, readErrors: item.readErrors });
+            }
+          }
+          if (data.schemaBlockers.length > 0 || readFailures.length > 0) {
+            if (data.schemaBlockers.length > 0) {
+              console.error('Schema blockers:', JSON.stringify(data.schemaBlockers, null, 2));
+            }
+            if (readFailures.length > 0) {
+              console.error('Requested issue read failures:', JSON.stringify(readFailures, null, 2));
+            }
             process.exitCode = 2;
           }
           NODE
