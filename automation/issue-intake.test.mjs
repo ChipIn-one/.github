@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import {
   buildReconcilePlan,
+  reserveCreateState,
   run,
   validateClassification,
   verifyFinalState,
@@ -242,7 +246,7 @@ test('unwritable create checkpoint fails before the API create call', async () =
     client: {},
     readGlobalContext: async () => ({ project: project(), blockers: [] }),
     readCreateState: async () => null,
-    writeCreateState: async () => { throw new Error('EACCES checkpoint'); },
+    reserveCreateState: async () => { throw new Error('EACCES checkpoint'); },
     createIssue: async () => {
       createCalls += 1;
       return { number: 999 };
@@ -253,6 +257,59 @@ test('unwritable create checkpoint fails before the API create call', async () =
   assert.equal(createCalls, 0);
   assert.equal(result.action, 'incomplete');
   assert.match(result.blockers.join('\n'), /EACCES checkpoint/);
+});
+
+test('create reservation is exclusive across concurrent claimants', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'chipin-issue-intake-'));
+  const statePath = join(directory, 'state.json');
+  const value = {
+    schemaVersion: 1,
+    repository: 'ChipIn-one/chipin-frontend',
+    classification,
+    title: 'Concurrent create',
+    phase: 'reserved-before-create',
+  };
+
+  try {
+    const settled = await Promise.allSettled([
+      reserveCreateState(statePath, value),
+      reserveCreateState(statePath, value),
+    ]);
+    assert.equal(settled.filter((entry) => entry.status === 'fulfilled').length, 1);
+    const rejected = settled.filter((entry) => entry.status === 'rejected');
+    assert.equal(rejected.length, 1);
+    assert.equal(rejected[0].reason?.code, 'EEXIST');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('unreadable body file fails before checkpoint reservation or API create', async () => {
+  let reserveCalls = 0;
+  let createCalls = 0;
+  const result = await withoutExitLeak(() => run([
+    ...argsFor('create', 'ChipIn-one/chipin-frontend'),
+    '--title', 'Unreadable body',
+    '--body-file', '/missing/body.md',
+    '--state', '/tmp/state.json',
+  ], { CHIPIN_ISSUE_WRITE: '1' }, {
+    config,
+    client: {},
+    readGlobalContext: async () => ({ project: project(), blockers: [] }),
+    readCreateState: async () => null,
+    readFile: async () => { throw new Error('ENOENT body'); },
+    reserveCreateState: async () => { reserveCalls += 1; },
+    createIssue: async () => {
+      createCalls += 1;
+      return { number: 999 };
+    },
+    writeFile: async () => {},
+  }));
+
+  assert.equal(reserveCalls, 0);
+  assert.equal(createCalls, 0);
+  assert.equal(result.action, 'incomplete');
+  assert.match(result.blockers.join('\n'), /ENOENT body/);
 });
 
 test('reserved checkpoint without identity fails closed instead of creating a duplicate', async () => {
