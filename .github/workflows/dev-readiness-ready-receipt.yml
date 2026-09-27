@@ -1,0 +1,61 @@
+name: DEV readiness READY receipt
+
+on:
+  push:
+    branches:
+      - chore/07-live-acceptance
+    paths:
+      - .github/workflows/dev-readiness-ready-receipt.yml
+
+permissions:
+  contents: read
+
+jobs:
+  ready-receipt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
+      OUTPUT_PATH: dev-readiness-ready-receipt.json
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24.21.0'
+
+      - name: Run live READY receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          node automation/dev-readiness-live.mjs ChipIn-one/chipin-backend#9 --output "$OUTPUT_PATH"
+
+      - name: Require READY_FOR_DEV
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - "$OUTPUT_PATH" <<'NODE'
+          const fs = require('node:fs');
+          const data = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const item = data.decisions?.[0];
+          console.log(`generatedAt: ${data.generatedAt}`);
+          console.log(`Project #${data.project?.number}: ${data.project?.totalCount ?? 'unknown'} items`);
+          console.log(`schema blockers: ${data.schemaBlockers?.length ?? 'unknown'}`);
+          console.log(`${item?.issue}: ${item?.decision?.state ?? 'UNKNOWN'} (Project: ${item?.projectStatus ?? 'unreadable'}, read errors: ${item?.readErrors?.length ?? 'unknown'})`);
+          if (data.readOnly !== true) throw new Error('receipt is not read-only');
+          if ((data.schemaBlockers ?? []).length) process.exit(2);
+          if (!item || (item.readErrors ?? []).length) process.exit(2);
+          if (item.decision?.state !== 'READY_FOR_DEV') process.exit(3);
+          NODE
+
+      - name: Upload READY receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-readiness-ready-receipt-${{ github.run_id }}
+          path: dev-readiness-ready-receipt.json
+          if-no-files-found: warn
+          retention-days: 30
