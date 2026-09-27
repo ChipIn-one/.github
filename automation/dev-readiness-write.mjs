@@ -14,6 +14,13 @@ const PRE_DEV_STATUSES = new Set(['Backlog', 'Todo', 'In Progress']);
 const MANUAL_TERMINAL_STATUSES = new Set(['PROD', 'Done']);
 const APPLY_ACTIVATION = 'dev-status-v1';
 const APPLY_ENV = 'CHIPIN_DEV_WRITE';
+const ATTENTION_APPLY_STATUSES = new Set([
+  'operational-read-failed',
+  'mutation-outcome-uncertain',
+  'applied-read-back-uncertain',
+  'applied-but-read-back-inconsistent',
+]);
+const EXACT_BLOCKED_APPLY_STATUSES = new Set(['blocked', 'blocked-after-refresh']);
 
 const UPDATE_STATUS_MUTATION = `
 mutation DevReadinessSetStatus(
@@ -252,6 +259,9 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
   const evaluate = overrides.evaluateLiveIssue ?? evaluateLiveIssue;
   const mutate = overrides.writeDevStatus ?? writeDevStatus;
   const persist = overrides.writeFile ?? writeFile;
+  const setExitCode = overrides.setExitCode ?? ((code) => {
+    process.exitCode = code;
+  });
 
   const initialContext = await readContext(client, config);
   const preflightBlockers = args.all ? scanPreflightBlockers(initialContext) : [];
@@ -261,6 +271,7 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
     mode: args.mode,
     readOnly: args.mode === 'plan',
     generatedAt: new Date().toISOString(),
+    outcome: 'in-progress',
     preflightBlockers,
     safety: {
       mutation: 'Project #5 Status only',
@@ -271,11 +282,43 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
     entries: [],
   };
 
-  let writes = 0;
+  const persistReceipt = async () => {
+    if (!args.output) return;
+    await persist(resolve(args.output), `${JSON.stringify(result, null, 2)}\n`, 'utf8');
+  };
+
+  const recordOperationalReadFailure = async (target, error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    result.entries.push({
+      issue: issueKey(target.repository, target.number),
+      action: 'blocked',
+      from: null,
+      to: 'DEV',
+      decision: null,
+      blockers: [`Operational read failure: ${message}`],
+      apply: {
+        status: 'operational-read-failed',
+        error: message,
+        note: 'No mutation was attempted for this item.',
+      },
+    });
+    result.outcome = 'attention-required';
+    await persistReceipt();
+  };
+
+  let writeAttempts = 0;
   for (const target of targets) {
-    const planningContext = args.mode === 'plan' ? initialContext : await readContext(client, config);
-    const evaluation = await evaluateOne({ client, config, liveContext: planningContext, target, evaluate });
-    const plan = buildDevTransitionPlan({ config, liveContext: planningContext, evaluation });
+    let planningContext;
+    let evaluation;
+    let plan;
+    try {
+      planningContext = args.mode === 'plan' ? initialContext : await readContext(client, config);
+      evaluation = await evaluateOne({ client, config, liveContext: planningContext, target, evaluate });
+      plan = buildDevTransitionPlan({ config, liveContext: planningContext, evaluation });
+    } catch (error) {
+      await recordOperationalReadFailure(target, error);
+      continue;
+    }
 
     if (args.mode === 'plan') {
       result.entries.push({ ...plan, apply: { status: 'not-requested' } });
@@ -287,20 +330,32 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
       continue;
     }
 
-    if (writes >= 1) {
+    if (writeAttempts >= 1) {
       result.entries.push({
         ...plan,
         action: 'blocked',
         blockers: ['Per-run write cap reached; no additional Project mutation is allowed.'],
-        apply: { status: 'blocked' },
+        apply: {
+          status: 'skipped-write-cap',
+          note: 'Normal per-run throttling; a later run may evaluate this item again.',
+        },
       });
       continue;
     }
 
-    // Fresh read/evaluation immediately before the single allowed mutation.
-    const preWriteContext = await readContext(client, config);
-    const preWriteEvaluation = await evaluateOne({ client, config, liveContext: preWriteContext, target, evaluate });
-    const preWritePlan = buildDevTransitionPlan({ config, liveContext: preWriteContext, evaluation: preWriteEvaluation });
+    let preWriteContext;
+    let preWriteEvaluation;
+    let preWritePlan;
+    try {
+      // Fresh read/evaluation immediately before the single allowed mutation.
+      preWriteContext = await readContext(client, config);
+      preWriteEvaluation = await evaluateOne({ client, config, liveContext: preWriteContext, target, evaluate });
+      preWritePlan = buildDevTransitionPlan({ config, liveContext: preWriteContext, evaluation: preWriteEvaluation });
+    } catch (error) {
+      await recordOperationalReadFailure(target, error);
+      continue;
+    }
+
     if (preWritePlan.action !== 'write') {
       result.entries.push({
         ...preWritePlan,
@@ -309,41 +364,94 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
       continue;
     }
 
-    await mutate(client, preWritePlan);
-    writes += 1;
+    const entry = {
+      ...preWritePlan,
+      apply: {
+        status: 'mutation-intent-recorded',
+        note: 'A Project Status mutation is about to be attempted. If this is the last durable receipt state, do not infer whether GitHub applied it; re-read live state before any retry.',
+      },
+    };
+    result.entries.push(entry);
 
-    // Read back after mutation. Never auto-regress if required work changed concurrently.
-    const readBackContext = await readContext(client, config);
-    const readBackEvaluation = await evaluateOne({ client, config, liveContext: readBackContext, target, evaluate });
-    const readBackBlockers = verifyAppliedDev(readBackEvaluation);
-    if (readBackBlockers.length) {
-      result.entries.push({
-        ...preWritePlan,
-        blockers: readBackBlockers,
-        apply: {
-          status: 'applied-but-read-back-inconsistent',
-          note: 'No automatic regression is allowed; operator review is required.',
-        },
-      });
+    // Persist exact identity and mutation intent before entering the uncertain write window.
+    await persistReceipt();
+    writeAttempts += 1;
+
+    try {
+      await mutate(client, preWritePlan);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      entry.blockers = [...(entry.blockers ?? []), `Mutation outcome is uncertain: ${message}`];
+      entry.apply = {
+        status: 'mutation-outcome-uncertain',
+        error: message,
+        note: 'The mutation call did not complete cleanly. Do not retry from this receipt; re-read the exact live issue and Project Status first.',
+      };
+      result.outcome = 'attention-required';
+      await persistReceipt();
       continue;
     }
 
-    result.entries.push({
-      ...preWritePlan,
-      apply: { status: 'complete', observedStatus: 'DEV' },
-    });
+    entry.apply = {
+      status: 'mutation-returned-read-back-pending',
+      note: 'The mutation call returned the expected Project item id; post-write verification is still pending.',
+    };
+    await persistReceipt();
+
+    let readBackEvaluation;
+    try {
+      // Read back after mutation. Never auto-regress if required work changed concurrently.
+      const readBackContext = await readContext(client, config);
+      readBackEvaluation = await evaluateOne({ client, config, liveContext: readBackContext, target, evaluate });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      entry.blockers = [...(entry.blockers ?? []), `Post-write read-back failed: ${message}`];
+      entry.apply = {
+        status: 'applied-read-back-uncertain',
+        error: message,
+        note: 'The write returned successfully, but final live state is unknown. Never auto-regress or repeat the mutation from this receipt; re-read the exact live issue first.',
+      };
+      result.outcome = 'attention-required';
+      await persistReceipt();
+      continue;
+    }
+
+    const readBackBlockers = verifyAppliedDev(readBackEvaluation);
+    if (readBackBlockers.length) {
+      entry.blockers = readBackBlockers;
+      entry.apply = {
+        status: 'applied-but-read-back-inconsistent',
+        note: 'No automatic regression is allowed; operator review and a fresh live read are required before any retry.',
+      };
+      result.outcome = 'attention-required';
+      await persistReceipt();
+      continue;
+    }
+
+    entry.apply = { status: 'complete', observedStatus: 'DEV' };
+    await persistReceipt();
+  }
+
+  const exactApply = args.mode === 'apply' && !args.all;
+  const attentionRequired = preflightBlockers.length > 0
+    || result.entries.some((entry) => ATTENTION_APPLY_STATUSES.has(entry.apply?.status));
+  const blockedExactApply = exactApply
+    && result.entries.some((entry) => EXACT_BLOCKED_APPLY_STATUSES.has(entry.apply?.status));
+
+  if (attentionRequired) {
+    result.outcome = 'attention-required';
+    setExitCode(2);
+  } else if (blockedExactApply) {
+    result.outcome = 'blocked';
+    setExitCode(2);
+  } else {
+    result.outcome = 'complete';
   }
 
   const text = `${JSON.stringify(result, null, 2)}\n`;
   if (args.output) await persist(resolve(args.output), text, 'utf8');
   else process.stdout.write(text);
 
-  const exactApply = args.mode === 'apply' && !args.all;
-  const blockedExactApply = exactApply
-    && result.entries.some((entry) => ['blocked', 'blocked-after-refresh', 'applied-but-read-back-inconsistent'].includes(entry.apply?.status));
-  if (preflightBlockers.length > 0 || blockedExactApply) {
-    process.exitCode = 2;
-  }
   return result;
 }
 
