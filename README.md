@@ -37,3 +37,16 @@ Product/domain documentation lives in [chipin-knowledge-base](https://github.com
 - apply mode requires both `--activate dev-status-v1` and `CHIPIN_DEV_WRITE=1`.
 
 The workflow `.github/workflows/dev-readiness-dev-transition.yml` supports manual dry-run/apply and an hourly scheduled scan. Scheduled writes remain disabled unless repository variable `CHIPIN_DEV_WRITE_ENABLED=1` is explicitly configured. Read-only runs use `CHIPIN_DEV_READ_TOKEN`; mutations use the separate `CHIPIN_DEV_WRITE_TOKEN`.
+
+
+### Transition receipts and recovery
+
+Every workflow run writes `dev-readiness-transition.json` and uploads it from the always-run artifact step as `dev-readiness-transition-<run-id>` with 30-day retention. For a scheduled run, open **Actions -> DEV readiness transition -> the exact run/attempt -> Artifacts** and inspect that receipt before taking recovery action. A missing receipt is itself an operational failure; the upload step does not silently warn.
+
+Receipt outcomes deliberately distinguish normal scheduling from uncertain mutations:
+
+- `complete`, clean `noop` / `noop-after-refresh`, routine `NOT_READY`, and `skipped-write-cap` do not make an `--all` scan fail;
+- `applied-but-read-back-inconsistent`, `applied-read-back-uncertain`, `mutation-outcome-uncertain`, and operational read exceptions require attention and make the run nonzero;
+- before a mutation, the writer persists `mutation-intent-recorded`; after GitHub acknowledges the expected Project item it persists `mutation-returned-read-back-pending` before final verification.
+
+Receipts are recovery evidence, not an exactly-once log. If the last durable receipt is an intent/pending/uncertain state, if post-write verification is inconsistent, or if a receipt is lost, never restore a previous Project status and never repeat the mutation solely from the receipt. Re-read the exact live issue, canonical metadata, readiness evidence, and current Project #5 Status first. `DEV`, `PROD`, and `Done` are never auto-regressed. A new write is considered only from that fresh live state and under the normal activation/authorization gates.
