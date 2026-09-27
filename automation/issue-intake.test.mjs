@@ -235,6 +235,33 @@ test('retry after partial create uses persisted issue identity and never creates
 });
 
 
+test('create rejects colliding resolved state and output paths before any write or API call', async () => {
+  let reserveCalls = 0;
+  let createCalls = 0;
+
+  await assert.rejects(
+    () => withoutExitLeak(() => run([
+      ...argsFor('create', 'ChipIn-one/chipin-frontend'),
+      '--title', 'Path collision',
+      '--state', './same-create.json',
+      '--output', 'same-create.json',
+    ], { CHIPIN_ISSUE_WRITE: '1' }, {
+      config,
+      client: {},
+      reserveCreateState: async () => { reserveCalls += 1; },
+      createIssue: async () => {
+        createCalls += 1;
+        return { number: 999 };
+      },
+      writeFile: async () => {},
+    })),
+    /--state and --output to resolve to different paths/,
+  );
+
+  assert.equal(reserveCalls, 0);
+  assert.equal(createCalls, 0);
+});
+
 test('unwritable create checkpoint fails before the API create call', async () => {
   let createCalls = 0;
   const result = await withoutExitLeak(() => run([
