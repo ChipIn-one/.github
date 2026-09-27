@@ -416,6 +416,32 @@ test('run-level fresh pre-write race cancels the mutation', async () => {
   assert.deepEqual(harness.exitCodes, []);
 });
 
+test('run-level scheduled initial read failure still leaves a durable receipt', async () => {
+  const harness = runHarness([
+    new Error('initial Project read unavailable'),
+  ]);
+
+  const result = await run([
+    'apply',
+    '--all',
+    '--activate',
+    'dev-status-v1',
+    '--output',
+    'receipt.json',
+  ], applyEnv, harness.overrides);
+
+  assert.equal(result.outcome, 'attention-required');
+  assert.deepEqual(result.preflightBlockers, [
+    'Initial live context read failed: initial Project read unavailable',
+  ]);
+  assert.equal(result.entries.length, 0);
+  assert.equal(harness.mutationCalls(), 0);
+  assert.deepEqual(harness.exitCodes, [2]);
+  assert.equal(harness.receipts[0].outcome, 'in-progress');
+  assert.equal(harness.receipts.at(-1).outcome, 'attention-required');
+  assert.deepEqual(harness.receipts.at(-1).preflightBlockers, result.preflightBlockers);
+});
+
 test('run-level --all read-back inconsistency is attention-required and nonzero', async () => {
   const harness = runHarness([
     singleRunContext('In Progress'),
@@ -499,6 +525,43 @@ test('run-level cap skips a second ready item without failing the scan', async (
   assert.equal(result.entries[1].apply.status, 'skipped-write-cap');
   assert.equal(harness.mutationCalls(), 1);
   assert.deepEqual(harness.exitCodes, []);
+});
+
+test('run-level exact apply reports blocked when the write cap skips an explicit target', async () => {
+  const bothInProgress = runContext([
+    { repository: 'ChipIn-one/chipin-backend', number: 9, status: 'In Progress' },
+    { repository: 'ChipIn-one/chipin-frontend', number: 164, status: 'In Progress' },
+  ]);
+  const firstDev = runContext([
+    { repository: 'ChipIn-one/chipin-backend', number: 9, status: 'DEV' },
+    { repository: 'ChipIn-one/chipin-frontend', number: 164, status: 'In Progress' },
+  ]);
+  const harness = runHarness([
+    bothInProgress,
+    bothInProgress,
+    bothInProgress,
+    firstDev,
+    firstDev,
+  ]);
+
+  const result = await run([
+    'apply',
+    'ChipIn-one/chipin-backend#9',
+    'ChipIn-one/chipin-frontend#164',
+    '--activate',
+    'dev-status-v1',
+    '--output',
+    'receipt.json',
+  ], applyEnv, harness.overrides);
+
+  assert.equal(result.outcome, 'blocked');
+  assert.equal(result.entries.length, 2);
+  assert.equal(result.entries[0].apply.status, 'complete');
+  assert.equal(result.entries[1].issue, 'ChipIn-one/chipin-frontend#164');
+  assert.equal(result.entries[1].apply.status, 'skipped-write-cap');
+  assert.equal(harness.mutationCalls(), 1);
+  assert.deepEqual(harness.exitCodes, [2]);
+  assert.equal(harness.receipts.at(-1).outcome, 'blocked');
 });
 
 test('run-level scheduled NOT_READY item is routine and does not fail the scan', async () => {
