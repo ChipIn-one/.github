@@ -219,6 +219,13 @@ async function readJson(path) {
   return JSON.parse(await readFile(resolve(path), 'utf8'));
 }
 
+export function scanPreflightBlockers(liveContext) {
+  const blockers = [...(Array.isArray(liveContext?.schemaBlockers) ? liveContext.schemaBlockers : ['Schema blocker collection is unreadable.'])];
+  if (!liveContext?.project) blockers.push('Project snapshot is unreadable.');
+  else if (!Array.isArray(liveContext.project.items)) blockers.push('Project item collection is unreadable.');
+  return [...new Set(blockers)];
+}
+
 function targetsFromProject(liveContext) {
   const knownRepositories = new Set(Object.keys(INTEGRATION_BRANCHES));
   return [...(liveContext?.project?.items ?? [])]
@@ -247,12 +254,14 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
   const persist = overrides.writeFile ?? writeFile;
 
   const initialContext = await readContext(client, config);
-  const targets = args.all ? targetsFromProject(initialContext) : args.issues;
+  const preflightBlockers = args.all ? scanPreflightBlockers(initialContext) : [];
+  const targets = args.all && preflightBlockers.length === 0 ? targetsFromProject(initialContext) : args.issues;
   const result = {
     schemaVersion: 1,
     mode: args.mode,
     readOnly: args.mode === 'plan',
     generatedAt: new Date().toISOString(),
+    preflightBlockers,
     safety: {
       mutation: 'Project #5 Status only',
       targetStatus: 'DEV',
@@ -330,10 +339,9 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
   else process.stdout.write(text);
 
   const exactApply = args.mode === 'apply' && !args.all;
-  if (
-    exactApply
-    && result.entries.some((entry) => ['blocked', 'blocked-after-refresh', 'applied-but-read-back-inconsistent'].includes(entry.apply?.status))
-  ) {
+  const blockedExactApply = exactApply
+    && result.entries.some((entry) => ['blocked', 'blocked-after-refresh', 'applied-but-read-back-inconsistent'].includes(entry.apply?.status));
+  if (preflightBlockers.length > 0 || blockedExactApply) {
     process.exitCode = 2;
   }
   return result;

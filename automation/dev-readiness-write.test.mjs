@@ -4,6 +4,7 @@ import {
   assertWriteActivation,
   buildDevTransitionPlan,
   resolveDevCoordinates,
+  scanPreflightBlockers,
   verifyAppliedDev,
   writeDevStatus,
 } from './dev-readiness-write.mjs';
@@ -73,6 +74,22 @@ test('apply requires two explicit activation signals', () => {
       env: { CHIPIN_DEV_WRITE: '1' },
     }),
   );
+});
+
+test('scheduled scan preflight fails closed when Project or schema is unreadable', () => {
+  assert.deepEqual(scanPreflightBlockers(context()), []);
+
+  const schemaFailure = context();
+  schemaFailure.project = null;
+  schemaFailure.schemaBlockers = ['Project #5 unreadable: forbidden'];
+  assert.deepEqual(
+    scanPreflightBlockers(schemaFailure),
+    ['Project #5 unreadable: forbidden', 'Project snapshot is unreadable.'],
+  );
+
+  const malformed = context();
+  malformed.project = { ...malformed.project, items: null };
+  assert.deepEqual(scanPreflightBlockers(malformed), ['Project item collection is unreadable.']);
 });
 
 test('READY_FOR_DEV pre-DEV item produces the only allowed write plan', () => {
