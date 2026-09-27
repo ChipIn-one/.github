@@ -86,5 +86,5 @@ jobs:
         with:
           name: dev-readiness-transition-${{ github.run_id }}
           path: dev-readiness-transition.json
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
