@@ -1,0 +1,90 @@
+name: DEV readiness transition
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_ref:
+        description: "Exact issue identity (owner/repository#number)"
+        required: true
+        type: string
+      apply:
+        description: "Apply READY_FOR_DEV -> DEV (false = read-only plan)"
+        required: true
+        default: false
+        type: boolean
+  schedule:
+    - cron: "17 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dev-readiness-project-writer
+  cancel-in-progress: false
+
+jobs:
+  transition:
+    if: github.event_name == 'workflow_dispatch' || vars.CHIPIN_DEV_WRITE_ENABLED == '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OUTPUT_PATH: dev-readiness-transition.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.21.0'
+
+      - name: Manual read-only plan
+        if: github.event_name == 'workflow_dispatch' && inputs.apply != true
+        env:
+          GITHUB_TOKEN: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
+          ISSUE_REF: ${{ inputs.issue_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node automation/dev-readiness-write.mjs plan "$ISSUE_REF" --output "$OUTPUT_PATH"
+
+      - name: Manual guarded apply
+        if: github.event_name == 'workflow_dispatch' && inputs.apply == true
+        env:
+          GITHUB_TOKEN: ${{ secrets.CHIPIN_DEV_WRITE_TOKEN }}
+          CHIPIN_DEV_WRITE: "1"
+          ISSUE_REF: ${{ inputs.issue_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${GITHUB_TOKEN:-}" ]; then
+            echo "CHIPIN_DEV_WRITE_TOKEN is not configured."
+            exit 1
+          fi
+          node automation/dev-readiness-write.mjs apply "$ISSUE_REF"             --activate dev-status-v1             --output "$OUTPUT_PATH"
+
+      - name: Scheduled guarded apply
+        if: github.event_name == 'schedule'
+        env:
+          GITHUB_TOKEN: ${{ secrets.CHIPIN_DEV_WRITE_TOKEN }}
+          CHIPIN_DEV_WRITE: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${GITHUB_TOKEN:-}" ]; then
+            echo "CHIPIN_DEV_WRITE_TOKEN is not configured."
+            exit 1
+          fi
+          node automation/dev-readiness-write.mjs apply --all             --activate dev-status-v1             --output "$OUTPUT_PATH"
+
+      - name: Upload transition receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-readiness-transition-${{ github.run_id }}
+          path: dev-readiness-transition.json
+          if-no-files-found: warn
+          retention-days: 30

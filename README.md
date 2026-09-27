@@ -22,3 +22,18 @@ Audited 2026-09-26:
 CODEOWNERS and GitHub Actions workflows are repository-local. They are not inherited as organization defaults and must be created/maintained in the repository whose ownership or execution policy they control.
 
 Product/domain documentation lives in [chipin-knowledge-base](https://github.com/ChipIn-one/chipin-knowledge-base). Frontend/backend implementation and review policy stays in those repositories.
+
+
+## DEV readiness automation
+
+`automation/dev-readiness-live.mjs` is the fail-closed live reader for Project #5. The writer in `automation/dev-readiness-write.mjs` is intentionally narrower:
+
+- the only mutation is Project #5 `Status -> DEV`;
+- a write requires a fresh live evaluator result of `READY_FOR_DEV`;
+- `PROD`, `Done`, closure and regression are never automated;
+- a second fresh read is performed immediately before the single allowed write;
+- each run can write at most one Project item;
+- post-write state is read back; inconsistent read-back is reported for manual handling and is never auto-regressed;
+- apply mode requires both `--activate dev-status-v1` and `CHIPIN_DEV_WRITE=1`.
+
+The workflow `.github/workflows/dev-readiness-dev-transition.yml` supports manual dry-run/apply and an hourly scheduled scan. Scheduled writes remain disabled unless repository variable `CHIPIN_DEV_WRITE_ENABLED=1` is explicitly configured. Read-only runs use `CHIPIN_DEV_READ_TOKEN`; mutations use the separate `CHIPIN_DEV_WRITE_TOKEN`.
