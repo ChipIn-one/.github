@@ -293,6 +293,9 @@ function parseArgs(argv) {
     args[name] = values[++i];
   }
   if (args.operation === 'create' && args.mode === 'apply' && !args.state) throw new Error('Create apply requires --state for retry-safe issue identity persistence.');
+  if (args.operation === 'create' && args.mode === 'apply' && args.output && resolve(args.state) === resolve(args.output)) {
+    throw new Error('Create apply requires --state and --output to resolve to different paths.');
+  }
   return args;
 }
 
