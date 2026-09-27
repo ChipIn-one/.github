@@ -20,7 +20,7 @@ const ATTENTION_APPLY_STATUSES = new Set([
   'applied-read-back-uncertain',
   'applied-but-read-back-inconsistent',
 ]);
-const EXACT_BLOCKED_APPLY_STATUSES = new Set(['blocked', 'blocked-after-refresh']);
+const EXACT_BLOCKED_APPLY_STATUSES = new Set(['blocked', 'blocked-after-refresh', 'skipped-write-cap']);
 
 const UPDATE_STATUS_MUTATION = `
 mutation DevReadinessSetStatus(
@@ -263,16 +263,13 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
     process.exitCode = code;
   });
 
-  const initialContext = await readContext(client, config);
-  const preflightBlockers = args.all ? scanPreflightBlockers(initialContext) : [];
-  const targets = args.all && preflightBlockers.length === 0 ? targetsFromProject(initialContext) : args.issues;
   const result = {
     schemaVersion: 1,
     mode: args.mode,
     readOnly: args.mode === 'plan',
     generatedAt: new Date().toISOString(),
     outcome: 'in-progress',
-    preflightBlockers,
+    preflightBlockers: [],
     safety: {
       mutation: 'Project #5 Status only',
       targetStatus: 'DEV',
@@ -305,6 +302,34 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
     result.outcome = 'attention-required';
     await persistReceipt();
   };
+
+  // Create the workflow artifact payload before the first live GitHub read.
+  await persistReceipt();
+
+  let initialContext;
+  try {
+    initialContext = await readContext(client, config);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    result.preflightBlockers = [`Initial live context read failed: ${message}`];
+    result.outcome = 'attention-required';
+    if (args.all) {
+      await persistReceipt();
+    } else {
+      for (const target of args.issues) {
+        await recordOperationalReadFailure(target, error);
+      }
+    }
+    setExitCode(2);
+    const text = `${JSON.stringify(result, null, 2)}\n`;
+    if (args.output) await persist(resolve(args.output), text, 'utf8');
+    else process.stdout.write(text);
+    return result;
+  }
+
+  const preflightBlockers = args.all ? scanPreflightBlockers(initialContext) : [];
+  result.preflightBlockers = preflightBlockers;
+  const targets = args.all && preflightBlockers.length === 0 ? targetsFromProject(initialContext) : args.issues;
 
   let writeAttempts = 0;
   for (const target of targets) {
