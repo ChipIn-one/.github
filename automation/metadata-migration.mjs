@@ -206,6 +206,7 @@ const PROJECT_QUERY = `
 query MetadataProject($org: String!, $number: Int!, $itemsAfter: String, $fieldsAfter: String) {
   organization(login: $org) {
     projectV2(number: $number) {
+      id
       fields(first: 100, after: $fieldsAfter) {
         totalCount
         pageInfo { hasNextPage endCursor }
@@ -246,6 +247,7 @@ export async function readProjectSnapshot(client, config) {
   let fieldsDone = false;
   let totalCount = null;
   let fieldTotalCount = null;
+  let projectId = null;
 
   do {
     const data = await client.graphql(PROJECT_QUERY, {
@@ -256,6 +258,10 @@ export async function readProjectSnapshot(client, config) {
     });
     const project = data.organization?.projectV2;
     if (!project) throw new Error(`Project #${config.project.number} is unavailable`);
+    if (projectId !== null && project?.id && projectId !== project.id) {
+      throw new Error(`Project #${config.project.number} identity changed during pagination`);
+    }
+    projectId ??= project?.id ?? null;
     if (!project.fields?.pageInfo || !Array.isArray(project.fields.nodes)) {
       throw new Error("Project fields pagination is unreadable");
     }
@@ -292,6 +298,7 @@ export async function readProjectSnapshot(client, config) {
   }
 
   return {
+    id: projectId,
     totalCount,
     fields,
     items: items.map((item) => ({
