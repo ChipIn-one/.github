@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { INTEGRATION_BRANCHES } from './dev-readiness.mjs';
@@ -245,6 +245,19 @@ async function atomicWriteJson(path, value) {
   await rename(temporary, target);
 }
 
+export async function reserveCreateState(path, value) {
+  const target = resolve(path);
+  await mkdir(dirname(target), { recursive: true });
+  let handle = null;
+  try {
+    handle = await open(target, 'wx');
+    await handle.writeFile(JSON.stringify(value, null, 2) + '\n', 'utf8');
+    await handle.sync();
+  } finally {
+    await handle?.close();
+  }
+}
+
 export async function createIssue(client, config, repository, classification, { title, body }) {
   const [owner, repo] = repository.split('/');
   const values = [
@@ -338,8 +351,12 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
         } else if (state) {
           throw new Error('Create checkpoint exists without issue identity; creation outcome is uncertain. Recover the issue manually before retrying to avoid a duplicate.');
         } else {
+          let body = args.body || '';
+          if (args.bodyFile) body = await (overrides.readFile || readFile)(resolve(args.bodyFile), 'utf8');
+
+          const reserveState = overrides.reserveCreateState || reserveCreateState;
           const writeState = overrides.writeCreateState || atomicWriteJson;
-          await writeState(args.state, {
+          await reserveState(args.state, {
             schemaVersion: 1,
             repository: args.target,
             classification: checked.classification,
@@ -349,8 +366,6 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
           });
           result.applied.push('create-checkpoint-reserved');
 
-          let body = args.body || '';
-          if (args.bodyFile) body = await (overrides.readFile || readFile)(resolve(args.bodyFile), 'utf8');
           const created = await (overrides.createIssue || createIssue)(client, config, args.target, checked.classification, { title: args.title, body });
           if (!Number.isInteger(created?.number)) throw new Error('Create API did not return an issue number.');
           target = { repository: args.target, number: created.number };
