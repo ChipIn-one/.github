@@ -1,0 +1,50 @@
+name: DEV readiness status what-if
+
+on:
+  push:
+    branches:
+      - chore/07-live-acceptance
+    paths:
+      - .github/workflows/dev-readiness-status-whatif.yml
+
+permissions:
+  contents: read
+
+jobs:
+  backend-9:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24.21.0'
+
+      - name: Recompute backend#9 with only Project status overridden in memory
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { readFile } from 'node:fs/promises';
+          import { GitHubClient } from './automation/metadata-migration.mjs';
+          import { readLiveContext, evaluateLiveIssue } from './automation/dev-readiness-live.mjs';
+
+          const config = JSON.parse(await readFile('./automation/metadata-migration.config.json', 'utf8'));
+          const client = new GitHubClient(process.env.GITHUB_TOKEN);
+          const live = await readLiveContext(client, config);
+          const key = 'ChipIn-one/chipin-backend#9';
+          const original = live.projectIndex.get(key);
+          if (!original) throw new Error('backend#9 is missing from Project #5');
+          console.log('original Project status:', original.status);
+          live.projectIndex.set(key, { ...original, status: 'In Progress' });
+          const result = await evaluateLiveIssue(client, config, live, 'ChipIn-one/chipin-backend', 9);
+          console.log(JSON.stringify(result, null, 2));
+          if (result.readErrors.length) process.exit(2);
+          if (result.decision.state !== 'READY_FOR_DEV') process.exit(3);
+          NODE
