@@ -54,7 +54,7 @@ function liveContext(items, schemaBlockers = []) {
   return { project, projectIndex: indexProjectItems(project).index, schemaBlockers };
 }
 
-function fakeClient({ snapshot = issueSnapshot(), pullRequests = [pr()], branches = [], compareStatus = 'behind', graphqlError = null } = {}) {
+function fakeClient({ snapshot = issueSnapshot(), pullRequests = [pr()], branches = [], compareStatus = 'behind', graphqlError = null, issueError = null } = {}) {
   return {
     async request(path, options = {}) {
       if (path.includes('/compare/')) return { status: compareStatus };
@@ -66,7 +66,10 @@ function fakeClient({ snapshot = issueSnapshot(), pullRequests = [pr()], branche
           state: snapshot.parent.state,
         };
       }
-      if (/\/issues\/\d+$/.test(path)) return snapshot.issue;
+      if (/\/issues\/\d+$/.test(path)) {
+        if (issueError) throw new Error(issueError);
+        return snapshot.issue;
+      }
       throw new Error(`Unexpected request ${path} ${JSON.stringify(options)}`);
     },
     async listAll(path) {
@@ -180,6 +183,7 @@ test('missing canonical metadata produces BLOCKED_UNKNOWN even when legacy label
   );
   assert.equal(result.decision.state, 'BLOCKED_UNKNOWN');
   assert.match(result.adapterBlockers.join('\n'), /Canonical Priority is missing/);
+  assert.deepEqual(result.readErrors, []);
 });
 
 test('DEV item with reopened implementation work is INCONSISTENT', async () => {
@@ -234,4 +238,18 @@ test('unreadable Development relationship fails closed', async () => {
   );
   assert.equal(result.decision.state, 'BLOCKED_UNKNOWN');
   assert.match(result.adapterBlockers.join('\n'), /Development relationships unreadable/);
+  assert.match(result.readErrors.join('\n'), /Development relationships unreadable/);
+});
+
+test('unreadable issue state is surfaced separately from legitimate readiness blockers', async () => {
+  const ctx = liveContext([{ repository: 'ChipIn-one/chipin-frontend', number: 1, status: 'In Progress' }]);
+  const result = await evaluateLiveIssue(
+    fakeClient({ issueError: 'forbidden' }),
+    config,
+    ctx,
+    'ChipIn-one/chipin-frontend',
+    1,
+  );
+  assert.equal(result.decision.state, 'BLOCKED_UNKNOWN');
+  assert.match(result.readErrors.join('\n'), /Issue state unreadable: forbidden/);
 });
