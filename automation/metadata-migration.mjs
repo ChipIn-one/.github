@@ -203,10 +203,12 @@ export class GitHubClient {
 }
 
 const PROJECT_QUERY = `
-query MetadataProject($org: String!, $number: Int!, $after: String) {
+query MetadataProject($org: String!, $number: Int!, $itemsAfter: String, $fieldsAfter: String) {
   organization(login: $org) {
     projectV2(number: $number) {
-      fields(first: 100) {
+      fields(first: 100, after: $fieldsAfter) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
         nodes {
           __typename
           ... on ProjectV2Field {
@@ -219,7 +221,7 @@ query MetadataProject($org: String!, $number: Int!, $after: String) {
           }
         }
       }
-      items(first: 100, after: $after) {
+      items(first: 100, after: $itemsAfter) {
         totalCount
         pageInfo { hasNextPage endCursor }
         nodes {
@@ -237,18 +239,58 @@ query MetadataProject($org: String!, $number: Int!, $after: String) {
 
 export async function readProjectSnapshot(client, config) {
   const items = [];
-  let after = null;
-  let fields = null;
+  const fields = [];
+  let itemsAfter = null;
+  let fieldsAfter = null;
+  let itemsDone = false;
+  let fieldsDone = false;
   let totalCount = null;
+  let fieldTotalCount = null;
+
   do {
-    const data = await client.graphql(PROJECT_QUERY, { org: config.organization, number: config.project.number, after });
+    const data = await client.graphql(PROJECT_QUERY, {
+      org: config.organization,
+      number: config.project.number,
+      itemsAfter,
+      fieldsAfter,
+    });
     const project = data.organization?.projectV2;
     if (!project) throw new Error(`Project #${config.project.number} is unavailable`);
-    fields ??= project.fields.nodes.filter(Boolean);
-    totalCount ??= project.items.totalCount;
-    items.push(...project.items.nodes.filter(Boolean));
-    after = project.items.pageInfo.hasNextPage ? project.items.pageInfo.endCursor : null;
-  } while (after);
+    if (!project.fields?.pageInfo || !Array.isArray(project.fields.nodes)) {
+      throw new Error("Project fields pagination is unreadable");
+    }
+    if (!project.items?.pageInfo || !Array.isArray(project.items.nodes)) {
+      throw new Error("Project items pagination is unreadable");
+    }
+
+    if (!fieldsDone) {
+      fieldTotalCount ??= project.fields.totalCount;
+      fields.push(...project.fields.nodes.filter(Boolean));
+      if (project.fields.pageInfo.hasNextPage && !project.fields.pageInfo.endCursor) {
+        throw new Error("Project fields pagination cursor is missing");
+      }
+      fieldsAfter = project.fields.pageInfo.endCursor;
+      fieldsDone = !project.fields.pageInfo.hasNextPage;
+    }
+
+    if (!itemsDone) {
+      totalCount ??= project.items.totalCount;
+      items.push(...project.items.nodes.filter(Boolean));
+      if (project.items.pageInfo.hasNextPage && !project.items.pageInfo.endCursor) {
+        throw new Error("Project items pagination cursor is missing");
+      }
+      itemsAfter = project.items.pageInfo.endCursor;
+      itemsDone = !project.items.pageInfo.hasNextPage;
+    }
+  } while (!fieldsDone || !itemsDone);
+
+  if (Number.isInteger(fieldTotalCount) && fields.length !== fieldTotalCount) {
+    throw new Error(`Project fields pagination is incomplete: read ${fields.length} of ${fieldTotalCount}`);
+  }
+  if (Number.isInteger(totalCount) && items.length !== totalCount) {
+    throw new Error(`Project items pagination is incomplete: read ${items.length} of ${totalCount}`);
+  }
+
   return {
     totalCount,
     fields,
