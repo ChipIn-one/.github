@@ -4,6 +4,7 @@ import {
   assertWriteActivation,
   buildDevTransitionPlan,
   resolveDevCoordinates,
+  run,
   scanPreflightBlockers,
   verifyAppliedDev,
   writeDevStatus,
@@ -249,4 +250,284 @@ test('post-write verification accepts only clean already-DEV read-back', () => {
     status: 'In Progress',
     state: 'READY_FOR_DEV',
   })).join('\n'), /expected DEV/);
+});
+
+
+function runContext(items) {
+  const normalized = items.map((item, index) => ({
+    id: item.id ?? `PVTI_item_${index + 1}`,
+    repository: item.repository,
+    number: item.number,
+    status: item.status,
+  }));
+  return {
+    project: {
+      id: 'PVT_project',
+      fields: [{
+        id: 'PVTSSF_status',
+        name: 'Status',
+        isIssueField: false,
+        options: [
+          { id: 'opt_todo', name: 'Todo' },
+          { id: 'opt_progress', name: 'In Progress' },
+          { id: 'opt_dev', name: 'DEV' },
+          { id: 'opt_prod', name: 'PROD' },
+          { id: 'opt_done', name: 'Done' },
+        ],
+      }],
+      items: normalized,
+    },
+    projectIndex: new Map(normalized.map((item) => [
+      `${item.repository}#${item.number}`,
+      item,
+    ])),
+    schemaBlockers: [],
+  };
+}
+
+function singleRunContext(status = 'In Progress') {
+  return runContext([{
+    repository: 'ChipIn-one/chipin-backend',
+    number: 9,
+    status,
+  }]);
+}
+
+function evaluationFromContext(_client, _config, liveContext, repository, number) {
+  const issue = `${repository}#${number}`;
+  const item = liveContext.projectIndex.get(issue);
+  if (!item) throw new Error(`Missing test item ${issue}`);
+  if (item.status === 'DEV') {
+    return {
+      issue,
+      projectStatus: 'DEV',
+      decision: {
+        state: 'NOT_READY',
+        reason: 'Current status is already DEV; no DEV transition is allowed.',
+      },
+      readErrors: [],
+      adapterBlockers: [],
+    };
+  }
+  return {
+    issue,
+    projectStatus: item.status,
+    decision: {
+      state: 'READY_FOR_DEV',
+      reason: 'All required PRs are merged to the integration branch.',
+    },
+    readErrors: [],
+    adapterBlockers: [],
+  };
+}
+
+function scriptedReadContext(sequence) {
+  let index = 0;
+  return async () => {
+    const value = sequence[Math.min(index, sequence.length - 1)];
+    index += 1;
+    if (value instanceof Error) throw value;
+    return value;
+  };
+}
+
+function runHarness(sequence, { mutate = async () => {}, evaluate = evaluationFromContext } = {}) {
+  const receipts = [];
+  const exitCodes = [];
+  let mutationCalls = 0;
+  return {
+    receipts,
+    exitCodes,
+    overrides: {
+      config,
+      client: {},
+      readLiveContext: scriptedReadContext(sequence),
+      evaluateLiveIssue: evaluate,
+      writeDevStatus: async (...args) => {
+        mutationCalls += 1;
+        return mutate(...args);
+      },
+      writeFile: async (_path, text) => {
+        receipts.push(JSON.parse(text));
+      },
+      setExitCode: (code) => {
+        exitCodes.push(code);
+      },
+    },
+    mutationCalls: () => mutationCalls,
+  };
+}
+
+const applyArgs = [
+  'apply',
+  'ChipIn-one/chipin-backend#9',
+  '--activate',
+  'dev-status-v1',
+  '--output',
+  'receipt.json',
+];
+const applyEnv = { CHIPIN_DEV_WRITE: '1' };
+
+test('run-level successful apply persists complete read-back', async () => {
+  const harness = runHarness([
+    singleRunContext('In Progress'),
+    singleRunContext('In Progress'),
+    singleRunContext('In Progress'),
+    singleRunContext('DEV'),
+  ]);
+
+  const result = await run(applyArgs, applyEnv, harness.overrides);
+
+  assert.equal(result.outcome, 'complete');
+  assert.equal(result.entries[0].issue, 'ChipIn-one/chipin-backend#9');
+  assert.equal(result.entries[0].apply.status, 'complete');
+  assert.equal(result.entries[0].apply.observedStatus, 'DEV');
+  assert.equal(harness.mutationCalls(), 1);
+  assert.deepEqual(harness.exitCodes, []);
+  assert.equal(harness.receipts.at(-1).entries[0].apply.status, 'complete');
+});
+
+test('run-level already-DEV replay is a clean no-op', async () => {
+  const harness = runHarness([
+    singleRunContext('DEV'),
+    singleRunContext('DEV'),
+  ]);
+
+  const result = await run(applyArgs, applyEnv, harness.overrides);
+
+  assert.equal(result.outcome, 'complete');
+  assert.equal(result.entries[0].apply.status, 'noop');
+  assert.equal(harness.mutationCalls(), 0);
+  assert.deepEqual(harness.exitCodes, []);
+});
+
+test('run-level fresh pre-write race cancels the mutation', async () => {
+  const harness = runHarness([
+    singleRunContext('In Progress'),
+    singleRunContext('In Progress'),
+    singleRunContext('DEV'),
+  ]);
+
+  const result = await run(applyArgs, applyEnv, harness.overrides);
+
+  assert.equal(result.outcome, 'complete');
+  assert.equal(result.entries[0].apply.status, 'noop-after-refresh');
+  assert.equal(harness.mutationCalls(), 0);
+  assert.deepEqual(harness.exitCodes, []);
+});
+
+test('run-level --all read-back inconsistency is attention-required and nonzero', async () => {
+  const harness = runHarness([
+    singleRunContext('In Progress'),
+    singleRunContext('In Progress'),
+    singleRunContext('In Progress'),
+    singleRunContext('In Progress'),
+  ]);
+
+  const result = await run([
+    'apply',
+    '--all',
+    '--activate',
+    'dev-status-v1',
+    '--output',
+    'receipt.json',
+  ], applyEnv, harness.overrides);
+
+  assert.equal(result.outcome, 'attention-required');
+  assert.equal(result.entries[0].apply.status, 'applied-but-read-back-inconsistent');
+  assert.equal(harness.mutationCalls(), 1);
+  assert.deepEqual(harness.exitCodes, [2]);
+  assert.equal(
+    harness.receipts.at(-1).entries[0].apply.status,
+    'applied-but-read-back-inconsistent',
+  );
+});
+
+test('run-level thrown post-write read-back leaves exact uncertain receipt', async () => {
+  const harness = runHarness([
+    singleRunContext('In Progress'),
+    singleRunContext('In Progress'),
+    singleRunContext('In Progress'),
+    new Error('read-back unavailable'),
+  ]);
+
+  const result = await run(applyArgs, applyEnv, harness.overrides);
+
+  assert.equal(result.outcome, 'attention-required');
+  assert.equal(result.entries[0].issue, 'ChipIn-one/chipin-backend#9');
+  assert.equal(result.entries[0].from, 'In Progress');
+  assert.equal(result.entries[0].to, 'DEV');
+  assert.equal(result.entries[0].apply.status, 'applied-read-back-uncertain');
+  assert.match(result.entries[0].apply.error, /read-back unavailable/);
+  assert.equal(harness.mutationCalls(), 1);
+  assert.deepEqual(harness.exitCodes, [2]);
+
+  const durable = harness.receipts.at(-1).entries[0];
+  assert.equal(durable.issue, 'ChipIn-one/chipin-backend#9');
+  assert.equal(durable.apply.status, 'applied-read-back-uncertain');
+});
+
+test('run-level cap skips a second ready item without failing the scan', async () => {
+  const bothInProgress = runContext([
+    { repository: 'ChipIn-one/chipin-backend', number: 9, status: 'In Progress' },
+    { repository: 'ChipIn-one/chipin-frontend', number: 164, status: 'In Progress' },
+  ]);
+  const firstDev = runContext([
+    { repository: 'ChipIn-one/chipin-backend', number: 9, status: 'DEV' },
+    { repository: 'ChipIn-one/chipin-frontend', number: 164, status: 'In Progress' },
+  ]);
+  const harness = runHarness([
+    bothInProgress,
+    bothInProgress,
+    bothInProgress,
+    firstDev,
+    firstDev,
+  ]);
+
+  const result = await run([
+    'apply',
+    '--all',
+    '--activate',
+    'dev-status-v1',
+    '--output',
+    'receipt.json',
+  ], applyEnv, harness.overrides);
+
+  assert.equal(result.outcome, 'complete');
+  assert.equal(result.entries.length, 2);
+  assert.equal(result.entries[0].apply.status, 'complete');
+  assert.equal(result.entries[1].apply.status, 'skipped-write-cap');
+  assert.equal(harness.mutationCalls(), 1);
+  assert.deepEqual(harness.exitCodes, []);
+});
+
+test('run-level scheduled NOT_READY item is routine and does not fail the scan', async () => {
+  const notReady = singleRunContext('In Progress');
+  const harness = runHarness([notReady, notReady], {
+    evaluate: (_client, _config, liveContext, repository, number) => {
+      const issue = `${repository}#${number}`;
+      const item = liveContext.projectIndex.get(issue);
+      return {
+        issue,
+        projectStatus: item.status,
+        decision: { state: 'NOT_READY', reason: 'Required PR is still open.' },
+        readErrors: [],
+        adapterBlockers: [],
+      };
+    },
+  });
+
+  const result = await run([
+    'apply',
+    '--all',
+    '--activate',
+    'dev-status-v1',
+    '--output',
+    'receipt.json',
+  ], applyEnv, harness.overrides);
+
+  assert.equal(result.outcome, 'complete');
+  assert.equal(result.entries[0].apply.status, 'blocked');
+  assert.equal(harness.mutationCalls(), 0);
+  assert.deepEqual(harness.exitCodes, []);
 });
