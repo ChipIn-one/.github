@@ -1,0 +1,40 @@
+name: DEV readiness restore verify
+
+on:
+  push:
+    branches:
+      - chore/07-live-acceptance
+    paths:
+      - .github/workflows/dev-readiness-restore-verify.yml
+
+permissions:
+  contents: read
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
+      OUTPUT_PATH: dev-readiness-restore.json
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24.21.0'
+      - name: Verify restored Project status
+        shell: bash
+        run: |
+          set -euo pipefail
+          node automation/dev-readiness-live.mjs ChipIn-one/chipin-backend#9 --output "$OUTPUT_PATH"
+          node - "$OUTPUT_PATH" <<'NODE'
+          const fs = require('node:fs');
+          const data = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const item = data.decisions?.[0];
+          console.log(`${item?.issue}: ${item?.decision?.state ?? 'UNKNOWN'} (Project: ${item?.projectStatus ?? 'unreadable'}, read errors: ${item?.readErrors?.length ?? 'unknown'})`);
+          if (item?.projectStatus !== 'Done') process.exit(3);
+          if ((item?.readErrors ?? []).length) process.exit(2);
+          NODE
