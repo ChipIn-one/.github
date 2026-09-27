@@ -57,7 +57,7 @@ node automation/issue-intake.mjs apply create ChipIn-one/chipin-frontend \
 
 For a Bug, pass one of `Critical`, `Major`, or `Minor` as Severity.
 
-`--state` is mandatory for `apply create`. Immediately after the REST create returns, the tool atomically stores `issueRef` and `issueUrl` before any later Project stage. Retrying the same command with the same state file resumes that issue rather than creating another one. Partial metadata or membership writes are safe to retry because each later stage is freshly read before mutation and the final state is read back again.
+`--state` is mandatory for `apply create`. Before the REST create call, the tool atomically writes and renames a reservation to the requested checkpoint path, proving that the destination is writable before any issue can be created. After the REST create returns, the same checkpoint is atomically replaced with `issueRef` and `issueUrl` before any later Project stage. Retrying with a checkpoint that already contains `issueRef` resumes that issue. A reservation without an issue identity is treated as an uncertain prior create and fails closed for manual recovery instead of issuing another POST. Partial metadata or membership writes are safe to retry because each later stage is freshly read before mutation and the final state is read back again.
 
 ## Existing issue reconciliation
 
