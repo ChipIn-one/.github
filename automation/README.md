@@ -27,6 +27,21 @@ GITHUB_TOKEN=... node automation/dev-readiness-live.mjs \
 
 The token needs read access to the organization Issue Fields / Issue Types, Project #5, Issues, native relationships, PRs, and compare data. No credential is stored in this repository.
 
+## Issue intake
+
+`issue-intake.mjs` provides one bounded create/finalize and reconcile path for new ChipIn issues. It reuses the canonical schema IDs and project readers from the metadata migration but never uses migration #117's fixed issue mapping as a classifier.
+
+- `plan reconcile` reads one existing issue and reports exactly what is missing.
+- `apply reconcile` writes only missing requested values, ensures one Project #5 membership, initializes `Backlog` only when Status is absent, and reads everything back.
+- `plan create` validates explicit classification without creating anything.
+- `apply create` creates with explicit Issue Type / issue-field values, persists the returned issue identity before Project writes, then runs the same reconciliation and read-back path.
+- conflicting existing human values, duplicate membership, permission failures, schema drift, or unreadable read-back produce an incomplete result rather than overwrite/guess/success.
+- apply mode requires both `--activate issue-intake-v1` and `CHIPIN_ISSUE_WRITE=1`.
+
+The UI entry point is the manual `.github/workflows/issue-metadata-finalize.yml` workflow. It runs the full automation test suite before plan/apply. Read-only plans can use `CHIPIN_DEV_READ_TOKEN`; writes require the separate `CHIPIN_ISSUE_WRITE_TOKEN`.
+
+See [issue-intake.md](./issue-intake.md) for CLI examples, retry semantics, the named-gap reconciliation plan, and the live activation procedure.
+
 ## Metadata migration
 
 `metadata-migration.mjs` implements task #6 / backend #117 as an auditable, resumable `plan` / `apply` migration.
@@ -47,4 +62,4 @@ See [metadata-migration.md](./metadata-migration.md) for the prepared diff, perm
 node --test automation/*.test.mjs
 ```
 
-The tests include the DEV-readiness fixtures, live-adapter normalization/contracts, migration safety/idempotency coverage, and a consistency check for all supported shared Issue Forms.
+The tests include DEV-readiness fixtures, live-adapter normalization/contracts, issue-intake retry and fail-closed coverage, migration safety/idempotency coverage, and a consistency check for all supported shared Issue Forms.

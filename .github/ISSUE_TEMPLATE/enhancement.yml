@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Use canonical structured metadata after creation: Organization Issue Fields `Priority` and `Release scope`; `Severity` only when applicable; Project #5 `Status` is workflow state. Do not add legacy `P*`, `severity:*`, or `type:*` labels, and do not use the `PRE-PROD` milestone as release scope. If structured fields are not visible, do not infer fallback values.
+        After creation, run `ChipIn-one/.github` -> Actions -> `Issue metadata finalizer` and supply explicit Organization Issue Fields `Priority` and `Release scope`; set `Severity` only when applicable. The finalizer also ensures one Project #5 membership and a readable `Status`. Do not add legacy metadata labels/milestones or infer fallback values.
   - type: textarea
     id: problem
     attributes:

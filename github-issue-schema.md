@@ -1,6 +1,6 @@
 # ChipIn GitHub issue schema
 
-Last reviewed: 2026-09-10
+Last reviewed: 2026-09-27
 
 This document defines the shared GitHub task metadata model for ChipIn repositories.
 It does not define repository-specific implementation, review, build, test, deploy, or agent-execution rules.
@@ -69,7 +69,7 @@ Use GitHub-native relationships when available. Put only real blocking/required 
 
 Link historical Trello cards, specs, ADRs, PRs, evidence, and related non-blocking work. Trello is historical/read-only and is never synchronized back.
 
-## Issue Forms
+## Issue Forms and complete intake
 
 Shared forms live in `.github/ISSUE_TEMPLATE/` and set only the canonical Organization Issue Type:
 
@@ -81,7 +81,13 @@ Shared forms live in `.github/ISSUE_TEMPLATE/` and set only the canonical Organi
 | `research.yml` | `Task` |
 | `tests.yml` | `Task` |
 
-Issue Forms do not create Priority/Severity/Release-scope labels or milestones. After creation, an organization member with access to Organization Issue Fields sets those structured values. If the fields are not visible, leave them unresolved and report the task as blocked for metadata completion.
+Issue Forms do not create Priority/Severity/Release-scope labels or milestones, and they do not encode those values as body dropdowns. Values captured in the form body are Markdown content, not Organization Issue Field state.
+
+A UI-created issue is complete only after the repository-local `Issue metadata finalizer` workflow has received explicit Issue Type, Priority, Release scope and applicable Severity, ensured exactly one Project #5 membership, initialized Status only when absent, and returned a clean read-back receipt. The workflow is manual-only; a workflow stored in the organization `.github` repository is not treated as a subscriber to issue events in sibling repositories.
+
+API/agent creation uses `automation/issue-intake.mjs apply create` with the same explicit classification. The create operation checkpoints the returned issue identity before Project writes and resumes that identity on retry. `automation/issue-intake.mjs apply reconcile` handles an existing incomplete issue. Existing human canonical values and existing Project Status are preserved; conflicts, duplicate membership, permission failures, and unreadable state fail closed.
+
+Do not use a `projects:` form key as a substitute for finalization. Project membership alone does not write Organization Issue Fields and does not repair API-created issues. Missing classification remains incomplete rather than receiving a fabricated default.
 
 ## Relationships and workflow
 
