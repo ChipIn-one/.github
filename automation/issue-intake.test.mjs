@@ -230,6 +230,60 @@ test('retry after partial create uses persisted issue identity and never creates
   assert.ok(projectReads >= 2);
 });
 
+
+test('unwritable create checkpoint fails before the API create call', async () => {
+  let createCalls = 0;
+  const result = await withoutExitLeak(() => run([
+    ...argsFor('create', 'ChipIn-one/chipin-frontend'),
+    '--title', 'Checkpoint preflight test',
+    '--state', '/unwritable/state.json',
+  ], { CHIPIN_ISSUE_WRITE: '1' }, {
+    config,
+    client: {},
+    readGlobalContext: async () => ({ project: project(), blockers: [] }),
+    readCreateState: async () => null,
+    writeCreateState: async () => { throw new Error('EACCES checkpoint'); },
+    createIssue: async () => {
+      createCalls += 1;
+      return { number: 999 };
+    },
+    writeFile: async () => {},
+  }));
+
+  assert.equal(createCalls, 0);
+  assert.equal(result.action, 'incomplete');
+  assert.match(result.blockers.join('\n'), /EACCES checkpoint/);
+});
+
+test('reserved checkpoint without identity fails closed instead of creating a duplicate', async () => {
+  let createCalls = 0;
+  const result = await withoutExitLeak(() => run([
+    ...argsFor('create', 'ChipIn-one/chipin-frontend'),
+    '--title', 'Uncertain prior create',
+    '--state', '/tmp/state.json',
+  ], { CHIPIN_ISSUE_WRITE: '1' }, {
+    config,
+    client: {},
+    readGlobalContext: async () => ({ project: project(), blockers: [] }),
+    readCreateState: async () => ({
+      schemaVersion: 1,
+      repository: 'ChipIn-one/chipin-frontend',
+      classification,
+      title: 'Uncertain prior create',
+      phase: 'reserved-before-create',
+    }),
+    createIssue: async () => {
+      createCalls += 1;
+      return { number: 999 };
+    },
+    writeFile: async () => {},
+  }));
+
+  assert.equal(createCalls, 0);
+  assert.equal(result.action, 'incomplete');
+  assert.match(result.blockers.join('\n'), /creation outcome is uncertain/);
+});
+
 test('API permission failure yields incomplete receipt and does not continue to Project writes', async () => {
   let projectWrites = 0;
   const result = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, {
