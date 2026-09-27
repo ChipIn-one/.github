@@ -92,7 +92,7 @@ Read-only plans can reuse `CHIPIN_DEV_READ_TOKEN` if it can read organization Is
 Apply uses a separate `CHIPIN_ISSUE_WRITE_TOKEN`. Use the narrowest credential that can:
 
 - read organization Issue Fields and Issue Types;
-- write Issues in FE/BE/KB (needed for Issue Type / issue-field values and API creation);
+- write Issues in FE/BE/KB, with the token principal holding repository push access (GitHub requires push access for Issue Type / issue-field writes; create may otherwise silently drop them, which final read-back will surface);
 - read/write ChipIn Project #5.
 
 Do not store the credential in the repository. The workflow itself retains only `contents: read` permissions and receives the external token through the secret.
