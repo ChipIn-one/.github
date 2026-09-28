@@ -174,6 +174,44 @@ test('project read-back tolerates indexing beyond the legacy six-read window and
   assert.equal(result.receipt.project.membershipCount, 1);
   assert.equal(result.receipt.project.status, 'Backlog');
 });
+
+test('stale Project snapshot never overwrites an existing human-owned Status', async () => {
+  let issueReads = 0;
+  let projectReads = 0;
+  let membershipWrites = 0;
+  let statusWrites = 0;
+  const projects = [
+    project(),
+    project(),
+    project(),
+    project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'DEV' }] }),
+  ];
+
+  const result = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, {
+    config,
+    client: {},
+    readGlobalContext: async () => ({ project: project(), blockers: [] }),
+    readIssueSnapshot: async () => {
+      issueReads += 1;
+      return issueReads === 1 ? issueSnapshot() : fullIssue();
+    },
+    readProjectSnapshot: async () => projects[projectReads++],
+    writeIssueMetadata: async () => {},
+    addProjectMembership: async () => { membershipWrites += 1; return 'ITEM'; },
+    initializeProjectStatus: async () => { statusWrites += 1; },
+    projectMembershipReadDelayMs: 0,
+    sleep: async () => {},
+    writeFile: async () => {},
+  }));
+
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(result.blockers, []);
+  assert.equal(membershipWrites, 1);
+  assert.equal(statusWrites, 0);
+  assert.equal(result.receipt.project.membershipCount, 1);
+  assert.equal(result.receipt.project.status, 'DEV');
+});
+
 test('missing Release scope is actionable incomplete input, never a fabricated default', () => {
   const { blockers } = validateClassification(config, {
     issueType: 'Feature',
