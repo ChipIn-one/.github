@@ -115,8 +115,10 @@ test('fully explicit intake writes missing metadata, membership and Status, then
     },
     readProjectSnapshot: async () => projects[projectReads++],
     writeIssueMetadata: async () => { metadataWrites += 1; },
-    addProjectMembership: async () => { membershipWrites += 1; },
+    addProjectMembership: async () => { membershipWrites += 1; return 'ITEM'; },
     initializeProjectStatus: async () => { statusWrites += 1; },
+    projectMembershipReadDelayMs: 0,
+    sleep: async () => {},
     writeFile: async () => {},
   }));
 
@@ -130,13 +132,56 @@ test('fully explicit intake writes missing metadata, membership and Status, then
   assert.equal(result.receipt.issueType, 'Bug');
 });
 
-test('project membership read-back tolerates delayed Project indexing after a successful add', async () => {
+test('project read-back tolerates indexing beyond the legacy six-read window and waits for Status', async () => {
   let issueReads = 0;
   let projectReads = 0;
   let membershipWrites = 0;
   let statusWrites = 0;
   let sleeps = 0;
+  const delayedProjects = Array.from({ length: 6 }, () => project());
   const projects = [
+    project(),
+    ...delayedProjects,
+    project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: null }] }),
+    project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Backlog' }] }),
+  ];
+
+  const result = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, {
+    config,
+    client: {},
+    readGlobalContext: async () => ({ project: project(), blockers: [] }),
+    readIssueSnapshot: async () => {
+      issueReads += 1;
+      return issueReads === 1 ? issueSnapshot() : fullIssue();
+    },
+    readProjectSnapshot: async () => projects[projectReads++],
+    writeIssueMetadata: async () => {},
+    addProjectMembership: async () => { membershipWrites += 1; return 'ITEM'; },
+    initializeProjectStatus: async (_client, _config, _project, itemId) => {
+      statusWrites += 1;
+      assert.equal(itemId, 'ITEM');
+    },
+    projectMembershipReadDelayMs: 0,
+    sleep: async () => { sleeps += 1; },
+    writeFile: async () => {},
+  }));
+
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(result.blockers, []);
+  assert.equal(membershipWrites, 1);
+  assert.equal(statusWrites, 1);
+  assert.equal(sleeps, 6);
+  assert.equal(result.receipt.project.membershipCount, 1);
+  assert.equal(result.receipt.project.status, 'Backlog');
+});
+
+
+test('late Status initialization gets its own read-back after the final membership attempt', async () => {
+  let issueReads = 0;
+  let projectReads = 0;
+  let statusWrites = 0;
+  const projects = [
+    project(),
     project(),
     project(),
     project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: null }] }),
@@ -153,21 +198,57 @@ test('project membership read-back tolerates delayed Project indexing after a su
     },
     readProjectSnapshot: async () => projects[projectReads++],
     writeIssueMetadata: async () => {},
-    addProjectMembership: async () => { membershipWrites += 1; },
+    addProjectMembership: async () => 'ITEM',
     initializeProjectStatus: async () => { statusWrites += 1; },
     projectMembershipReadAttempts: 3,
+    projectStatusReadAttempts: 1,
     projectMembershipReadDelayMs: 0,
-    sleep: async () => { sleeps += 1; },
+    sleep: async () => {},
+    writeFile: async () => {},
+  }));
+
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(result.blockers, []);
+  assert.equal(statusWrites, 1);
+  assert.equal(result.receipt.project.membershipCount, 1);
+  assert.equal(result.receipt.project.status, 'Backlog');
+});
+
+test('stale Project snapshot never overwrites an existing human-owned Status', async () => {
+  let issueReads = 0;
+  let projectReads = 0;
+  let membershipWrites = 0;
+  let statusWrites = 0;
+  const projects = [
+    project(),
+    project(),
+    project(),
+    project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'DEV' }] }),
+  ];
+
+  const result = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, {
+    config,
+    client: {},
+    readGlobalContext: async () => ({ project: project(), blockers: [] }),
+    readIssueSnapshot: async () => {
+      issueReads += 1;
+      return issueReads === 1 ? issueSnapshot() : fullIssue();
+    },
+    readProjectSnapshot: async () => projects[projectReads++],
+    writeIssueMetadata: async () => {},
+    addProjectMembership: async () => { membershipWrites += 1; return 'ITEM'; },
+    initializeProjectStatus: async () => { statusWrites += 1; },
+    projectMembershipReadDelayMs: 0,
+    sleep: async () => {},
     writeFile: async () => {},
   }));
 
   assert.equal(result.action, 'complete');
   assert.deepEqual(result.blockers, []);
   assert.equal(membershipWrites, 1);
-  assert.equal(statusWrites, 1);
-  assert.equal(sleeps, 1);
+  assert.equal(statusWrites, 0);
   assert.equal(result.receipt.project.membershipCount, 1);
-  assert.equal(result.receipt.project.status, 'Backlog');
+  assert.equal(result.receipt.project.status, 'DEV');
 });
 
 test('missing Release scope is actionable incomplete input, never a fabricated default', () => {
@@ -271,7 +352,7 @@ test('retry after partial create uses persisted issue identity and never creates
   assert.equal(result.action, 'complete');
   assert.equal(result.applied.includes('resume-existing-issue'), true);
   assert.ok(issueReads >= 2);
-  assert.ok(projectReads >= 2);
+  assert.ok(projectReads >= 1);
 });
 
 
