@@ -12,7 +12,9 @@ permissions:
   issues: write
 
 concurrency:
-  group: connector-issue-intake-${{ github.event.issue.number }}
+  # Valid requests require the title to equal "[issue-intake] owner/repo#number", so
+  # using the title serializes every control issue for the same canonical target.
+  group: connector-issue-intake-${{ github.event.issue.title }}
   cancel-in-progress: false
 
 jobs:
