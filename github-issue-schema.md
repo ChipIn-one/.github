@@ -102,7 +102,7 @@ Use GitHub-native relationships for workflow meaning:
 - A plain issue/PR URL is a reference, not a workflow relationship.
 - Closing keywords are not a universal integration signal because their behavior depends on the PR target being the repository default branch.
 
-`DEV` means every required implementation-bearing change is integrated into its configured integration branch: frontend to `dev`, backend to `develop`, and knowledge-base change to `main` when the product specification itself must change. Deployment is separate evidence and does not gate `DEV`.
+`DEV` means every required implementation-bearing change is integrated into its configured integration branch: frontend to `dev`, backend to `develop`, and knowledge-base change to `master` when the product specification itself must change. Deployment is separate evidence and does not gate `DEV`.
 
 Code/product work terminates at `PROD`. Standalone non-code research, documentation, and external work may terminate at `Done`. `PROD`, `Done`, and product-parent closure remain manual in v1.
 
