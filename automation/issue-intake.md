@@ -35,6 +35,40 @@ After creating an issue with the shared form, open `ChipIn-one/.github` -> Actio
 
 This workflow is intentionally `workflow_dispatch` only. A workflow stored in the organization `.github` repository does not subscribe to issue events emitted by sibling FE/BE/KB repositories, so no misleading organization-wide event automation is claimed here.
 
+## Connector bridge: raw Issue create -> canonical intake
+
+Some GitHub clients/connectors can create ordinary Issues, assignees and labels but do not expose direct writes for Organization Issue Fields, native Issue Type, or Projects v2. That limitation is not a reason to leave a ChipIn task partially created.
+
+After creating the real FE/BE/KB issue, create one control issue in `ChipIn-one/.github` with this exact title:
+
+```text
+[issue-intake] ChipIn-one/<repository>#<number>
+```
+
+The body must contain exactly one hidden v1 request marker. Example:
+
+```markdown
+<!-- chipin-issue-intake-request:v1
+{"target":"ChipIn-one/chipin-frontend#308","issueType":"Feature","priority":"P2","releaseScope":"POST-PROD","severity":"none"}
+-->
+```
+
+Rules:
+
+- `target` must be the exact already-created FE/BE/KB issue identity;
+- `issueType`, `priority`, `releaseScope`, and applicable `severity` are explicit inputs, never inferred from title/body/labels;
+- use `"severity":"none"` when Severity is not applicable;
+- Bug still requires `Critical`, `Major`, or `Minor`;
+- the control issue title must identify the same target as the hidden payload;
+- only trusted bridge authors are accepted;
+- unsupported repositories, malformed/duplicate markers, extra payload keys, invalid classifications, and conflicting existing human values fail closed.
+
+`.github/workflows/issue-intake-connector-bridge.yml` listens only for control issues whose title starts with `[issue-intake] `. It validates the request first, then invokes the existing guarded `issue-intake.mjs apply reconcile` path with `CHIPIN_ISSUE_WRITE_TOKEN`. The bridge does not own a second metadata implementation.
+
+Every run comments the outcome on the control issue. A successful comment includes canonical read-back for Issue Type, Priority, Release scope, Severity, Project #5 membership, and Status. A blocked run leaves canonical completion unclaimed and lists the blockers. Editing or reopening the same control issue safely retries the idempotent reconciliation path after fixing a request or transient failure.
+
+Connector rule: raw target issue creation is incomplete until the bridge reports `COMPLETE`. Do not stop with a connector-capability disclaimer when this bridge is available.
+
 ## API / agent create path
 
 Create mode uses GitHub's issue REST API with explicit `type` and `issue_field_values`, persists the returned issue identity before Project mutations, and then runs the same reconciliation/read-back path.
