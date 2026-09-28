@@ -218,7 +218,7 @@ test('KB composite parent rolls up native sub-issue statuses and ignores parent 
     { repository: 'ChipIn-one/chipin-frontend', number: 2, status: 'DEV' },
   ]);
   const result = await evaluateLiveIssue(
-    fakeClient({ snapshot, pullRequests: [pr({ repository: 'ChipIn-one/chipin-knowledge-base', baseRefName: 'main', number: 300 })] }),
+    fakeClient({ snapshot, pullRequests: [pr({ repository: 'ChipIn-one/chipin-knowledge-base', baseRefName: 'master', number: 300 })] }),
     config,
     ctx,
     'ChipIn-one/chipin-knowledge-base',
