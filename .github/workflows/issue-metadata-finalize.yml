@@ -42,20 +42,18 @@ on:
           - Major
           - Minor
       apply:
-        description: "Apply missing canonical metadata/project state (false = read-only plan)"
+        description: "Queue canonical metadata/project reconciliation (false = read-only plan)"
         required: true
         default: false
         type: boolean
 
 permissions:
   contents: read
-
-concurrency:
-  group: issue-metadata-finalizer
-  cancel-in-progress: false
+  issues: write
 
 jobs:
-  finalize:
+  plan:
+    if: inputs.apply != true
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -81,48 +79,117 @@ jobs:
         run: node --test automation/*.test.mjs
 
       - name: Read-only plan
-        if: inputs.apply != true
         env:
           GITHUB_TOKEN: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
-        shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${GITHUB_TOKEN:-}" ]; then
-            echo "CHIPIN_DEV_READ_TOKEN is not configured."
-            exit 1
-          fi
-          node automation/issue-intake.mjs plan reconcile "$ISSUE_REF" \
-            --type "$ISSUE_TYPE" \
-            --priority "$PRIORITY" \
-            --release-scope "$RELEASE_SCOPE" \
-            --severity "$SEVERITY" \
-            --output "$OUTPUT_PATH"
+          test -n "${GITHUB_TOKEN:-}"
+          node automation/issue-intake.mjs plan reconcile "$ISSUE_REF"             --type "$ISSUE_TYPE"             --priority "$PRIORITY"             --release-scope "$RELEASE_SCOPE"             --severity "$SEVERITY"             --output "$OUTPUT_PATH"
 
-      - name: Guarded apply
-        if: inputs.apply == true
-        env:
-          GITHUB_TOKEN: ${{ secrets.CHIPIN_ISSUE_WRITE_TOKEN }}
-          CHIPIN_ISSUE_WRITE: "1"
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -z "${GITHUB_TOKEN:-}" ]; then
-            echo "CHIPIN_ISSUE_WRITE_TOKEN is not configured."
-            exit 1
-          fi
-          node automation/issue-intake.mjs apply reconcile "$ISSUE_REF" \
-            --type "$ISSUE_TYPE" \
-            --priority "$PRIORITY" \
-            --release-scope "$RELEASE_SCOPE" \
-            --severity "$SEVERITY" \
-            --activate issue-intake-v1 \
-            --output "$OUTPUT_PATH"
-
-      - name: Upload receipt
+      - name: Upload plan
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: issue-intake-${{ github.run_id }}
+          name: issue-intake-plan-${{ github.run_id }}
           path: issue-intake-receipt.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  enqueue:
+    if: inputs.apply == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ISSUE_REF: ${{ inputs.issue_ref }}
+      ISSUE_TYPE: ${{ inputs.issue_type }}
+      PRIORITY: ${{ inputs.priority }}
+      RELEASE_SCOPE: ${{ inputs.release_scope }}
+      SEVERITY: ${{ inputs.severity }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.21.0'
+
+      - name: Run intake tests
+        run: node --test automation/*.test.mjs
+
+      - name: Create durable control issue
+        id: create
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REQUEST_JSON="$(jq -cn             --arg target "$ISSUE_REF"             --arg issueType "$ISSUE_TYPE"             --arg priority "$PRIORITY"             --arg releaseScope "$RELEASE_SCOPE"             --arg severity "$SEVERITY"             '{target:$target,issueType:$issueType,priority:$priority,releaseScope:$releaseScope,severity:$severity}')"
+          printf '%s\n%s\n%s\n' '<!-- chipin-issue-intake-request:v1' "$REQUEST_JSON" '-->' > control-body.md
+          gh api --method POST repos/ChipIn-one/.github/issues             --raw-field title="[issue-intake] $ISSUE_REF"             --raw-field body="$(cat control-body.md)" > control-issue.json
+          jq -r '.html_url' control-issue.json
+
+      - name: Validate and persist queue snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          jq -n             --slurpfile issue control-issue.json             '{repository:{full_name:"ChipIn-one/.github"},issue:$issue[0],sender:{login:"github-actions[bot]"}}'             > manual-intake-event.json
+          node automation/issue-intake-request.mjs validate             --event manual-intake-event.json             --config automation/metadata-migration.config.json             --request-output issue-intake-request.json             --bridge-output issue-intake-bridge-receipt.json
+          node automation/issue-intake-request.mjs queue             --request issue-intake-request.json             --output issue-intake-queue-comment.md
+          REQUEST_URL="$(jq -r '.html_url' control-issue.json)"
+          gh issue comment "$REQUEST_URL" --body-file issue-intake-queue-comment.md
+
+      - name: Upload enqueue evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-intake-enqueue-${{ github.run_id }}
+          path: |
+            control-issue.json
+            issue-intake-request.json
+            issue-intake-bridge-receipt.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  drain:
+    needs: enqueue
+    if: inputs.apply == true && needs.enqueue.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: canonical-issue-intake-writes
+      cancel-in-progress: false
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      CHIPIN_CANONICAL_WRITE_TOKEN: ${{ secrets.CHIPIN_ISSUE_WRITE_TOKEN }}
+      SUMMARY_PATH: issue-intake-drain-summary.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.21.0'
+
+      - name: Drain all durable intake requests
+        run: |
+          set -euo pipefail
+          node automation/issue-intake-request.mjs drain             --config automation/metadata-migration.config.json             --summary-output "$SUMMARY_PATH"
+
+      - name: Upload drain summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-intake-drain-${{ github.run_id }}
+          path: |
+            issue-intake-drain-summary.json
+            issue-intake-drain-*.json
           if-no-files-found: warn
           retention-days: 30
