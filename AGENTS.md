@@ -9,5 +9,4 @@ Canonical AI routing:
 GitHub Issue/PR entry never bypasses this route; use GitHub records only, no auto-discovery; legacy contexts are migration-only.
 Canonical root: ~/Desktop/WORK
 <!-- ai-workflow:agents-routing:end -->
-
 For ChipIn FE/KB issue creation, `gh issue create` alone is not completion. Follow [automation/issue-intake.md](automation/issue-intake.md) and finish explicit canonical Type/Issue Fields plus exactly one Project #5 membership with readable Status and read-back receipt; shared UI forms use the manual finalizer described there.
