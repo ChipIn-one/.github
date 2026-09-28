@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -128,6 +128,46 @@ test('fully explicit intake writes missing metadata, membership and Status, then
   assert.equal(result.receipt.project.membershipCount, 1);
   assert.equal(result.receipt.project.status, 'Backlog');
   assert.equal(result.receipt.issueType, 'Bug');
+});
+
+test('project membership read-back tolerates delayed Project indexing after a successful add', async () => {
+  let issueReads = 0;
+  let projectReads = 0;
+  let membershipWrites = 0;
+  let statusWrites = 0;
+  let sleeps = 0;
+  const projects = [
+    project(),
+    project(),
+    project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: null }] }),
+    project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Backlog' }] }),
+  ];
+
+  const result = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, {
+    config,
+    client: {},
+    readGlobalContext: async () => ({ project: project(), blockers: [] }),
+    readIssueSnapshot: async () => {
+      issueReads += 1;
+      return issueReads === 1 ? issueSnapshot() : fullIssue();
+    },
+    readProjectSnapshot: async () => projects[projectReads++],
+    writeIssueMetadata: async () => {},
+    addProjectMembership: async () => { membershipWrites += 1; },
+    initializeProjectStatus: async () => { statusWrites += 1; },
+    projectMembershipReadAttempts: 3,
+    projectMembershipReadDelayMs: 0,
+    sleep: async () => { sleeps += 1; },
+    writeFile: async () => {},
+  }));
+
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(result.blockers, []);
+  assert.equal(membershipWrites, 1);
+  assert.equal(statusWrites, 1);
+  assert.equal(sleeps, 1);
+  assert.equal(result.receipt.project.membershipCount, 1);
+  assert.equal(result.receipt.project.status, 'Backlog');
 });
 
 test('missing Release scope is actionable incomplete input, never a fabricated default', () => {
@@ -413,4 +453,12 @@ test('final verification requires exactly one membership and a readable Status',
     project: project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: null }] }),
   });
   assert.match(result.blockers.join('\n'), /Status is missing/);
+});
+
+
+test('agent entrypoint requires completed ChipIn intake after gh issue create', async () => {
+  const agents = await readFile(new URL('../AGENTS.md', import.meta.url), 'utf8');
+  assert.match(agents, /`gh issue create` alone is not completion/);
+  assert.match(agents, /automation\/issue-intake\.md/);
+  assert.match(agents, /exactly one Project #5 membership with readable Status and read-back receipt/);
 });
