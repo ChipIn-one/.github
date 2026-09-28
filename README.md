@@ -18,7 +18,7 @@ GitHub uses the organization-profile Issue Forms only when a repository does not
 Audited 2026-09-27:
 - `chipin-frontend` `dev` and `main`: no local Issue Forms; shared forms apply.
 - `chipin-backend` `develop`: no local Issue Forms; shared forms apply.
-- `chipin-knowledge-base` `main`: no local Issue Forms; shared forms apply.
+- `chipin-knowledge-base` `master`: no local Issue Forms; shared forms apply.
 
 CODEOWNERS and GitHub Actions workflows are repository-local. They are not inherited as organization defaults and must be created/maintained in the repository whose ownership or execution policy they control.
 
