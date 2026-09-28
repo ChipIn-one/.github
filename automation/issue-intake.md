@@ -1,6 +1,6 @@
 # Issue create/finalize and reconciliation
 
-Last reviewed: 2026-09-27
+Last reviewed: 2026-09-28
 
 `issue-intake.mjs` completes ChipIn issue creation without guessing metadata. It supports the three canonical repositories only:
 
@@ -31,7 +31,7 @@ CHIPIN_ISSUE_WRITE=1
 
 The organization Issue Forms continue to set only native Issue Type. Form-body dropdowns would be converted to Markdown and are therefore not canonical Issue Field values. The forms also deliberately do not use the top-level `projects:` key: GitHub requires the issue creator to have project write access, and that mechanism would not repair issues created through API/agents.
 
-After creating an issue with the shared form, open `ChipIn-one/.github` -> Actions -> `Issue metadata finalizer` and provide the exact issue identity plus explicit canonical metadata. Run with `apply=false` first to inspect the read-only plan. `apply=true` uses the separately configured write credential and returns a receipt artifact.
+After creating an issue with the shared form, open `ChipIn-one/.github` -> Actions -> `Issue metadata finalizer` and provide the exact issue identity plus explicit canonical metadata. Run with `apply=false` first to inspect the read-only plan. `apply=true` does not write canonical metadata directly: it creates a durable intake control issue/queue snapshot and the shared serialized drain performs the write with `CHIPIN_ISSUE_WRITE_TOKEN`. The canonical result is recorded on that control issue.
 
 This workflow is intentionally `workflow_dispatch` only. A workflow stored in the organization `.github` repository does not subscribe to issue events emitted by sibling FE/BE/KB repositories, so no misleading organization-wide event automation is claimed here.
 
@@ -63,9 +63,11 @@ Rules:
 - only trusted bridge authors are accepted;
 - unsupported repositories, malformed/duplicate markers, extra payload keys, invalid classifications, and conflicting existing human values fail closed.
 
-`.github/workflows/issue-intake-connector-bridge.yml` listens only for control issues whose title starts with `[issue-intake] `. It validates the request first, then invokes the existing guarded `issue-intake.mjs apply reconcile` path with `CHIPIN_ISSUE_WRITE_TOKEN`. The bridge does not own a second metadata implementation.
+`.github/workflows/issue-intake-connector-bridge.yml` listens only for control issues whose title starts with `[issue-intake] `. Validation and trust checks happen before mutation. A valid event is first persisted as a normalized queue-record comment authored by `github-actions[bot]`; only then may a drain job run. The drain ignores mutable issue-body state and consumes the durable validated snapshot, then invokes the existing guarded `issue-intake.mjs apply reconcile` path with `CHIPIN_ISSUE_WRITE_TOKEN`. The bridge does not own a second metadata implementation.
 
-Every run comments the outcome on the control issue. A successful comment includes canonical read-back for Issue Type, Priority, Release scope, Severity, Project #5 membership, and Status. A blocked run leaves canonical completion unclaimed and lists the blockers. Editing or reopening the same control issue safely retries the idempotent reconciliation path after fixing a request or transient failure.
+Connector and manual-finalizer writes use the same repository-wide `canonical-issue-intake-writes` drain concurrency group. Every validated request is durable before entering that group, so GitHub Actions replacing an older pending drain does not discard the request: a later drain scans all unprocessed queue records in order. This also prevents the manual finalizer and connector bridge from writing canonical metadata concurrently.
+
+Every processed queue record receives a result comment containing a machine result marker plus human-readable canonical read-back for Issue Type, Priority, Release scope, Severity, Project #5 membership, and Status. Processed control issues are closed. A blocked result leaves canonical completion unclaimed and lists the blockers. A trusted edit/reopen creates a new validated queue snapshot; untrusted edits cannot replace the prior validated snapshot.
 
 Connector rule: raw target issue creation is incomplete until the bridge reports `COMPLETE`. Do not stop with a connector-capability disclaimer when this bridge is available.
 
