@@ -4,6 +4,8 @@ import test from 'node:test';
 import {
   buildIntakeArgs,
   parseRequestBody,
+  pendingQueueItems,
+  renderQueueComment,
   renderReceiptComment,
   validateRequestEvent,
 } from './issue-intake-request.mjs';
@@ -121,13 +123,46 @@ test('untrusted edit/reopen trigger actor fails closed even when original author
   assert.match(result.blockers.join('\n'), /trigger actor external-collaborator is not trusted/);
 });
 
-test('bridge workflow serializes separate control issues by exact target-bearing title', async () => {
-  const workflow = await readFile(
-    new URL('../.github/workflows/issue-intake-connector-bridge.yml', import.meta.url),
-    'utf8',
+test('bridge and manual finalizer share one serialized canonical-write drain after durable enqueue', async () => {
+  const [bridge, manual] = await Promise.all([
+    readFile(new URL('../.github/workflows/issue-intake-connector-bridge.yml', import.meta.url), 'utf8'),
+    readFile(new URL('../.github/workflows/issue-metadata-finalize.yml', import.meta.url), 'utf8'),
+  ]);
+  for (const workflow of [bridge, manual]) {
+    assert.match(workflow, /group: canonical-issue-intake-writes/);
+    assert.match(workflow, /issue-intake-request\.mjs drain/);
+  }
+  assert.match(bridge, /Persist durable queue record/);
+  assert.doesNotMatch(bridge, /issue-intake-request\.mjs apply/);
+  assert.match(manual, /Create durable control issue/);
+  assert.doesNotMatch(manual, /issue-intake\.mjs apply reconcile/);
+});
+
+test('durable queue preserves every pending snapshot even when multiple requests target the same issue', () => {
+  const issue = { number: 100 };
+  const queuedA = {
+    schemaVersion: 1,
+    requestIssue: 100,
+    target: 'ChipIn-one/chipin-frontend#308',
+    issueType: 'Feature',
+    priority: 'P2',
+    releaseScope: 'POST-PROD',
+    severity: 'none',
+  };
+  const queuedB = { ...queuedA, priority: 'P1' };
+  const comments = [
+    { id: 10, user: { login: 'github-actions[bot]' }, body: renderQueueComment(queuedA) },
+    { id: 11, user: { login: 'github-actions[bot]' }, body: renderQueueComment(queuedB) },
+    {
+      id: 12,
+      user: { login: 'github-actions[bot]' },
+      body: renderReceiptComment({ status: 'complete', blockers: [], request: queuedA, intake: null }, 10),
+    },
+  ];
+  assert.deepEqual(
+    pendingQueueItems(issue, comments).map((entry) => entry.id),
+    [11],
   );
-  assert.match(workflow, /group: connector-issue-intake-\$\{\{ github\.event\.issue\.title \}\}/);
-  assert.doesNotMatch(workflow, /group: connector-issue-intake-\$\{\{ github\.event\.issue\.number \}\}/);
 });
 
 test('unsupported target repository fails before canonical intake', () => {
