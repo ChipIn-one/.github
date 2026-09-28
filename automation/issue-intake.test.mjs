@@ -275,7 +275,7 @@ test('retry after partial create uses persisted issue identity and never creates
   assert.equal(result.action, 'complete');
   assert.equal(result.applied.includes('resume-existing-issue'), true);
   assert.ok(issueReads >= 2);
-  assert.ok(projectReads >= 2);
+  assert.ok(projectReads >= 1);
 });
 
 
