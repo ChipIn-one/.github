@@ -170,7 +170,46 @@ test('project read-back tolerates indexing beyond the legacy six-read window and
   assert.deepEqual(result.blockers, []);
   assert.equal(membershipWrites, 1);
   assert.equal(statusWrites, 1);
-  assert.equal(sleeps, 7);
+  assert.equal(sleeps, 6);
+  assert.equal(result.receipt.project.membershipCount, 1);
+  assert.equal(result.receipt.project.status, 'Backlog');
+});
+
+
+test('late Status initialization gets its own read-back after the final membership attempt', async () => {
+  let issueReads = 0;
+  let projectReads = 0;
+  let statusWrites = 0;
+  const projects = [
+    project(),
+    project(),
+    project(),
+    project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: null }] }),
+    project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Backlog' }] }),
+  ];
+
+  const result = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, {
+    config,
+    client: {},
+    readGlobalContext: async () => ({ project: project(), blockers: [] }),
+    readIssueSnapshot: async () => {
+      issueReads += 1;
+      return issueReads === 1 ? issueSnapshot() : fullIssue();
+    },
+    readProjectSnapshot: async () => projects[projectReads++],
+    writeIssueMetadata: async () => {},
+    addProjectMembership: async () => 'ITEM',
+    initializeProjectStatus: async () => { statusWrites += 1; },
+    projectMembershipReadAttempts: 3,
+    projectStatusReadAttempts: 1,
+    projectMembershipReadDelayMs: 0,
+    sleep: async () => {},
+    writeFile: async () => {},
+  }));
+
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(result.blockers, []);
+  assert.equal(statusWrites, 1);
   assert.equal(result.receipt.project.membershipCount, 1);
   assert.equal(result.receipt.project.status, 'Backlog');
 });
