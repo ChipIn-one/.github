@@ -10,9 +10,9 @@
     "input":{"repository":"ChipIn-one/chipin-backend","currentStatus":"In Progress","workKind":"Bug","metadataReadable":true,"projectReadable":true,"requiredItems":[{"kind":"pr","state":"merged","baseBranch":"develop"}],"blockers":[]}
   },
   {
-    "name":"KB PR merged to main",
+    "name":"KB PR merged to master",
     "expected":"READY_FOR_DEV",
-    "input":{"repository":"ChipIn-one/chipin-knowledge-base","currentStatus":"In Progress","workKind":"Feature","metadataReadable":true,"projectReadable":true,"requiredItems":[{"kind":"pr","state":"merged","baseBranch":"main"}],"blockers":[]}
+    "input":{"repository":"ChipIn-one/chipin-knowledge-base","currentStatus":"In Progress","workKind":"Feature","metadataReadable":true,"projectReadable":true,"requiredItems":[{"kind":"pr","state":"merged","baseBranch":"master"}],"blockers":[]}
   },
   {
     "name":"required PR still open",
