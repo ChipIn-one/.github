@@ -420,36 +420,38 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             let memberships = projectItemsFor(project, target.repository, target.number);
             if (memberships.length > 1) throw new Error('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items).');
 
-            let projectChanged = false;
+            const membershipAttempts = overrides.projectMembershipReadAttempts ?? 16;
+            const statusAttempts = overrides.projectStatusReadAttempts ?? 6;
+            const delayMs = overrides.projectMembershipReadDelayMs ?? 2000;
+            const sleep = overrides.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
             let statusInitialized = false;
+
             if (!memberships.length) {
               await (overrides.addProjectMembership || addProjectMembership)(client, project, snapshot);
               result.applied.push('project-membership');
-              projectChanged = true;
-            } else if (!memberships[0].status) {
+
+              for (let attempt = 0; attempt < membershipAttempts; attempt += 1) {
+                project = await readProject(client, config);
+                memberships = projectItemsFor(project, target.repository, target.number);
+                if (memberships.length !== 0) break;
+                if (attempt + 1 < membershipAttempts) await sleep(delayMs);
+              }
+            }
+
+            if (memberships.length > 1) throw new Error('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items).');
+            if (memberships.length === 1 && !memberships[0].status) {
               await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, memberships[0].id);
               result.applied.push('status:' + INITIAL_STATUS);
               statusInitialized = true;
-              projectChanged = true;
             }
 
-            if (projectChanged) {
-              const attempts = overrides.projectMembershipReadAttempts ?? 16;
-              const delayMs = overrides.projectMembershipReadDelayMs ?? 2000;
-              const sleep = overrides.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-              for (let attempt = 0; attempt < attempts; attempt += 1) {
+            if (statusInitialized) {
+              for (let attempt = 0; attempt < statusAttempts; attempt += 1) {
                 project = await readProject(client, config);
                 memberships = projectItemsFor(project, target.repository, target.number);
                 if (memberships.length > 1) break;
-                if (memberships.length === 1) {
-                  if (memberships[0].status) break;
-                  if (!statusInitialized) {
-                    await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, memberships[0].id);
-                    result.applied.push('status:' + INITIAL_STATUS);
-                    statusInitialized = true;
-                  }
-                }
-                if (attempt + 1 < attempts) await sleep(delayMs);
+                if (memberships.length === 1 && memberships[0].status) break;
+                if (attempt + 1 < statusAttempts) await sleep(delayMs);
               }
             }
 
