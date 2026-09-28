@@ -149,12 +149,35 @@ test('Development pagination reads every PR page', async () => {
 
 test('stacked merged PR is integrated only when its merge SHA is reachable from the intended branch', async () => {
   const normalized = await normalizeDevelopment(
-    fakeClient({ pullRequests: [], compareStatus: 'behind' }),
+    fakeClient({ pullRequests: [], compareStatus: 'ahead' }),
     'ChipIn-one/chipin-frontend',
     { pullRequests: [pr({ baseRefName: 'feature/base' })], branches: [] },
   );
   assert.equal(normalized.pullRequests[0].integration, 'stacked');
   assert.equal(normalized.pullRequests[0].baseBranch, 'dev');
+});
+
+test('KB PR merged to legacy main stays integrated after the master cutover', async () => {
+  const ctx = liveContext([{ repository: 'ChipIn-one/chipin-knowledge-base', number: 1, status: 'In Progress' }]);
+  const result = await evaluateLiveIssue(
+    fakeClient({
+      pullRequests: [pr({
+        repository: 'ChipIn-one/chipin-knowledge-base',
+        baseRefName: 'main',
+        number: 301,
+        mergeSha: 'legacy-main-merge',
+      })],
+      compareStatus: 'ahead',
+    }),
+    config,
+    ctx,
+    'ChipIn-one/chipin-knowledge-base',
+    1,
+  );
+  assert.equal(result.decision.state, 'READY_FOR_DEV');
+  assert.equal(result.evidence.developmentPullRequests[0].actualBaseBranch, 'main');
+  assert.equal(result.evidence.developmentPullRequests[0].baseBranch, 'master');
+  assert.equal(result.evidence.developmentPullRequests[0].integration, 'stacked');
 });
 
 test('representative live-shape adapter decisions cover READY_FOR_DEV and NOT_READY', async () => {
