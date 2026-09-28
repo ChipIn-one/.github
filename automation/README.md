@@ -40,7 +40,9 @@ The token needs read access to the organization Issue Fields / Issue Types, Proj
 
 The UI entry point is the manual `.github/workflows/issue-metadata-finalize.yml` workflow. It runs the full automation test suite before plan/apply. Read-only plans can use `CHIPIN_DEV_READ_TOKEN`; writes require the separate `CHIPIN_ISSUE_WRITE_TOKEN`.
 
-See [issue-intake.md](./issue-intake.md) for CLI examples, retry semantics, the named-gap reconciliation plan, and the live activation procedure.
+For API clients/connectors that can create normal Issues but cannot mutate Issue Fields / Issue Type / Projects v2, `.github/workflows/issue-intake-connector-bridge.yml` accepts a narrowly formatted control issue in this repository. `issue-intake-request.mjs` validates the trusted author, exact target, request schema, and canonical classification before invoking the same existing `issue-intake.mjs apply reconcile` path. It never implements a second metadata writer. The workflow comments the canonical read-back or blockers on the control issue and retains machine-readable receipts.
+
+See [issue-intake.md](./issue-intake.md) for CLI examples, connector request format, retry semantics, the named-gap reconciliation plan, and the live activation procedure.
 
 ## Metadata migration
 
