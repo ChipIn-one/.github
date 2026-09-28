@@ -86,6 +86,7 @@ export function validateRequestEvent({ event, config, trustedActors = TRUSTED_AC
   const repository = event?.repository?.full_name ?? null;
   const issue = event?.issue ?? null;
   const actor = issue?.user?.login ?? null;
+  const triggerActor = event?.sender?.login ?? null;
   const title = issue?.title ?? '';
   let request = null;
 
@@ -94,6 +95,9 @@ export function validateRequestEvent({ event, config, trustedActors = TRUSTED_AC
   }
   if (!actor || !trustedActors.has(actor)) {
     blockers.push(`Request author ${actor ?? 'unreadable'} is not trusted for canonical intake.`);
+  }
+  if (!triggerActor || !trustedActors.has(triggerActor)) {
+    blockers.push(`Request trigger actor ${triggerActor ?? 'unreadable'} is not trusted for canonical intake.`);
   }
   if (!title.startsWith(`${REQUEST_TITLE_PREFIX} `)) {
     blockers.push(`Request title must start with "${REQUEST_TITLE_PREFIX} ".`);
@@ -133,6 +137,7 @@ export function validateRequestEvent({ event, config, trustedActors = TRUSTED_AC
     valid: blockers.length === 0,
     blockers,
     actor,
+    triggerActor,
     requestIssue: issue?.number ?? null,
     requestIssueUrl: issue?.html_url ?? null,
     request,
@@ -167,6 +172,7 @@ function bridgeReceiptBase(validation) {
     requestIssue: validation.requestIssue,
     requestIssueUrl: validation.requestIssueUrl,
     actor: validation.actor,
+    triggerActor: validation.triggerActor,
     request: validation.request,
     status: validation.valid ? 'validated' : 'blocked',
     blockers: [...validation.blockers],
@@ -198,6 +204,7 @@ export async function validateCommand({
     requestIssue: validation.requestIssue,
     requestIssueUrl: validation.requestIssueUrl,
     actor: validation.actor,
+    triggerActor: validation.triggerActor,
     ...validation.request,
   });
   return receipt;
