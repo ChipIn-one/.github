@@ -419,30 +419,40 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             if (projectBlockers.length) throw new Error(projectBlockers.join(' '));
             let memberships = projectItemsFor(project, target.repository, target.number);
             if (memberships.length > 1) throw new Error('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items).');
+
+            let projectChanged = false;
             if (!memberships.length) {
-              await (overrides.addProjectMembership || addProjectMembership)(client, project, snapshot);
+              const itemId = await (overrides.addProjectMembership || addProjectMembership)(client, project, snapshot);
               result.applied.push('project-membership');
-              const attempts = overrides.projectMembershipReadAttempts ?? 6;
-              const delayMs = overrides.projectMembershipReadDelayMs ?? 1000;
+              await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, itemId);
+              result.applied.push('status:' + INITIAL_STATUS);
+              projectChanged = true;
+            } else if (!memberships[0].status) {
+              await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, memberships[0].id);
+              result.applied.push('status:' + INITIAL_STATUS);
+              projectChanged = true;
+            }
+
+            if (projectChanged) {
+              const attempts = overrides.projectMembershipReadAttempts ?? 16;
+              const delayMs = overrides.projectMembershipReadDelayMs ?? 2000;
               const sleep = overrides.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
               for (let attempt = 0; attempt < attempts; attempt += 1) {
                 project = await readProject(client, config);
                 memberships = projectItemsFor(project, target.repository, target.number);
-                if (memberships.length) break;
+                if (memberships.length > 1) break;
+                if (memberships.length === 1 && memberships[0].status) break;
                 if (attempt + 1 < attempts) await sleep(delayMs);
               }
             }
+
             if (memberships.length !== 1) throw new Error('Project membership read-back count is ' + memberships.length + ', expected exactly 1.');
-            if (!memberships[0].status) {
-              await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, memberships[0].id);
-              result.applied.push('status:' + INITIAL_STATUS);
-            }
+            if (!memberships[0].status) throw new Error('Project Status read-back is missing after mutation.');
           } catch (error) { result.blockers.push('Project reconciliation failed: ' + error.message); }
         }
         if (!result.blockers.length) {
           try {
             snapshot = await readIssue(client, target.repository, target.number);
-            project = await readProject(client, config);
             const final = verifyFinalState({ config, repository: target.repository, number: target.number, classification: checked.classification, snapshot, project });
             result.receipt = final.receipt;
             result.blockers.push(...final.blockers);
