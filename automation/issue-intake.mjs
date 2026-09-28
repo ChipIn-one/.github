@@ -421,15 +421,15 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             if (memberships.length > 1) throw new Error('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items).');
 
             let projectChanged = false;
+            let statusInitialized = false;
             if (!memberships.length) {
-              const itemId = await (overrides.addProjectMembership || addProjectMembership)(client, project, snapshot);
+              await (overrides.addProjectMembership || addProjectMembership)(client, project, snapshot);
               result.applied.push('project-membership');
-              await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, itemId);
-              result.applied.push('status:' + INITIAL_STATUS);
               projectChanged = true;
             } else if (!memberships[0].status) {
               await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, memberships[0].id);
               result.applied.push('status:' + INITIAL_STATUS);
+              statusInitialized = true;
               projectChanged = true;
             }
 
@@ -441,7 +441,14 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
                 project = await readProject(client, config);
                 memberships = projectItemsFor(project, target.repository, target.number);
                 if (memberships.length > 1) break;
-                if (memberships.length === 1 && memberships[0].status) break;
+                if (memberships.length === 1) {
+                  if (memberships[0].status) break;
+                  if (!statusInitialized) {
+                    await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, memberships[0].id);
+                    result.applied.push('status:' + INITIAL_STATUS);
+                    statusInitialized = true;
+                  }
+                }
                 if (attempt + 1 < attempts) await sleep(delayMs);
               }
             }
