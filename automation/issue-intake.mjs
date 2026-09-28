@@ -15,6 +15,10 @@ const APPLY_ACTIVATION = 'issue-intake-v1';
 const APPLY_ENV = 'CHIPIN_ISSUE_WRITE';
 const INITIAL_STATUS = 'Backlog';
 const SUPPORTED = new Set(Object.keys(INTEGRATION_BRANCHES));
+
+export function isSupportedIntakeRepository(repository) {
+  return SUPPORTED.has(repository);
+}
 const ADD_ITEM = [
   'mutation AddIssue($projectId: ID!, $contentId: ID!) {',
   '  addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) { item { id } }',

@@ -11,3 +11,5 @@ Canonical root: ~/Desktop/WORK
 <!-- ai-workflow:agents-routing:end -->
 
 For ChipIn FE/KB issue creation, `gh issue create` alone is not completion. Follow [automation/issue-intake.md](automation/issue-intake.md) and finish explicit canonical Type/Issue Fields plus exactly one Project #5 membership with readable Status and read-back receipt; shared UI forms use the manual finalizer described there.
+
+When the active GitHub connector can create ordinary Issues but cannot write Organization Issue Fields / Issue Type / Projects v2 directly, do not stop after raw issue creation or report that canonical completion is impossible. Create the exact connector bridge request documented in [automation/issue-intake.md](automation/issue-intake.md); the bridge must complete the existing canonical intake and return a read-back receipt.
