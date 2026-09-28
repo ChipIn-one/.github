@@ -11,23 +11,16 @@ permissions:
   contents: read
   issues: write
 
-concurrency:
-  # Valid requests require the title to equal "[issue-intake] owner/repo#number", so
-  # using the title serializes every control issue for the same canonical target.
-  group: connector-issue-intake-${{ github.event.issue.title }}
-  cancel-in-progress: false
-
 jobs:
-  intake:
+  validate:
     if: startsWith(github.event.issue.title, '[issue-intake] ')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       REQUEST_PATH: issue-intake-request.json
       BRIDGE_RECEIPT_PATH: issue-intake-bridge-receipt.json
-      INTAKE_RECEIPT_PATH: issue-intake-receipt.json
-      COMMENT_PATH: issue-intake-comment.md
-
+      QUEUE_COMMENT_PATH: issue-intake-queue-comment.md
+      BLOCKED_COMMENT_PATH: issue-intake-blocked-comment.md
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -46,61 +39,83 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node automation/issue-intake-request.mjs validate \
-            --event "$GITHUB_EVENT_PATH" \
-            --config automation/metadata-migration.config.json \
-            --request-output "$REQUEST_PATH" \
-            --bridge-output "$BRIDGE_RECEIPT_PATH"
+          node automation/issue-intake-request.mjs validate             --event "$GITHUB_EVENT_PATH"             --config automation/metadata-migration.config.json             --request-output "$REQUEST_PATH"             --bridge-output "$BRIDGE_RECEIPT_PATH"
 
-      - name: Apply canonical issue intake
-        id: apply
+      - name: Render durable queue record
         if: steps.validate.outcome == 'success'
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.CHIPIN_ISSUE_WRITE_TOKEN }}
-          CHIPIN_ISSUE_WRITE: "1"
-        shell: bash
         run: |
-          set -euo pipefail
-          node automation/issue-intake-request.mjs apply \
-            --request "$REQUEST_PATH" \
-            --bridge-output "$BRIDGE_RECEIPT_PATH" \
-            --intake-output "$INTAKE_RECEIPT_PATH"
+          node automation/issue-intake-request.mjs queue             --request "$REQUEST_PATH"             --output "$QUEUE_COMMENT_PATH"
 
-      - name: Render request receipt comment
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          node automation/issue-intake-request.mjs render \
-            --receipt "$BRIDGE_RECEIPT_PATH" \
-            --output "$COMMENT_PATH"
-
-      - name: Comment request receipt
-        if: always()
+      - name: Persist durable queue record
+        if: steps.validate.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           REQUEST_URL: ${{ github.event.issue.html_url }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh issue comment "$REQUEST_URL" --body-file "$COMMENT_PATH"
+        run: gh issue comment "$REQUEST_URL" --body-file "$QUEUE_COMMENT_PATH"
 
-      - name: Upload bridge receipts
+      - name: Render blocked validation receipt
+        if: steps.validate.outcome != 'success'
+        run: |
+          node automation/issue-intake-request.mjs render             --receipt "$BRIDGE_RECEIPT_PATH"             --output "$BLOCKED_COMMENT_PATH"
+
+      - name: Comment blocked validation receipt
+        if: steps.validate.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_URL: ${{ github.event.issue.html_url }}
+        run: gh issue comment "$REQUEST_URL" --body-file "$BLOCKED_COMMENT_PATH"
+
+      - name: Upload validation receipt
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: connector-issue-intake-${{ github.run_id }}
+          name: connector-issue-intake-validation-${{ github.run_id }}
           path: |
             issue-intake-bridge-receipt.json
-            issue-intake-receipt.json
+            issue-intake-request.json
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Enforce successful canonical completion
-        if: always()
-        shell: bash
+      - name: Enforce valid queue admission
+        if: steps.validate.outcome != 'success'
+        run: exit 1
+
+  drain:
+    needs: validate
+    if: needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: canonical-issue-intake-writes
+      cancel-in-progress: false
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      CHIPIN_CANONICAL_WRITE_TOKEN: ${{ secrets.CHIPIN_ISSUE_WRITE_TOKEN }}
+      SUMMARY_PATH: issue-intake-drain-summary.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.21.0'
+
+      - name: Drain all durable intake requests
         run: |
           set -euo pipefail
-          node automation/issue-intake-request.mjs assert-success \
-            --receipt "$BRIDGE_RECEIPT_PATH"
+          node automation/issue-intake-request.mjs drain             --config automation/metadata-migration.config.json             --summary-output "$SUMMARY_PATH"
+
+      - name: Upload drain summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: connector-issue-intake-drain-${{ github.run_id }}
+          path: |
+            issue-intake-drain-summary.json
+            issue-intake-drain-*.json
+          if-no-files-found: warn
+          retention-days: 30
