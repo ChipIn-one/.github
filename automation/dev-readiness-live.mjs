@@ -196,7 +196,7 @@ async function normalizeDevelopmentPr(client, issueRepository, rawPr) {
       `/repos/${owner}/${repo}/compare/${encodeURIComponent(mergeSha)}...${encodeURIComponent(expectedBranch)}`,
     );
     if (!COMPARE_STATUSES.has(compare?.status)) return { ...evidence, readable: false };
-    if (compare.status === 'behind' || compare.status === 'identical') {
+    if (compare.status === 'ahead' || compare.status === 'identical') {
       return { ...evidence, baseBranch: expectedBranch, integration: 'stacked' };
     }
     return { ...evidence, integration: 'not-integrated' };
