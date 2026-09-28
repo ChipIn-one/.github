@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -413,4 +413,12 @@ test('final verification requires exactly one membership and a readable Status',
     project: project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: null }] }),
   });
   assert.match(result.blockers.join('\n'), /Status is missing/);
+});
+
+
+test('agent entrypoint requires completed ChipIn intake after gh issue create', async () => {
+  const agents = await readFile(new URL('../AGENTS.md', import.meta.url), 'utf8');
+  assert.match(agents, /`gh issue create` alone is not completion/);
+  assert.match(agents, /automation\/issue-intake\.md/);
+  assert.match(agents, /exactly one Project #5 membership with readable Status and read-back receipt/);
 });
