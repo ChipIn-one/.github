@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import {
   buildIntakeArgs,
@@ -47,6 +48,7 @@ function event(overrides = {}) {
       title: overrides.title ?? '[issue-intake] ChipIn-one/chipin-frontend#308',
       body: overrides.body ?? body(request),
     },
+    sender: { login: overrides.sender ?? overrides.actor ?? 'syllik' },
   };
 }
 
@@ -108,6 +110,24 @@ test('untrusted author fails closed', () => {
   });
   assert.equal(result.valid, false);
   assert.match(result.blockers.join('\n'), /not trusted/);
+});
+
+test('untrusted edit/reopen trigger actor fails closed even when original author is trusted', () => {
+  const result = validateRequestEvent({
+    event: event({ actor: 'syllik', sender: 'external-collaborator' }),
+    config,
+  });
+  assert.equal(result.valid, false);
+  assert.match(result.blockers.join('\n'), /trigger actor external-collaborator is not trusted/);
+});
+
+test('bridge workflow serializes separate control issues by exact target-bearing title', async () => {
+  const workflow = await readFile(
+    new URL('../.github/workflows/issue-intake-connector-bridge.yml', import.meta.url),
+    'utf8',
+  );
+  assert.match(workflow, /group: connector-issue-intake-\$\{\{ github\.event\.issue\.title \}\}/);
+  assert.doesNotMatch(workflow, /group: connector-issue-intake-\$\{\{ github\.event\.issue\.number \}\}/);
 });
 
 test('unsupported target repository fails before canonical intake', () => {
