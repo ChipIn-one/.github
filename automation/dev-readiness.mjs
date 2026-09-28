@@ -1,7 +1,7 @@
 const INTEGRATION_BRANCHES = Object.freeze({
   'ChipIn-one/chipin-frontend': 'dev',
   'ChipIn-one/chipin-backend': 'develop',
-  'ChipIn-one/chipin-knowledge-base': 'main',
+  'ChipIn-one/chipin-knowledge-base': 'master',
 });
 
 const KNOWN_PROJECT_STATUSES = new Set([
