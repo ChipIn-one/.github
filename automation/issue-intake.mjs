@@ -418,8 +418,15 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             if (!memberships.length) {
               await (overrides.addProjectMembership || addProjectMembership)(client, project, snapshot);
               result.applied.push('project-membership');
-              project = await readProject(client, config);
-              memberships = projectItemsFor(project, target.repository, target.number);
+              const attempts = overrides.projectMembershipReadAttempts ?? 6;
+              const delayMs = overrides.projectMembershipReadDelayMs ?? 1000;
+              const sleep = overrides.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+              for (let attempt = 0; attempt < attempts; attempt += 1) {
+                project = await readProject(client, config);
+                memberships = projectItemsFor(project, target.repository, target.number);
+                if (memberships.length) break;
+                if (attempt + 1 < attempts) await sleep(delayMs);
+              }
             }
             if (memberships.length !== 1) throw new Error('Project membership read-back count is ' + memberships.length + ', expected exactly 1.');
             if (!memberships[0].status) {
