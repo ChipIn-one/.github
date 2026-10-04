@@ -3,11 +3,9 @@ name: DEV readiness policy tests
 on:
   pull_request:
     branches:
-      - main
       - master
   push:
     branches:
-      - main
       - master
   workflow_dispatch:
 
