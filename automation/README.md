@@ -50,9 +50,12 @@ See [issue-intake.md](./issue-intake.md) for CLI examples, connector request for
 
 The composite action at `automation/development-link-action/action.yml` packages this reconciler
 for minimal repository-local PR-event callers. Organization `.github` workflows are not inherited
-by sibling repositories, so FE/BE/KB each need a small caller on their canonical branch. The caller
-must grant only the permissions needed to read the PR and write the Issue relationship; fork or
-other restricted-token contexts fail closed rather than substituting a textual link.
+by sibling repositories, so FE/BE/KB each need a small caller on their canonical branch. Those
+callers use `pull_request_target` only as a trusted metadata execution context: they never check out
+or execute PR code, and automatic reconciliation is restricted to same-repository PR heads. Fork
+PRs therefore have no write path. The caller grants `issues: write`, `pull-requests: read`, and
+`contents: read`; missing task identity or any native mutation/read-back problem still fails the
+same-repository reconciliation instead of substituting a textual link.
 
 ## Historical metadata migration
 
