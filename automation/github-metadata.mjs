@@ -248,4 +248,3 @@ export async function readIssueSnapshot(client, repository, number) {
     relationsReadable: true,
   };
 }
-
