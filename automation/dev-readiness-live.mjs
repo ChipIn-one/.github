@@ -12,11 +12,11 @@ import {
   readProjectSnapshot,
   verifyOrgSchema,
   verifyProjectSnapshot,
-} from './metadata-migration.mjs';
+} from './github-metadata.mjs';
 
 const KNOWN_PR_STATES = new Set(['OPEN', 'CLOSED', 'MERGED']);
 const COMPARE_STATUSES = new Set(['ahead', 'behind', 'diverged', 'identical']);
-const REQUIRED_METADATA_FIELDS = new Set(['Priority', 'Release scope']);
+const REQUIRED_METADATA_FIELDS = new Set(['Priority']);
 
 const DEVELOPMENT_PRS_QUERY = `
 query DevReadinessPullRequests($owner: String!, $repo: String!, $number: Int!, $after: String) {

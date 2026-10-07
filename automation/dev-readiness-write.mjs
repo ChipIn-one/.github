@@ -3,7 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { INTEGRATION_BRANCHES } from './dev-readiness.mjs';
-import { GitHubClient } from './metadata-migration.mjs';
+import { GitHubClient } from './github-metadata.mjs';
 import {
   evaluateLiveIssue,
   parseIssueRef,

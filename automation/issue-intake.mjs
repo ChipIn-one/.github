@@ -9,7 +9,7 @@ import {
   readProjectSnapshot,
   verifyOrgSchema,
   verifyProjectSnapshot,
-} from './metadata-migration.mjs';
+} from './github-metadata.mjs';
 
 const APPLY_ACTIVATION = 'issue-intake-v1';
 const APPLY_ENV = 'CHIPIN_ISSUE_WRITE';
@@ -49,7 +49,6 @@ export function validateClassification(config, input = {}) {
   const classification = {
     issueType: input.issueType || null,
     priority: input.priority || null,
-    releaseScope: input.releaseScope || null,
     severity: severity(input.severity),
   };
   const blockers = [];
@@ -58,9 +57,6 @@ export function validateClassification(config, input = {}) {
   const priorities = config.issueFields?.Priority?.options || [];
   if (!classification.priority) blockers.push('Priority is required.');
   else if (!priorities.includes(classification.priority)) blockers.push('Unsupported Priority: ' + classification.priority + '.');
-  const releases = config.issueFields?.['Release scope']?.options || [];
-  if (!classification.releaseScope) blockers.push('Release scope is required.');
-  else if (!releases.includes(classification.releaseScope)) blockers.push('Unsupported Release scope: ' + classification.releaseScope + '.');
   const severities = config.issueFields?.Severity?.options || [];
   if (classification.severity !== null && !severities.includes(classification.severity)) blockers.push('Unsupported Severity: ' + classification.severity + '.');
   if (classification.issueType === 'Bug' && classification.severity === null) blockers.push('Severity is required for Bug issues.');
@@ -104,7 +100,6 @@ export function buildReconcilePlan({ config, repository, number, classification,
   blockers.push(...observed.blockers);
   const desired = {
     Priority: classification.priority,
-    'Release scope': classification.releaseScope,
     ...(classification.severity === null ? {} : { Severity: classification.severity }),
   };
   for (const [name, value] of Object.entries(desired)) {
@@ -207,7 +202,6 @@ export function verifyFinalState({ config, repository, number, classification, s
   if (observed.issueType !== classification.issueType) blockers.push('Read-back Issue Type is ' + (observed.issueType || 'missing') + ', expected ' + classification.issueType + '.');
   const expected = {
     Priority: classification.priority,
-    'Release scope': classification.releaseScope,
     ...(classification.severity === null ? {} : { Severity: classification.severity }),
   };
   for (const [name, value] of Object.entries(expected)) {
@@ -224,6 +218,7 @@ export function verifyFinalState({ config, repository, number, classification, s
       issueType: observed.issueType,
       fields: observed.fields,
       project: { number: config.project.number, membershipCount: memberships.length, status },
+      milestone: snapshot?.issue?.milestone?.title ?? null,
       relationships: {
         blockedBy: snapshot?.blockedBy || [],
         blocking: snapshot?.blocking || [],
@@ -266,7 +261,6 @@ export async function createIssue(client, config, repository, classification, { 
   const [owner, repo] = repository.split('/');
   const values = [
     { field_id: config.issueFields.Priority.id, value: classification.priority },
-    { field_id: config.issueFields['Release scope'].id, value: classification.releaseScope },
     ...(classification.severity === null ? [] : [{ field_id: config.issueFields.Severity.id, value: classification.severity }]),
   ];
   return client.request('/repos/' + owner + '/' + repo + '/issues', {
@@ -278,7 +272,7 @@ export async function createIssue(client, config, repository, classification, { 
 function parseArgs(argv) {
   const args = {
     mode: null, operation: null, target: null, issueType: null, priority: null,
-    releaseScope: null, severity: null, title: null, body: null, bodyFile: null,
+    severity: null, title: null, body: null, bodyFile: null,
     state: null, output: null, activate: null, config: 'automation/metadata-migration.config.json',
   };
   const values = [...argv];
@@ -287,7 +281,7 @@ function parseArgs(argv) {
   if (!['reconcile', 'create'].includes(args.operation)) throw new Error('Second argument must be reconcile or create.');
   if (!args.target) throw new Error('Issue identity or repository target is required.');
   const map = {
-    '--type': 'issueType', '--priority': 'priority', '--release-scope': 'releaseScope',
+    '--type': 'issueType', '--priority': 'priority',
     '--severity': 'severity', '--title': 'title', '--body': 'body', '--body-file': 'bodyFile',
     '--state': 'state', '--output': 'output', '--activate': 'activate', '--config': 'config',
   };

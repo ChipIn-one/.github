@@ -24,13 +24,6 @@ on:
           - P1
           - P2
           - P3
-      release_scope:
-        description: "Canonical organization Release scope"
-        required: true
-        type: choice
-        options:
-          - PRE-PROD
-          - POST-PROD
       severity:
         description: "Severity; Bug requires a value, use none when not applicable"
         required: true
@@ -60,7 +53,6 @@ jobs:
       ISSUE_REF: ${{ inputs.issue_ref }}
       ISSUE_TYPE: ${{ inputs.issue_type }}
       PRIORITY: ${{ inputs.priority }}
-      RELEASE_SCOPE: ${{ inputs.release_scope }}
       SEVERITY: ${{ inputs.severity }}
       OUTPUT_PATH: issue-intake-receipt.json
     steps:
@@ -84,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           test -n "${GITHUB_TOKEN:-}"
-          node automation/issue-intake.mjs plan reconcile "$ISSUE_REF"             --type "$ISSUE_TYPE"             --priority "$PRIORITY"             --release-scope "$RELEASE_SCOPE"             --severity "$SEVERITY"             --output "$OUTPUT_PATH"
+          node automation/issue-intake.mjs plan reconcile "$ISSUE_REF"             --type "$ISSUE_TYPE"             --priority "$PRIORITY"             --severity "$SEVERITY"             --output "$OUTPUT_PATH"
 
       - name: Upload plan
         if: always()
@@ -103,7 +95,6 @@ jobs:
       ISSUE_REF: ${{ inputs.issue_ref }}
       ISSUE_TYPE: ${{ inputs.issue_type }}
       PRIORITY: ${{ inputs.priority }}
-      RELEASE_SCOPE: ${{ inputs.release_scope }}
       SEVERITY: ${{ inputs.severity }}
     steps:
       - name: Checkout
@@ -126,7 +117,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          REQUEST_JSON="$(jq -cn             --arg target "$ISSUE_REF"             --arg issueType "$ISSUE_TYPE"             --arg priority "$PRIORITY"             --arg releaseScope "$RELEASE_SCOPE"             --arg severity "$SEVERITY"             '{target:$target,issueType:$issueType,priority:$priority,releaseScope:$releaseScope,severity:$severity}')"
+          REQUEST_JSON="$(jq -cn             --arg target "$ISSUE_REF"             --arg issueType "$ISSUE_TYPE"             --arg priority "$PRIORITY"             --arg severity "$SEVERITY"             '{target:$target,issueType:$issueType,priority:$priority,severity:$severity}')"
           printf '%s\n%s\n%s\n' '<!-- chipin-issue-intake-request:v1' "$REQUEST_JSON" '-->' > control-body.md
           gh api --method POST repos/ChipIn-one/.github/issues             --raw-field title="[issue-intake] $ISSUE_REF"             --raw-field body="$(cat control-body.md)" > control-issue.json
           jq -r '.html_url' control-issue.json

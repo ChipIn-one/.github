@@ -1,24 +1,24 @@
-# Issue create/finalize and reconciliation
+# Canonical issue intake
 
-Last reviewed: 2026-09-28
-
-`issue-intake.mjs` completes ChipIn issue creation without guessing metadata. It supports the three canonical repositories only:
+This tooling completes or reconciles canonical ChipIn issue metadata for:
 
 - `ChipIn-one/chipin-frontend`
 - `ChipIn-one/chipin-backend`
 - `ChipIn-one/chipin-knowledge-base`
 
-It reuses the organization Issue Field / Issue Type IDs and schema verification from `metadata-migration.config.json` and `metadata-migration.mjs`. The historical fixed backend mapping from migration #117 is not used for new issues.
+Active schema configuration is in `metadata-migration.config.json`; shared GitHub transport/schema/readers are in `github-metadata.mjs`. The old backend #117 mapping is retained only under `historicalMigration`.
 
 ## Safety contract
 
-Every run requires explicit `Issue Type`, `Priority`, `Release scope`, and Severity when applicable. `Bug` requires Severity. Missing classification returns an actionable incomplete receipt; there are no title/body/label/milestone defaults.
+Every run requires explicit Issue Type and Priority, plus Severity when applicable. `Bug` requires Severity. There is no Release-scope input.
 
-Existing canonical values are human-owned. If a requested value differs from an existing Issue Type or Issue Field value, the tool stops and refuses to overwrite it. Existing Project Status is also preserved. The only Status initialization is `Backlog`, and only when the issue has exactly one Project #5 item with no Status.
+Native Milestone is optional. Missing milestone is valid and means “not scheduled for a concrete release”. Intake never infers, writes, clears, or renames Milestones.
 
-Project membership is read independently from metadata. Missing membership is added with `addProjectV2ItemById`; GitHub returns the existing item when the content is already present, making retry safe. Duplicate Project items are not deleted automatically: the run is incomplete and requires manual reconciliation because duplicate items can contain conflicting human Status values.
+Existing canonical values are human-owned. If requested Issue Type/Priority/Severity conflicts with an existing value, reconciliation stops rather than overwriting it. Existing Project Status is also preserved. `Backlog` is initialized only when the issue has exactly one Project #5 item with no Status.
 
-No native dependency, parent, sub-issue, label, milestone, assignee, body, or Development relationship is modified. Issue title/body content is treated only as untrusted API data and is never evaluated or executed as shell code. Final success requires read-back of the Issue Type, required Issue Fields, exactly one Project #5 membership, and a readable Status. The receipt also records the native relationships read back from the issue.
+Project membership is read independently. Missing membership may be added by the guarded writer; duplicate membership is fail-closed and requires manual reconciliation. Native dependency, parent/sub-issue, Milestone, assignee, body, labels, and Development relationships are not modified.
+
+Final success requires read-back of Issue Type, required Issue Fields, exactly one Project #5 membership, readable Status, preserved Milestone, and native relationships.
 
 Apply mode is double-gated:
 
@@ -29,53 +29,47 @@ CHIPIN_ISSUE_WRITE=1
 
 ## UI path: shared Issue Form -> manual finalizer
 
-The organization Issue Forms continue to set only native Issue Type. Form-body dropdowns would be converted to Markdown and are therefore not canonical Issue Field values. The forms also deliberately do not use the top-level `projects:` key: GitHub requires the issue creator to have project write access, and that mechanism would not repair issues created through API/agents.
+After creating an issue with a shared form, run `ChipIn-one/.github -> Actions -> Issue metadata finalizer`.
 
-After creating an issue with the shared form, open `ChipIn-one/.github` -> Actions -> `Issue metadata finalizer` and provide the exact issue identity plus explicit canonical metadata. Run with `apply=false` first to inspect the read-only plan. `apply=true` does not write canonical metadata directly: it creates a durable intake control issue/queue snapshot and the shared serialized drain performs the write with `CHIPIN_ISSUE_WRITE_TOKEN`. The canonical result is recorded on that control issue.
+Provide exact issue identity, Issue Type, Priority, applicable Severity, and `apply=false` first. No release target is required. Existing Milestone state is left untouched.
 
-This workflow is intentionally `workflow_dispatch` only. A workflow stored in the organization `.github` repository does not subscribe to issue events emitted by sibling FE/BE/KB repositories, so no misleading organization-wide event automation is claimed here.
+The workflow is intentionally `workflow_dispatch` only. Organization-profile workflows do not subscribe to sibling-repository issue events.
 
-## Connector bridge: raw Issue create -> canonical intake
+## Connector bridge
 
-Some GitHub clients/connectors can create ordinary Issues, assignees and labels but do not expose direct writes for Organization Issue Fields, native Issue Type, or Projects v2. That limitation is not a reason to leave a ChipIn task partially created.
+A connector that can create an ordinary issue but cannot complete Issue Fields/Issue Type/Project #5 uses one control issue in `ChipIn-one/.github`.
 
-After creating the real FE/BE/KB issue, create one control issue in `ChipIn-one/.github` with this exact title:
+Title:
 
 ```text
 [issue-intake] ChipIn-one/<repository>#<number>
 ```
 
-The body must contain exactly one hidden v1 request marker. Example:
+Body:
 
 ```markdown
 <!-- chipin-issue-intake-request:v1
-{"target":"ChipIn-one/chipin-frontend#308","issueType":"Feature","priority":"P2","releaseScope":"POST-PROD","severity":"none"}
+{"target":"ChipIn-one/chipin-frontend#308","issueType":"Feature","priority":"P2","severity":"none"}
 -->
 ```
 
 Rules:
 
-- `target` must be the exact already-created FE/BE/KB issue identity;
-- `issueType`, `priority`, `releaseScope`, and applicable `severity` are explicit inputs, never inferred from title/body/labels;
-- use `"severity":"none"` when Severity is not applicable;
-- Bug still requires `Critical`, `Major`, or `Minor`;
-- the control issue title must identify the same target as the hidden payload;
-- only trusted bridge authors are accepted;
-- unsupported repositories, malformed/duplicate markers, extra payload keys, invalid classifications, and conflicting existing human values fail closed.
+- `target` is the exact existing FE/BE/KB issue identity;
+- `issueType`, `priority`, and applicable `severity` are explicit;
+- `"severity":"none"` is used when not applicable;
+- retired `releaseScope` is rejected as an unsupported request key;
+- Bug requires `Critical`, `Major`, or `Minor`;
+- title and payload target must match;
+- trusted actor/trigger checks, unsupported repositories, malformed/duplicate markers, extra keys, and conflicting human values fail closed.
 
-`.github/workflows/issue-intake-connector-bridge.yml` listens only for control issues whose title starts with `[issue-intake] `. Validation and trust checks happen before mutation. A valid event is first persisted as a normalized queue-record comment authored by `github-actions[bot]`; only then may a drain job run. The drain ignores mutable issue-body state and consumes the durable validated snapshot, then invokes the existing guarded `issue-intake.mjs apply reconcile` path with `CHIPIN_ISSUE_WRITE_TOKEN`. The bridge does not own a second metadata implementation.
+Validated requests are durably queued before the shared serialized drain. Manual finalizer and connector bridge use the same `canonical-issue-intake-writes` concurrency group and the same guarded intake implementation.
 
-Connector and manual-finalizer writes use the same repository-wide `canonical-issue-intake-writes` drain concurrency group. Every validated request is durable before entering that group, so GitHub Actions replacing an older pending drain does not discard the request: a later drain scans all unprocessed queue records in order. This also prevents the manual finalizer and connector bridge from writing canonical metadata concurrently.
-
-Every processed queue record receives a result comment containing a machine result marker plus human-readable canonical read-back for Issue Type, Priority, Release scope, Severity, Project #5 membership, and Status. Processed control issues are closed. A blocked result leaves canonical completion unclaimed and lists the blockers. A trusted edit/reopen creates a new validated queue snapshot; untrusted edits cannot replace the prior validated snapshot.
-
-Connector rule: raw target issue creation is incomplete until the bridge reports `COMPLETE`. Do not stop with a connector-capability disclaimer when this bridge is available.
+Result comments include canonical read-back for Issue Type, Priority, Severity, native Milestone, Project #5 membership and Status. Milestone is evidence only; it is not a DEV gate.
 
 ## API / agent create path
 
-Create mode uses GitHub's issue REST API with explicit `type` and `issue_field_values`, persists the returned issue identity before Project mutations, and then runs the same reconciliation/read-back path.
-
-Example for a non-Bug task:
+Example:
 
 ```sh
 GITHUB_TOKEN=... CHIPIN_ISSUE_WRITE=1 \
@@ -84,63 +78,39 @@ node automation/issue-intake.mjs apply create ChipIn-one/chipin-frontend \
   --body-file /tmp/issue-body.md \
   --type Task \
   --priority P2 \
-  --release-scope POST-PROD \
   --severity none \
-  --state /tmp/chipin-issue-create.json \
+  --state /tmp/issue-create-state.json \
   --activate issue-intake-v1 \
-  --output /tmp/chipin-issue-receipt.json
+  --output /tmp/issue-intake.json
 ```
 
-For a Bug, pass one of `Critical`, `Major`, or `Minor` as Severity.
-
-`--state` is mandatory for `apply create`, and `--state` and `--output` must resolve to different paths so receipt emission cannot overwrite the retry checkpoint. The tool first loads/validates the complete issue body, then claims the checkpoint path with an exclusive create (`wx`) before the REST create call. Only one concurrent process can own an initially absent state path; another claimant gets `EEXIST` and stops before issuing a POST. After the REST create returns, the reservation is atomically replaced with `issueRef` and `issueUrl` before any later Project stage. Retrying with a checkpoint that already contains `issueRef` resumes that issue. A reservation without an issue identity is treated as an uncertain prior create and fails closed for manual recovery instead of issuing another POST. Partial metadata or membership writes are safe to retry because each later stage is freshly read before mutation and the final state is read back again.
-
-## Existing issue reconciliation
-
-Read-only plan example:
+Read-only reconcile example:
 
 ```sh
 GITHUB_TOKEN=... node automation/issue-intake.mjs plan reconcile \
   ChipIn-one/chipin-backend#145 \
   --type Bug \
   --priority P3 \
-  --release-scope '<explicit operator choice>' \
   --severity Minor \
   --output /tmp/145-plan.json
 ```
 
-Do not copy the placeholder literally. The operator must choose the missing Release scope after reviewing the issue.
-
-Fresh REST reads on 2026-09-27 show:
-
-| Issue | Canonical REST state observed | Reconciliation rule |
-| --- | --- | --- |
-| FE #279, #282, #283, #285, #287 | Issue Type missing; organization Issue Fields empty | choose Type/Priority/Release scope and applicable Severity explicitly; do not infer from title/body |
-| BE #145 | `Bug`, `P3`, `Minor`; Release scope missing | preserve those existing human values and explicitly choose Release scope |
-| KB #3, #4, #5 | Issue Type missing; organization Issue Fields empty | legacy `P*` / `type:*` labels are not canonical; choose all canonical values explicitly |
-
-Project membership/Status for those named issues must be re-read by the tool with a Project-capable token immediately before any apply. No bulk mapping is supplied. Run one reviewed issue at a time. Legacy migration #117 remains closed and is not extended into a guessing engine.
+Existing human values are preserved. Fresh Project membership/Status must be read before apply. Do not bulk-classify or infer missing values from title/body/labels/Milestone.
 
 ## Credentials and activation
 
-Read-only plans can reuse `CHIPIN_DEV_READ_TOKEN` if it can read organization Issue Fields/Issue Types, Project #5, issues, and native relationships.
+Apply uses `CHIPIN_ISSUE_WRITE_TOKEN` with the narrowest permissions that can:
 
-Apply uses a separate `CHIPIN_ISSUE_WRITE_TOKEN`. Use the narrowest credential that can:
-
-- read organization Issue Fields and Issue Types;
-- write Issues in FE/BE/KB, with the token principal holding repository push access (GitHub requires push access for Issue Type / issue-field writes; create may otherwise silently drop them, which final read-back will surface);
+- read active Organization Issue Fields and Issue Types;
+- write issue metadata in the approved target repository;
 - read/write ChipIn Project #5.
 
-Do not store the credential in the repository. The workflow itself retains only `contents: read` permissions and receives the external token through the secret.
+No credential is stored in the repository. Live writes require explicit operator approval and an approved target.
 
-No repository secret, variable, Project workflow, or settings change is performed by this code change. Live acceptance remains pending until `CHIPIN_ISSUE_WRITE_TOKEN` is explicitly configured and an operator authorizes a test issue or named reconciliation.
-
-## Validation
-
-Repository gate:
+## Tests
 
 ```sh
 node --test automation/*.test.mjs
 ```
 
-Focused coverage includes explicit intake, missing Release scope, preservation of human values, Bug Severity requirements, missing/duplicate membership, retry after partial create, API permission failure, and read-back failure.
+Coverage includes explicit intake, optional Milestone behavior, rejection of retired Release-scope bridge payloads, preservation of human values, Bug Severity requirements, missing/duplicate Project membership, retry safety, permission failure, and read-back failure.
