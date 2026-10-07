@@ -1,0 +1,33 @@
+name: Frontend production completion
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-production-completion
+  cancel-in-progress: false
+
+jobs:
+  close-completed-issues:
+    name: Close frontend Issues completed in production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24.21.0"
+      - name: Reconcile frontend production completion
+        env:
+          CHIPIN_CANONICAL_WRITE_TOKEN: ${{ secrets.CHIPIN_ISSUE_WRITE_TOKEN }}
+          CHIPIN_FRONTEND_COMPLETION_WRITE: "1"
+        run: node automation/frontend-production-completion.mjs

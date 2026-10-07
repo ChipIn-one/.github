@@ -1,0 +1,334 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { evaluateIssueForCompletion } from "./frontend-production-completion-policy.mjs";
+import {
+  closeIssueAsCompleted,
+  compareContainsCommit,
+  readProductionReleases,
+} from "./frontend-production-completion.mjs";
+
+const repository = "ChipIn-one/chipin-frontend";
+
+function linkedPr({
+  number = 10,
+  mergedAt = "2026-10-01T10:00:00Z",
+  mergeCommitSha = "1111111111111111111111111111111111111111",
+  baseRefName = "dev",
+  headRefName = "feat/issue-1-work",
+  headRepository = repository,
+  prRepository = repository,
+} = {}) {
+  return {
+    number,
+    state: "MERGED",
+    mergedAt,
+    mergeCommitSha,
+    baseRefName,
+    headRefName,
+    headRepository,
+    repository: prRepository,
+  };
+}
+
+function issue({
+  number = 1,
+  state = "OPEN",
+  updatedAt = "2026-10-07T10:00:00Z",
+  lastEditedAt = null,
+  reopenedAt = null,
+  linkedBranchCount = 0,
+  linkedPullRequests = [linkedPr()],
+  linkedPullRequestTotalCount = linkedPullRequests.length,
+  milestone = null,
+} = {}) {
+  return {
+    number,
+    state,
+    updatedAt,
+    lastEditedAt,
+    reopenedAt,
+    linkedBranchCount,
+    linkedPullRequests,
+    linkedPullRequestTotalCount,
+    milestone,
+  };
+}
+
+function release({
+  number = 20,
+  mergedAt = "2026-10-02T10:00:00Z",
+  headSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+} = {}) {
+  return { number, mergedAt, headSha };
+}
+
+test("keeps a dev-only implementation Issue open", async () => {
+  const decision = await evaluateIssueForCompletion(issue(), {
+    repository,
+    releases: [],
+    containsCommit: async () => false,
+  });
+
+  assert.equal(decision.action, "leave-open");
+  assert.equal(decision.code, "awaiting-production");
+});
+
+test("closes only after implementation is contained by a merged dev-to-main release", async () => {
+  const decision = await evaluateIssueForCompletion(issue(), {
+    repository,
+    releases: [release()],
+    containsCommit: async (commitSha, releaseHeadSha) => (
+      commitSha === "1111111111111111111111111111111111111111"
+      && releaseHeadSha === "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ),
+  });
+
+  assert.equal(decision.action, "close-completed");
+  assert.match(decision.detail, /release PR #20/u);
+});
+
+test("multiple linked implementation PRs stay open until every change reaches production", async () => {
+  const first = linkedPr({
+    number: 10,
+    mergeCommitSha: "1111111111111111111111111111111111111111",
+  });
+  const second = linkedPr({
+    number: 11,
+    mergedAt: "2026-10-03T10:00:00Z",
+    mergeCommitSha: "2222222222222222222222222222222222222222",
+  });
+  const target = issue({ linkedPullRequests: [first, second] });
+  const releases = [
+    release({ number: 20, headSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }),
+    release({
+      number: 21,
+      mergedAt: "2026-10-04T10:00:00Z",
+      headSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    }),
+  ];
+
+  const blocked = await evaluateIssueForCompletion(target, {
+    repository,
+    releases,
+    containsCommit: async (commitSha, releaseHeadSha) => (
+      commitSha === first.mergeCommitSha
+      && releaseHeadSha === "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ),
+  });
+  assert.equal(blocked.code, "awaiting-production");
+
+  const complete = await evaluateIssueForCompletion(target, {
+    repository,
+    releases,
+    containsCommit: async (commitSha, releaseHeadSha) => (
+      (commitSha === first.mergeCommitSha
+        && releaseHeadSha === "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+      || (commitSha === second.mergeCommitSha
+        && releaseHeadSha === "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+    ),
+  });
+  assert.equal(complete.action, "close-completed");
+});
+
+test("missing or ambiguous Development evidence blocks completion", async () => {
+  const missing = await evaluateIssueForCompletion(issue({
+    linkedPullRequests: [],
+    linkedPullRequestTotalCount: 0,
+  }), { repository, releases: [], containsCommit: async () => false });
+  assert.equal(missing.code, "missing-development");
+  assert.match(missing.detail, /Development/u);
+
+  const incomplete = await evaluateIssueForCompletion(issue({
+    linkedPullRequests: [linkedPr()],
+    linkedPullRequestTotalCount: 2,
+  }), { repository, releases: [], containsCommit: async () => false });
+  assert.equal(incomplete.code, "ambiguous-development");
+
+  const pendingBranch = await evaluateIssueForCompletion(issue({
+    linkedBranchCount: 1,
+    linkedPullRequests: [],
+    linkedPullRequestTotalCount: 0,
+  }), { repository, releases: [], containsCommit: async () => false });
+  assert.equal(pendingBranch.code, "development-branch-pending");
+
+  const crossRepository = await evaluateIssueForCompletion(issue({
+    linkedPullRequests: [linkedPr({ prRepository: "ChipIn-one/chipin-backend" })],
+  }), { repository, releases: [release()], containsCommit: async () => true });
+  assert.equal(crossRepository.code, "ambiguous-development");
+});
+
+test("reopened or edited scope requires fresh implementation evidence", async () => {
+  const oldPr = linkedPr({
+    number: 10,
+    mergedAt: "2026-10-01T10:00:00Z",
+    mergeCommitSha: "1111111111111111111111111111111111111111",
+  });
+  const reopened = issue({
+    reopenedAt: "2026-10-05T10:00:00Z",
+    linkedPullRequests: [oldPr],
+  });
+
+  const stale = await evaluateIssueForCompletion(reopened, {
+    repository,
+    releases: [release({
+      number: 20,
+      mergedAt: "2026-10-02T10:00:00Z",
+    })],
+    containsCommit: async () => true,
+  });
+  assert.equal(stale.code, "scope-changed-after-implementation");
+
+  const newPr = linkedPr({
+    number: 12,
+    mergedAt: "2026-10-06T10:00:00Z",
+    mergeCommitSha: "3333333333333333333333333333333333333333",
+  });
+  const refreshed = await evaluateIssueForCompletion(issue({
+    reopenedAt: "2026-10-05T10:00:00Z",
+    lastEditedAt: "2026-10-05T11:00:00Z",
+    linkedPullRequests: [oldPr, newPr],
+  }), {
+    repository,
+    releases: [release({
+      number: 22,
+      mergedAt: "2026-10-06T12:00:00Z",
+      headSha: "cccccccccccccccccccccccccccccccccccccccc",
+    })],
+    containsCommit: async () => true,
+  });
+  assert.equal(refreshed.action, "close-completed");
+});
+
+test("milestone presence does not gate production completion", async () => {
+  for (const milestone of [null, { title: "POST RELEASE 1.1" }]) {
+    const decision = await evaluateIssueForCompletion(issue({ milestone }), {
+      repository,
+      releases: [release()],
+      containsCommit: async () => true,
+    });
+    assert.equal(decision.action, "close-completed");
+  }
+});
+
+test("canonical linked dev-to-main PR is itself production evidence", async () => {
+  const releasePr = linkedPr({
+    number: 30,
+    baseRefName: "main",
+    headRefName: "dev",
+    headRepository: repository,
+  });
+  const decision = await evaluateIssueForCompletion(issue({
+    linkedPullRequests: [releasePr],
+  }), { repository, releases: [], containsCommit: async () => false });
+
+  assert.equal(decision.action, "close-completed");
+});
+
+test("manual closure and stale snapshots are never overwritten or reopened", async () => {
+  const closedCalls = [];
+  const closedClient = {
+    request: async (path, options = {}) => {
+      closedCalls.push({ path, options });
+      return { state: "closed", state_reason: "not_planned" };
+    },
+  };
+  const alreadyClosed = await closeIssueAsCompleted(closedClient, issue(), repository);
+  assert.equal(alreadyClosed.mutated, false);
+  assert.equal(alreadyClosed.code, "already-closed");
+  assert.equal(closedCalls.length, 1);
+
+  const staleCalls = [];
+  const staleClient = {
+    request: async (path, options = {}) => {
+      staleCalls.push({ path, options });
+      return { state: "open", updated_at: "2026-10-07T11:00:00Z" };
+    },
+  };
+  const stale = await closeIssueAsCompleted(staleClient, issue(), repository);
+  assert.equal(stale.mutated, false);
+  assert.equal(stale.code, "stale-snapshot");
+  assert.equal(staleCalls.length, 1);
+});
+
+test("completion write is idempotent and uses only closed/completed", async () => {
+  const calls = [];
+  const client = {
+    request: async (path, options = {}) => {
+      calls.push({ path, options });
+      if (options.method === "PATCH") {
+        return { state: "closed", state_reason: "completed" };
+      }
+      return { state: "open", updated_at: "2026-10-07T10:00:00Z" };
+    },
+  };
+
+  const result = await closeIssueAsCompleted(client, issue(), repository);
+  assert.equal(result.mutated, true);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].options.body, {
+    state: "closed",
+    state_reason: "completed",
+  });
+});
+
+test("production release discovery ignores non-canonical main merges", async () => {
+  const client = {
+    listAll: async () => [
+      {
+        number: 20,
+        merged_at: "2026-10-02T10:00:00Z",
+        base: { ref: "main" },
+        head: {
+          ref: "dev",
+          sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          repo: { full_name: repository },
+        },
+        html_url: "https://github.com/ChipIn-one/chipin-frontend/pull/20",
+      },
+      {
+        number: 21,
+        merged_at: "2026-10-03T10:00:00Z",
+        base: { ref: "main" },
+        head: {
+          ref: "hotfix",
+          sha: "cccccccccccccccccccccccccccccccccccccccc",
+          repo: { full_name: repository },
+        },
+      },
+      {
+        number: 22,
+        merged_at: "2026-10-04T10:00:00Z",
+        base: { ref: "main" },
+        head: {
+          ref: "dev",
+          sha: "dddddddddddddddddddddddddddddddddddddddd",
+          repo: { full_name: "fork/chipin-frontend" },
+        },
+      },
+    ],
+  };
+
+  const releases = await readProductionReleases(client, repository);
+  assert.deepEqual(releases.map((item) => item.number), [20]);
+});
+
+test("commit containment accepts only an ancestor comparison", async () => {
+  const commit = "1111111111111111111111111111111111111111";
+  const head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const acceptedClient = {
+    request: async () => ({
+      status: "ahead",
+      merge_base_commit: { sha: commit },
+    }),
+  };
+  assert.equal(await compareContainsCommit(acceptedClient, repository, commit, head), true);
+
+  const rejectedClient = {
+    request: async () => ({
+      status: "diverged",
+      merge_base_commit: { sha: "2222222222222222222222222222222222222222" },
+    }),
+  };
+  assert.equal(await compareContainsCommit(rejectedClient, repository, commit, head), false);
+});
