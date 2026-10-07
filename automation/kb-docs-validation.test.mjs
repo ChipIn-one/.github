@@ -20,6 +20,7 @@ test('KB docs validation stays external, exact-revision, read-only, and fail-clo
   assert.match(workflow, /check-docs\.py --base master/);
   assert.match(workflow, /validatorBlob/);
   assert.match(workflow, /requirementsBlob/);
+  assert.match(workflow, /github\.run_attempt/);
   assert.match(workflow, /outcome=complete/);
   assert.match(workflow, /Enforce fail-closed validation/);
   assert.match(workflow, /schedule:/);
