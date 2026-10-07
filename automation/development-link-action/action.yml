@@ -1,0 +1,27 @@
+name: Reconcile native Development link
+description: Link one implementation PR to its exact ChipIn Issue through GitHub native Development metadata.
+inputs:
+  repository:
+    description: Pull request repository in owner/name form.
+    required: true
+  pull-request-number:
+    description: Pull request number.
+    required: true
+  task-identity:
+    description: Optional explicit canonical task identity; must agree with any PR body marker.
+    required: false
+    default: ''
+  token:
+    description: GitHub token with permission to read the PR and write the Issue Development relationship.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Reconcile native Development relationship
+      shell: bash
+      env:
+        CHIPIN_PR_REPOSITORY: ${{ inputs.repository }}
+        CHIPIN_PR_NUMBER: ${{ inputs.pull-request-number }}
+        CHIPIN_TASK_IDENTITY: ${{ inputs.task-identity }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: node "$GITHUB_ACTION_PATH/../development-link.mjs"
