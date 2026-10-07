@@ -2,30 +2,9 @@
 
 This directory contains narrow, fail-closed automation for ChipIn GitHub coordination.
 
-## DEV readiness
+## Workflow status model
 
-`dev-readiness.mjs` is the pure read-only policy evaluator for the future Project `→ DEV` automation. It does not call GitHub APIs or mutate state. Its fixture/unit tests run in the repository-local `DEV readiness policy tests` workflow.
-
-`dev-readiness-live.mjs` is the read-only GitHub adapter for that evaluator. It reuses the shared `github-metadata.mjs` transport/schema/readers; the historical metadata migration is not an active authority.
-
-- Organization Issue Fields / Issue Types and Project #5 schema are verified before eligibility can be positive.
-- canonical Priority and Issue Type are read from structured GitHub metadata only; Severity is validated when present/applicable. Milestone is optional release metadata and does not gate DEV readiness; labels, body URLs, and `References` are never fallbacks.
-- native blocked-by, parent, and sub-issue relationships come from GitHub relationship APIs and are paginated by the shared client.
-- Development-linked PRs come from GitHub's manual/native Development relationship, with complete GraphQL pagination; closing-keyword-only references are explicitly excluded.
-- direct merges are checked against the repository integration branch; stacked merged PRs are accepted only when their merge SHA is reachable from that integration branch.
-- unreadable relationships, duplicate Project membership, schema drift, unsupported canonical values, or incomplete integration evidence fail closed.
-- the adapter contains no write path.
-
-A live read-only audit accepts exact issue identities and emits timestamped JSON:
-
-```sh
-GITHUB_TOKEN=... node automation/dev-readiness-live.mjs \
-  ChipIn-one/chipin-frontend#164 \
-  ChipIn-one/chipin-backend#101 \
-  --output /tmp/dev-readiness-live.json
-```
-
-The token needs read access to the organization Issue Fields / Issue Types, Project #5, Issues, native relationships, PRs, and compare data. No credential is stored in this repository.
+Project #5 `Status` is intentionally limited to `Backlog`, `Todo`, and `In Progress`. Terminal completion is native Issue closure, not a Project status. The retired DEV-readiness reader/writer workflows are not part of the active automation surface; PR merge state remains native GitHub evidence.
 
 ## Issue intake
 
@@ -46,7 +25,7 @@ See [issue-intake.md](./issue-intake.md) for CLI examples, connector request for
 
 ## Historical metadata migration
 
-`metadata-migration.mjs` implements the completed task #6 / backend #117 migration as historical, auditable evidence. Active intake/readiness imports `github-metadata.mjs` directly; the historical mapping is not canonical schema.
+`metadata-migration.mjs` implements the completed task #6 / backend #117 migration as historical, auditable evidence. Active intake imports `github-metadata.mjs` directly; the historical mapping is not canonical schema.
 
 - Active Organization Issue Field IDs (Priority/Severity) and Issue Type IDs are pinned in `metadata-migration.config.json`. The retired Release scope definition and old backend mapping live only under `historicalMigration` so the old run can be reproduced without making that field active authority.
 - Shared schema verification checks only active fields. Historical migration adapts its explicitly historical configuration before reproducing old #117 checks.
@@ -64,4 +43,4 @@ See [metadata-migration.md](./metadata-migration.md) for the prepared diff, perm
 node --test automation/*.test.mjs
 ```
 
-The tests include DEV-readiness fixtures, live-adapter normalization/contracts, issue-intake retry and fail-closed coverage, migration safety/idempotency coverage, and a consistency check for all supported shared Issue Forms.
+The tests include issue-intake retry and fail-closed coverage, migration safety/idempotency coverage, and a consistency check for all supported shared Issue Forms.

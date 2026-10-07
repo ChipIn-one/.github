@@ -16,13 +16,14 @@ Keep the axes separate:
 | Priority | Organization Issue Field `Priority` | `P0`, `P1`, `P2`, `P3` |
 | Severity | Organization Issue Field `Severity` | `Critical`, `Major`, `Minor`; use only when relevant |
 | Release target | Native repository Milestone | Optional concrete product release target |
-| Workflow state | ChipIn Project #5 `Status` | Project workflow only; never infer from issue open/closed state |
+| Workflow position | ChipIn Project #5 `Status` | `Backlog`, `Todo`, `In Progress` only |
+| Completion state | Native GitHub Issue state/reason | open = unfinished; closed/completed = complete; closed/not planned = cancelled |
 | Parent / decomposition | Native GitHub issue relationships | Parent is optional; cross-repo product parent lives in KB when decomposition is needed |
 | PR implementation relationship | Native GitHub Development relationship | Do not use plain URLs or closing-keyword inference as a substitute for a required manual/native link |
 
 Organization Issue Fields and Project fields are different objects. Do not create same-named Project custom fields as fallbacks for Organization Issue Fields.
 
-A missing Milestone is valid and means the issue is not committed to a concrete release. Milestone membership never authorizes execution and never gates `→ DEV`.
+A missing Milestone is valid and means the issue is not committed to a concrete release. Milestone membership never authorizes execution or completion.
 
 GitHub Milestones are repository-scoped. Same-named milestones in FE/BE/KB represent the same product release by convention and must use the same product-level name. Do not derive the name from repository-local package/API versions unless product versioning explicitly adopts that scheme.
 
@@ -32,7 +33,7 @@ GitHub Milestones are repository-scoped. Same-named milestones in FE/BE/KB repre
 - Do not create generic `PRE-PROD` or `POST-PROD` milestones to replace the retired field.
 - Existing Milestone assignments are human-owned release intent. Intake/reconciliation preserves them and does not infer, add, clear, or rename Milestones.
 - Release progress is based on release issues. Linked implementation PRs do not need the issue's milestone solely to inflate progress.
-- Project #5 `Status` remains independent workflow state.
+- Project #5 `Status` remains independent active workflow position and has no terminal value.
 
 ## Legacy metadata
 
@@ -76,8 +77,14 @@ Use GitHub-native relationships for workflow meaning:
 - A Development-linked PR is implementation evidence for its specific issue or sub-issue.
 - A plain issue/PR URL is a reference, not a workflow relationship.
 
-`DEV` means every required implementation-bearing change is integrated into its configured integration branch: frontend to `dev`, backend to `develop`, and knowledge-base to `master` when the product specification itself changes. Milestone membership and deployment do not gate `DEV`.
+Project #5 Status tracks only active work: `Backlog -> Todo -> In Progress`. Do not use `DEV`, `PROD`, or `Done` as Project statuses.
 
-Code/product work terminates at `PROD`. Standalone non-code research, documentation, and external work may terminate at `Done`. `PROD`, `Done`, and product-parent closure remain manual in v1.
+Native Issue state is the completion authority. Closing as completed means the task is complete; closing as not planned means it was cancelled or intentionally abandoned. Reopening makes the task unfinished again.
 
-If required work is reopened or required scope changes after `DEV`, report the state as inconsistent for manual review; do not automatically regress status. Ambiguous structured state fails closed.
+Development-linked PRs are implementation evidence. Their merge state must not be copied into Project Status.
+
+For frontend code work, merge to integration branch `dev` is not completion. Close only after the required implementation is merged to production branch `main`.
+
+For backend code work, merge to integration branch `develop` is not completion. The backend repository currently has no production branch, so no branch-based automatic close is authorized. Do not infer terminal completion from `develop`, staging, labels, Milestone, or Project Status; define an explicit backend production branch/event first.
+
+Knowledge-base and standalone non-code work close when their accepted durable outcome is complete on the canonical source of truth. Ambiguous completion evidence fails closed.

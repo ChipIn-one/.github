@@ -14,7 +14,7 @@ Every run requires explicit Issue Type and Priority, plus Severity when applicab
 
 Native Milestone is optional. Missing milestone is valid and means “not scheduled for a concrete release”. Intake never infers, writes, clears, or renames Milestones.
 
-Existing canonical values are human-owned. If requested Issue Type/Priority/Severity conflicts with an existing value, reconciliation stops rather than overwriting it. Existing Project Status is also preserved. `Backlog` is initialized only when the issue has exactly one Project #5 item with no Status.
+Existing canonical values are human-owned. If requested Issue Type/Priority/Severity conflicts with an existing value, reconciliation stops rather than overwriting it. Existing Project Status is also preserved. Active Project Status values are `Backlog`, `Todo`, and `In Progress`; there is no terminal Project status. `Backlog` is initialized only when the issue has exactly one Project #5 item with no Status. Intake never closes or reopens an Issue.
 
 Project membership is read independently. Missing membership may be added by the guarded writer; duplicate membership is fail-closed and requires manual reconciliation. Native dependency, parent/sub-issue, Milestone, assignee, body, labels, and Development relationships are not modified.
 
@@ -65,7 +65,7 @@ Rules:
 
 Validated requests are durably queued before the shared serialized drain. Manual finalizer and connector bridge use the same `canonical-issue-intake-writes` concurrency group and the same guarded intake implementation.
 
-Result comments include canonical read-back for Issue Type, Priority, Severity, native Milestone, Project #5 membership and Status. Milestone is evidence only; it is not a DEV gate.
+Result comments include canonical read-back for Issue Type, Priority, Severity, native Milestone, Project #5 membership and Status. Milestone is release targeting only; it is not workflow or completion authority.
 
 ## API / agent create path
 

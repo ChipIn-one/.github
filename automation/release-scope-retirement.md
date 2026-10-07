@@ -12,7 +12,7 @@ This is the bounded migration receipt for retiring the Organization Issue Field 
 - BE: 12 open issues.
 - KB: no milestone currently required.
 
-Same-named FE/BE milestones represent one product release by convention. Missing milestone is valid and is not a DEV-readiness blocker.
+Same-named FE/BE milestones represent one product release by convention. Missing milestone is valid and is not a workflow or completion blocker.
 
 ## Concrete mapping
 
@@ -66,7 +66,7 @@ The reconciler may add missing membership and initialize `Backlog` only when Sta
 
 Retire the organization field only when all are true:
 
-1. active schema/config/intake/bridge/finalizer/readiness/docs no longer require it;
+1. active schema/config/intake/bridge/finalizer/docs no longer require it;
 2. tests are green on the exact published SHA;
 3. one or two approved pilots have clean post-write read-back;
 4. approved mapping writes are complete;
