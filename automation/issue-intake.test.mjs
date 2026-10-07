@@ -16,7 +16,7 @@ const config = {
   project: {
     number: 5,
     statusField: 'Status',
-    statusValues: ['Backlog', 'Todo', 'In Progress'],
+    statusValues: ['Backlog', 'Todo', 'In Progress', 'Done'],
   },
   issueFields: {
     Priority: { id: 1, options: ['P0', 'P1', 'P2', 'P3'] },
@@ -31,7 +31,7 @@ const classification = {
   severity: 'Major',
 };
 
-function issueSnapshot({ type = null, priority = null, severity = null } = {}) {
+function issueSnapshot({ type = null, priority = null, severity = null, state = 'open', stateReason = null } = {}) {
   const issueFieldValues = [];
   if (priority) issueFieldValues.push({ issue_field_id: 1, single_select_option: { name: priority } });
   if (severity) issueFieldValues.push({ issue_field_id: 2, single_select_option: { name: severity } });
@@ -40,6 +40,8 @@ function issueSnapshot({ type = null, priority = null, severity = null } = {}) {
       type: type ? { name: type } : null,
       node_id: 'ISSUE_NODE',
       html_url: 'https://github.com/ChipIn-one/chipin-frontend/issues/999',
+      state,
+      state_reason: stateReason,
     },
     issueFieldValues,
     blockedBy: [],
@@ -257,30 +259,57 @@ test('missing milestone is valid canonical intake and does not gate completion',
   assert.deepEqual(checked, { issueType: 'Feature', priority: 'P2', severity: null });
 });
 
-test('retired Project status on the target issue fails closed', () => {
-  const legacyProject = project({
+test('Done is accepted only as a mirror of closed/completed Issue state', () => {
+  const doneProject = project({
     items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Done' }],
   });
-  const plan = buildReconcilePlan({
-    config,
-    repository: 'ChipIn-one/chipin-frontend',
-    number: 999,
-    classification,
-    snapshot: fullIssue(),
-    project: legacyProject,
+  const completed = issueSnapshot({
+    type: 'Bug', priority: 'P1', severity: 'Major',
+    state: 'closed', stateReason: 'completed',
   });
-  assert.equal(plan.action, 'incomplete');
-  assert.match(plan.blockers.join('\n'), /Project Status Done is retired or unsupported/);
+  const plan = buildReconcilePlan({
+    config, repository: 'ChipIn-one/chipin-frontend', number: 999,
+    classification, snapshot: completed, project: doneProject,
+  });
+  assert.equal(plan.action, 'noop');
+  assert.deepEqual(plan.blockers, []);
 
   const final = verifyFinalState({
-    config,
-    repository: 'ChipIn-one/chipin-frontend',
-    number: 999,
-    classification,
-    snapshot: fullIssue(),
-    project: legacyProject,
+    config, repository: 'ChipIn-one/chipin-frontend', number: 999,
+    classification, snapshot: completed, project: doneProject,
   });
-  assert.match(final.blockers.join('\n'), /Read-back Project Status Done is retired or unsupported/);
+  assert.deepEqual(final.blockers, []);
+  assert.equal(final.receipt.project.status, 'Done');
+});
+
+test('Done on an open or not-planned Issue fails closed', () => {
+  const doneProject = project({
+    items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Done' }],
+  });
+  const snapshots = [
+    fullIssue(),
+    issueSnapshot({ type: 'Bug', priority: 'P1', severity: 'Major', state: 'closed', stateReason: 'not_planned' }),
+  ];
+  for (const snapshot of snapshots) {
+    const plan = buildReconcilePlan({
+      config, repository: 'ChipIn-one/chipin-frontend', number: 999,
+      classification, snapshot, project: doneProject,
+    });
+    assert.equal(plan.action, 'incomplete');
+    assert.match(plan.blockers.join('\n'), /Project Status Done is derived from Issue closed\/completed/);
+  }
+});
+
+test('retired DEV status still fails closed', () => {
+  const legacyProject = project({
+    items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'DEV' }],
+  });
+  const plan = buildReconcilePlan({
+    config, repository: 'ChipIn-one/chipin-frontend', number: 999,
+    classification, snapshot: fullIssue(), project: legacyProject,
+  });
+  assert.equal(plan.action, 'incomplete');
+  assert.match(plan.blockers.join('\n'), /Project Status DEV is retired or unsupported/);
 });
 
 test('existing human values are preserved and mismatches block overwrite', () => {
