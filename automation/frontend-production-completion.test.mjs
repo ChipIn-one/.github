@@ -6,6 +6,7 @@ import {
   closeIssueAsCompleted,
   compareContainsCommit,
   readProductionReleases,
+  readRequiredRelationships,
 } from "./frontend-production-completion.mjs";
 
 const repository = "ChipIn-one/chipin-frontend";
@@ -40,6 +41,9 @@ function issue({
   linkedBranchCount = 0,
   linkedPullRequests = [linkedPr()],
   linkedPullRequestTotalCount = linkedPullRequests.length,
+  requiredRelationshipsReadable = true,
+  blockedBy = [],
+  subIssues = [],
   milestone = null,
 } = {}) {
   return {
@@ -51,6 +55,9 @@ function issue({
     linkedBranchCount,
     linkedPullRequests,
     linkedPullRequestTotalCount,
+    requiredRelationshipsReadable,
+    blockedBy,
+    subIssues,
     milestone,
   };
 }
@@ -156,6 +163,47 @@ test("missing or ambiguous Development evidence blocks completion", async () => 
     linkedPullRequests: [linkedPr({ prRepository: "ChipIn-one/chipin-backend" })],
   }), { repository, releases: [release()], containsCommit: async () => true });
   assert.equal(crossRepository.code, "ambiguous-development");
+});
+
+test("required native relationships fail closed while unfinished or unreadable", async () => {
+  const unreadable = await evaluateIssueForCompletion(issue({
+    requiredRelationshipsReadable: false,
+  }), {
+    repository,
+    releases: [release()],
+    containsCommit: async () => true,
+  });
+  assert.equal(unreadable.code, "required-relationships-unreadable");
+
+  const openSubIssue = await evaluateIssueForCompletion(issue({
+    subIssues: [{ repository, number: 99, state: "open" }],
+  }), {
+    repository,
+    releases: [release()],
+    containsCommit: async () => true,
+  });
+  assert.equal(openSubIssue.code, "required-sub-issue-open");
+  assert.match(openSubIssue.detail, /#99/u);
+
+  const openBlocker = await evaluateIssueForCompletion(issue({
+    blockedBy: [{ repository, number: 77, state: "open" }],
+  }), {
+    repository,
+    releases: [release()],
+    containsCommit: async () => true,
+  });
+  assert.equal(openBlocker.code, "blocked-by-open-issue");
+  assert.match(openBlocker.detail, /#77/u);
+
+  const finishedRelationships = await evaluateIssueForCompletion(issue({
+    subIssues: [{ repository, number: 99, state: "closed" }],
+    blockedBy: [{ repository, number: 77, state: "closed" }],
+  }), {
+    repository,
+    releases: [release()],
+    containsCommit: async () => true,
+  });
+  assert.equal(finishedRelationships.action, "close-completed");
 });
 
 test("reopened or edited scope requires fresh implementation evidence", async () => {
@@ -270,6 +318,45 @@ test("completion write is idempotent and uses only closed/completed", async () =
     state: "closed",
     state_reason: "completed",
   });
+});
+
+test("required relationship reads normalize native sub-issues and blockers", async () => {
+  const client = {
+    listAll: async (path) => {
+      if (path.endsWith("/dependencies/blocked_by")) {
+        return [{
+          number: 7,
+          state: "open",
+          state_reason: null,
+          repository_url: "https://api.github.com/repos/ChipIn-one/chipin-frontend",
+        }];
+      }
+      if (path.endsWith("/sub_issues")) {
+        return [{
+          number: 8,
+          state: "closed",
+          state_reason: "completed",
+          repository_url: "https://api.github.com/repos/ChipIn-one/chipin-frontend",
+        }];
+      }
+      throw new Error("unexpected relationship path");
+    },
+  };
+
+  const relationships = await readRequiredRelationships(client, repository, 1);
+  assert.equal(relationships.requiredRelationshipsReadable, true);
+  assert.deepEqual(relationships.blockedBy, [{
+    repository,
+    number: 7,
+    state: "open",
+    stateReason: null,
+  }]);
+  assert.deepEqual(relationships.subIssues, [{
+    repository,
+    number: 8,
+    state: "closed",
+    stateReason: "completed",
+  }]);
 });
 
 test("production release discovery ignores non-canonical main merges", async () => {

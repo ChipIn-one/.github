@@ -10,6 +10,37 @@ function closeCompleted(detail) {
   return { action: "close-completed", code: "production-complete", detail };
 }
 
+export function evaluateRequiredRelationships(issue) {
+  if (issue.requiredRelationshipsReadable !== true) {
+    return leaveOpen(
+      "required-relationships-unreadable",
+      "Required sub-issue/blocking relationships are unreadable; leave the Issue open and rerun after GitHub relationship reads recover.",
+    );
+  }
+
+  const openSubIssues = (issue.subIssues ?? []).filter((item) => item.state === "open");
+  if (openSubIssues.length > 0) {
+    return leaveOpen(
+      "required-sub-issue-open",
+      "Required sub-issue(s) are still open: "
+        + openSubIssues.map((item) => (item.repository ?? "unknown") + "#" + item.number).join(", ")
+        + ".",
+    );
+  }
+
+  const openBlockers = (issue.blockedBy ?? []).filter((item) => item.state === "open");
+  if (openBlockers.length > 0) {
+    return leaveOpen(
+      "blocked-by-open-issue",
+      "Issue is still blocked by open Issue(s): "
+        + openBlockers.map((item) => (item.repository ?? "unknown") + "#" + item.number).join(", ")
+        + ".",
+    );
+  }
+
+  return null;
+}
+
 function latestTimestamp(...values) {
   const valid = values
     .filter(Boolean)
@@ -42,6 +73,9 @@ export async function evaluateIssueForCompletion(issue, {
   if (issue.state !== "OPEN") {
     return leaveOpen("already-closed", "Issue is already closed; automation never reopens it.");
   }
+
+  const relationshipBlocker = evaluateRequiredRelationships(issue);
+  if (relationshipBlocker) return relationshipBlocker;
 
   if (issue.linkedBranchCount > 0) {
     return leaveOpen(

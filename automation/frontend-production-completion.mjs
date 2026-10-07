@@ -9,6 +9,7 @@ import {
   INTEGRATION_BRANCH,
   PRODUCTION_BRANCH,
   evaluateIssueForCompletion,
+  evaluateRequiredRelationships,
 } from "./frontend-production-completion-policy.mjs";
 
 const OPEN_ISSUES_QUERY = [
@@ -56,6 +57,30 @@ function normalizePullRequest(node) {
     repository: node.repository?.nameWithOwner ?? null,
     headRepository: node.headRepository?.nameWithOwner ?? null,
     mergeCommitSha: node.mergeCommit?.oid ?? null,
+  };
+}
+
+function normalizeRelatedIssue(item) {
+  return {
+    repository: item.repository_url?.split("/repos/")[1] ?? null,
+    number: item.number ?? null,
+    state: item.state ?? null,
+    stateReason: item.state_reason ?? null,
+  };
+}
+
+export async function readRequiredRelationships(client, repository, number) {
+  const { owner, repo } = splitRepository(repository);
+  const root = "/repos/" + owner + "/" + repo + "/issues/" + number;
+  const [blockedBy, subIssues] = await Promise.all([
+    client.listAll(root + "/dependencies/blocked_by"),
+    client.listAll(root + "/sub_issues"),
+  ]);
+
+  return {
+    requiredRelationshipsReadable: true,
+    blockedBy: blockedBy.map(normalizeRelatedIssue),
+    subIssues: subIssues.map(normalizeRelatedIssue),
   };
 }
 
@@ -187,13 +212,54 @@ export async function runCompletionSweep(client, repository = FRONTEND_REPOSITOR
 
   const results = [];
   for (const issue of issues) {
-    const decision = await evaluateIssueForCompletion(issue, {
+    let relationships;
+    try {
+      relationships = await readRequiredRelationships(client, repository, issue.number);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      results.push({
+        issue,
+        decision: {
+          action: "leave-open",
+          code: "required-relationships-unreadable",
+          detail: "Required sub-issue/blocking relationships are unreadable: " + detail,
+        },
+      });
+      continue;
+    }
+
+    const issueWithRelationships = { ...issue, ...relationships };
+    const decision = await evaluateIssueForCompletion(issueWithRelationships, {
       repository,
       releases,
       containsCommit,
     });
     if (decision.action !== "close-completed") {
       results.push({ issue, decision });
+      continue;
+    }
+
+    let finalRelationships;
+    try {
+      finalRelationships = await readRequiredRelationships(client, repository, issue.number);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      results.push({
+        issue,
+        decision: {
+          action: "leave-open",
+          code: "required-relationships-unreadable",
+          detail: "Required relationships became unreadable before close: " + detail,
+        },
+      });
+      continue;
+    }
+    const finalRelationshipBlocker = evaluateRequiredRelationships({
+      ...issue,
+      ...finalRelationships,
+    });
+    if (finalRelationshipBlocker) {
+      results.push({ issue, decision: finalRelationshipBlocker });
       continue;
     }
 
