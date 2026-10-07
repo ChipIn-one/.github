@@ -16,7 +16,7 @@ Keep the axes separate:
 | Priority | Organization Issue Field `Priority` | `P0`, `P1`, `P2`, `P3` |
 | Severity | Organization Issue Field `Severity` | `Critical`, `Major`, `Minor`; use only when relevant |
 | Release target | Native repository Milestone | Optional concrete product release target |
-| Workflow position | ChipIn Project #5 `Status` | `Backlog`, `Todo`, `In Progress` only |
+| Workflow position / completion mirror | ChipIn Project #5 `Status` | `Backlog`, `Todo`, `In Progress`; `Done` mirrors `closed/completed` only |
 | Completion state | Native GitHub Issue state/reason | open = unfinished; closed/completed = complete; closed/not planned = cancelled |
 | Parent / decomposition | Native GitHub issue relationships | Parent is optional; cross-repo product parent lives in KB when decomposition is needed |
 | PR implementation relationship | Native GitHub Development relationship | Do not use plain URLs or closing-keyword inference as a substitute for a required manual/native link |
@@ -33,7 +33,7 @@ GitHub Milestones are repository-scoped. Same-named milestones in FE/BE/KB repre
 - Do not create generic `PRE-PROD` or `POST-PROD` milestones to replace the retired field.
 - Existing Milestone assignments are human-owned release intent. Intake/reconciliation preserves them and does not infer, add, clear, or rename Milestones.
 - Release progress is based on release issues. Linked implementation PRs do not need the issue's milestone solely to inflate progress.
-- Project #5 `Status` remains independent active workflow position and has no terminal value.
+- Project #5 `Status` remains secondary to native Issue state. `Done` is a derived Project mirror of `closed/completed`, never the authority that makes an Issue complete.
 
 ## Legacy metadata
 
@@ -77,7 +77,7 @@ Use GitHub-native relationships for workflow meaning:
 - A Development-linked PR is implementation evidence for its specific issue or sub-issue.
 - A plain issue/PR URL is a reference, not a workflow relationship.
 
-Project #5 Status tracks only active work: `Backlog -> Todo -> In Progress`. Do not use `DEV`, `PROD`, or `Done` as Project statuses.
+Project #5 Status tracks active work as `Backlog -> Todo -> In Progress`. `Done` is retained only as a derived display state for an Issue already `closed/completed`. Do not use or recreate `DEV` or `PROD`; `Done` must never authorize Issue closure.
 
 Native Issue state is the completion authority. Closing as completed means the task is complete; closing as not planned means it was cancelled or intentionally abandoned. Reopening makes the task unfinished again.
 
