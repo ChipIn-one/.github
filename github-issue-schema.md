@@ -77,6 +77,14 @@ Use GitHub-native relationships for workflow meaning:
 - A Development-linked PR is implementation evidence for its specific issue or sub-issue.
 - A plain issue/PR URL is a reference, not a workflow relationship.
 
+Implementation PR linking uses the existing canonical task identity `ChipIn-one/<repository>#<issue-number>`.
+For automatic PR-event reconciliation, one exact `Task identity: ChipIn-one/<repository>#<issue-number>`
+PR-body line may carry that identity; manual reconciliation may supply the same value explicitly. This
+metadata is identity transport only. It does not itself create or prove a Development relationship.
+Branch names, titles, closing keywords, plain URLs, matching numbers, and Milestones are not identity
+fallbacks. Canonical implementation evidence exists only after the native Development relationship is
+read back from GitHub.
+
 Project #5 Status tracks active work as `Backlog -> Todo -> In Progress`. `Done` is retained only as a derived display state for an Issue already `closed/completed`. Do not use or recreate `DEV` or `PROD`; `Done` must never authorize Issue closure.
 
 Native Issue state is the completion authority. Closing as completed means the task is complete; closing as not planned means it was cancelled or intentionally abandoned. Reopening makes the task unfinished again.
