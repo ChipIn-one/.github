@@ -23,6 +23,37 @@ For API clients/connectors that can create normal Issues but cannot mutate Issue
 
 See [issue-intake.md](./issue-intake.md) for CLI examples, connector request format, retry semantics, the named-gap reconciliation plan, and the live activation procedure.
 
+## Native Development linking
+
+`development-link.mjs` is the shared fail-closed reconciler for implementation PRs in
+`ChipIn-one/chipin-frontend`, `ChipIn-one/chipin-backend`, and
+`ChipIn-one/chipin-knowledge-base`.
+
+- The task identity is the existing canonical `ChipIn-one/<repository>#<issue-number>` value.
+  Automatic PR-event reconciliation reads it only from one exact PR-body line,
+  `Task identity: ChipIn-one/<repository>#<issue-number>`. Manual reconciliation may pass the
+  same canonical identity as an explicit workflow input. The marker/input is identity transport
+  only; it is never implementation evidence.
+- Plain URLs, closing keywords, branch names, PR titles, matching numbers, Milestones, and other
+  prose are never identity fallbacks.
+- The only write is GitHub GraphQL `addCloseIssueReferences(issueId, pullRequestIds)`. Before a
+  write, and again after it, the reconciler reads
+  `closedByPullRequestsReferences(includeClosedPrs: true, userLinkedOnly: true)` with complete
+  pagination. Success is impossible without exact native read-back.
+- An already linked PR is an idempotent success. More than one implementation PR may link to the
+  same Issue, and unrelated existing links are preserved.
+- Missing/ambiguous identity, unsupported repositories, unreadable Issue/PR/relationship state,
+  unavailable mutation permission/capability, incomplete pagination, and failed read-back all
+  block without guessing.
+- This path never closes/reopens an Issue, mutates Project #5 Status, writes `Done`, or implements
+  production completion from #40.
+
+The composite action at `automation/development-link-action/action.yml` packages this reconciler
+for minimal repository-local PR-event callers. Organization `.github` workflows are not inherited
+by sibling repositories, so FE/BE/KB each need a small caller on their canonical branch. The caller
+must grant only the permissions needed to read the PR and write the Issue relationship; fork or
+other restricted-token contexts fail closed rather than substituting a textual link.
+
 ## Historical metadata migration
 
 `metadata-migration.mjs` implements the completed task #6 / backend #117 migration as historical, auditable evidence. Active intake imports `github-metadata.mjs` directly; the historical mapping is not canonical schema.
