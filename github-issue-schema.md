@@ -1,6 +1,6 @@
 # ChipIn GitHub issue schema
 
-Last reviewed: 2026-09-27
+Last reviewed: 2026-10-07
 
 This document defines the shared GitHub task metadata model for ChipIn repositories.
 It does not define repository-specific implementation, review, build, test, deploy, or agent-execution rules.
@@ -15,95 +15,76 @@ Keep the axes separate:
 | Work kind | Organization Issue Type | `Task`, `Feature`, `Bug` |
 | Priority | Organization Issue Field `Priority` | `P0`, `P1`, `P2`, `P3` |
 | Severity | Organization Issue Field `Severity` | `Critical`, `Major`, `Minor`; use only when relevant |
-| Release scope | Organization Issue Field `Release scope` | `PRE-PROD`, `POST-PROD` |
-| Workflow state | ChipIn Project #5 `Status` | Project workflow only; never infer from issue open/closed state |
+| Release target | Native repository Milestone | Optional concrete product release target |
+| Workflow position | ChipIn Project #5 `Status` | `Backlog`, `Todo`, `In Progress` only |
+| Completion state | Native GitHub Issue state/reason | open = unfinished; closed/completed = complete; closed/not planned = cancelled |
 | Parent / decomposition | Native GitHub issue relationships | Parent is optional; cross-repo product parent lives in KB when decomposition is needed |
-| PR implementation relationship | Native GitHub Development relationship | Do not use plain URLs or universal closing keywords as a substitute |
+| PR implementation relationship | Native GitHub Development relationship | Do not use plain URLs or closing-keyword inference as a substitute for a required manual/native link |
 
 Organization Issue Fields and Project fields are different objects. Do not create same-named Project custom fields as fallbacks for Organization Issue Fields.
 
-If Organization Issue Fields are unavailable because of visibility or permission, the value is `UNKNOWN/BLOCKED`. Do not infer it from legacy labels, milestones, title text, issue state, or Project Status.
+A missing Milestone is valid and means the issue is not committed to a concrete release. Milestone membership never authorizes execution or completion.
+
+GitHub Milestones are repository-scoped. Same-named milestones in FE/BE/KB represent the same product release by convention and must use the same product-level name. Do not derive the name from repository-local package/API versions unless product versioning explicitly adopts that scheme.
+
+## Release-target rules
+
+- Use concrete release targets such as the existing `POST RELEASE 1.1`.
+- Do not create generic `PRE-PROD` or `POST-PROD` milestones to replace the retired field.
+- Existing Milestone assignments are human-owned release intent. Intake/reconciliation preserves them and does not infer, add, clear, or rename Milestones.
+- Release progress is based on release issues. Linked implementation PRs do not need the issue's milestone solely to inflate progress.
+- Project #5 `Status` remains independent active workflow position and has no terminal value.
 
 ## Legacy metadata
 
-The following are migration-only and MUST NOT be created for new work:
+The Organization Issue Field `Release scope` and its `PRE-PROD` / `POST-PROD` values are historical migration evidence only. They are not active canonical schema and must not be written for new work.
 
-- priority labels `P0`, `P1`, `P2`, `P3`;
-- `severity:*` labels;
-- `type:*` labels;
-- the `PRE-PROD` milestone as release-scope metadata.
+Legacy priority/severity/type labels and the historical `PRE-PROD` milestone semantics are also migration-only. Historical migration tooling may retain old terminology when explicitly marked historical.
 
-During migration, preserve meaning before cleanup:
+Retirement order is fail-closed:
 
-1. Read the current issue and structured Organization Issue Fields.
-2. Resolve the intended canonical value from the approved migration mapping.
-3. Write and re-read the canonical field / Issue Type.
-4. Verify Project membership and the existing Project Status independently.
-5. Only then remove the corresponding legacy label or milestone.
+1. Snapshot current legacy values and current native Milestones.
+2. Update active readers/writers/contracts so the legacy field is no longer required.
+3. Pilot on explicitly approved issues and re-read Priority, Severity, Issue Type, Milestone, Project membership/Status, and native relationships.
+4. Reconcile the approved mapping without overwriting human-owned values.
+5. Only after clean read-back, retire/remove the legacy organization field.
 
-A failed or unavailable structured-field read blocks cleanup. Do not guess a replacement.
-
-Repository labels may still be used for orthogonal repository-local classification when explicitly documented by that repository. They are not substitutes for the axes above.
+A failed or unavailable structured read blocks destructive cleanup. Do not guess a replacement.
 
 ## Issue body shape
 
-Use only the relevant durable subset of these sections, in this order:
+Use only the relevant durable subset of these sections, in this order: `Problem`, `Outcome`, `Acceptance`, `Dependencies`, `References`.
 
-### Problem
-
-State the current problem, constraint, or reason for the task. For defects, include enough reproduction/evidence here to make the problem verifiable.
-
-### Outcome
-
-Describe the observable state that should be true when the task is complete. Do not prescribe incidental implementation details unless they are constraints.
-
-### Acceptance
-
-Use checkable acceptance criteria.
-
-### Dependencies
-
-Use GitHub-native relationships when available. Put only real blocking/required dependencies here; do not duplicate Project Status.
-
-### References
-
-Link historical Trello cards, specs, ADRs, PRs, evidence, and related non-blocking work. Trello is historical/read-only and is never synchronized back.
+Use checkable acceptance criteria. Use GitHub-native relationships for real blocking/decomposition semantics. References are informational only.
 
 ## Issue Forms and complete intake
 
-Shared forms live in `.github/ISSUE_TEMPLATE/` and set only the canonical Organization Issue Type:
+Shared forms live in `.github/ISSUE_TEMPLATE/` and set only native Issue Type.
 
-| Form | Issue Type |
-| --- | --- |
-| `bug.yml` | `Bug` |
-| `enhancement.yml` | `Feature` |
-| `docs.yml` | `Task` |
-| `research.yml` | `Task` |
-| `tests.yml` | `Task` |
+Issue Forms do not encode Priority, Severity, or Milestone as body dropdowns. Body values are Markdown, not canonical metadata.
 
-Issue Forms do not create Priority/Severity/Release-scope labels or milestones, and they do not encode those values as body dropdowns. Values captured in the form body are Markdown content, not Organization Issue Field state.
+A UI-created issue is canonically complete after the manual `Issue metadata finalizer` has received explicit Issue Type, Priority, applicable Severity, ensured exactly one Project #5 membership, preserved any existing Status, initialized `Backlog` only when Status is absent, and returned a clean read-back receipt. Milestone is optional and is preserved as-is.
 
-A UI-created issue is complete only after the repository-local `Issue metadata finalizer` workflow has received explicit Issue Type, Priority, Release scope and applicable Severity, ensured exactly one Project #5 membership, initialized Status only when absent, and returned a clean read-back receipt. The workflow is manual-only; a workflow stored in the organization `.github` repository is not treated as a subscriber to issue events in sibling repositories.
-
-API/agent creation uses `automation/issue-intake.mjs apply create` with the same explicit classification. The create operation checkpoints the returned issue identity before Project writes and resumes that identity on retry. `automation/issue-intake.mjs apply reconcile` handles an existing incomplete issue. Existing human canonical values and existing Project Status are preserved; conflicts, duplicate membership, permission failures, and unreadable state fail closed.
-
-Do not use a `projects:` form key as a substitute for finalization. Project membership alone does not write Organization Issue Fields and does not repair API-created issues. Missing classification remains incomplete rather than receiving a fabricated default.
+API/agent creation uses `automation/issue-intake.mjs apply create` with the same classification. `apply reconcile` repairs an existing incomplete issue. Existing human canonical values, native Milestone, relationships, and Project Status are preserved; conflicts, duplicate membership, permission failures, and unreadable state fail closed.
 
 ## Relationships and workflow
 
 Use GitHub-native relationships for workflow meaning:
 
 - A parent is optional for standalone FE/BE work.
-- When one product change is decomposed across repositories, its cross-repository product parent lives in `ChipIn-one/chipin-knowledge-base`.
-- Native sub-issues are required decomposition work under that parent.
+- Cross-repository product decomposition uses native parent/sub-issue relationships.
 - Native `blocked by` / `blocking` relationships represent true dependencies.
 - A Development-linked PR is implementation evidence for its specific issue or sub-issue.
-- `References` are informational only and never gate status.
 - A plain issue/PR URL is a reference, not a workflow relationship.
-- Closing keywords are not a universal integration signal because their behavior depends on the PR target being the repository default branch.
 
-`DEV` means every required implementation-bearing change is integrated into its configured integration branch: frontend to `dev`, backend to `develop`, and knowledge-base change to `master` when the product specification itself must change. Deployment is separate evidence and does not gate `DEV`.
+Project #5 Status tracks only active work: `Backlog -> Todo -> In Progress`. Do not use `DEV`, `PROD`, or `Done` as Project statuses.
 
-Code/product work terminates at `PROD`. Standalone non-code research, documentation, and external work may terminate at `Done`. `PROD`, `Done`, and product-parent closure remain manual in v1.
+Native Issue state is the completion authority. Closing as completed means the task is complete; closing as not planned means it was cancelled or intentionally abandoned. Reopening makes the task unfinished again.
 
-If required work is reopened or required scope changes after `DEV`, report the state as inconsistent for manual review; do not automatically regress status. Ambiguous structured state fails closed.
+Development-linked PRs are implementation evidence. Their merge state must not be copied into Project Status.
+
+For frontend code work, merge to integration branch `dev` is not completion. Close only after the required implementation is merged to production branch `main`.
+
+Repository-specific completion triggers other than the frontend rule above are outside this shared change and remain repository-owned.
+
+Knowledge-base and standalone non-code work close when their accepted durable outcome is complete on the canonical source of truth. Ambiguous completion evidence fails closed.

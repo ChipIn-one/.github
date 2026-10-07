@@ -1,4 +1,7 @@
-# Metadata migration runbook
+# Historical metadata migration runbook
+
+> Historical only. This runbook documents the completed backend #117 migration. `Release scope` is retired from the active canonical schema by .github #34. Active automation imports `github-metadata.mjs`; old Release-scope IDs/mapping are retained only under `historicalMigration` for reproducibility and rollback evidence.
+
 
 Task authority: [ChipIn-one/.github#6](https://github.com/ChipIn-one/.github/issues/6). Approved backend mapping: [ChipIn-one/chipin-backend#117](https://github.com/ChipIn-one/chipin-backend/issues/117).
 

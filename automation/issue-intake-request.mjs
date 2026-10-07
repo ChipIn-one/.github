@@ -8,7 +8,7 @@ import {
   run as runIntake,
   validateClassification,
 } from './issue-intake.mjs';
-import { GitHubClient } from './metadata-migration.mjs';
+import { GitHubClient } from './github-metadata.mjs';
 
 const REQUEST_SCHEMA_VERSION = 1;
 const BRIDGE_SCHEMA_VERSION = 1;
@@ -22,7 +22,18 @@ const ALLOWED_REQUEST_KEYS = new Set([
   'target',
   'issueType',
   'priority',
-  'releaseScope',
+  'severity',
+]);
+
+const ALLOWED_QUEUED_KEYS = new Set([
+  'schemaVersion',
+  'requestIssue',
+  'requestIssueUrl',
+  'actor',
+  'triggerActor',
+  'target',
+  'issueType',
+  'priority',
   'severity',
 ]);
 
@@ -68,7 +79,7 @@ export function parseRequestBody(body) {
   if (unexpected.length) {
     throw new Error(`Unsupported intake request keys: ${unexpected.join(', ')}.`);
   }
-  for (const key of ['target', 'issueType', 'priority', 'releaseScope']) {
+  for (const key of ['target', 'issueType', 'priority']) {
     if (typeof parsed[key] !== 'string' || !parsed[key].trim()) {
       throw new Error(`Intake request field ${key} must be a non-empty string.`);
     }
@@ -80,7 +91,6 @@ export function parseRequestBody(body) {
     target: parsed.target.trim(),
     issueType: parsed.issueType.trim(),
     priority: parsed.priority.trim(),
-    releaseScope: parsed.releaseScope.trim(),
     severity: normalizeSeverity(parsed.severity),
   };
 }
@@ -104,11 +114,14 @@ function markerJson(body, marker) {
 
 export function validateQueuedRequest(config, rawRequest) {
   const blockers = [];
+  const unexpected = Object.keys(rawRequest ?? {}).filter((key) => !ALLOWED_QUEUED_KEYS.has(key));
+  if (unexpected.length) {
+    blockers.push(`Unsupported queued intake request keys: ${unexpected.join(', ')}.`);
+  }
   const request = {
     target: typeof rawRequest?.target === 'string' ? rawRequest.target.trim() : '',
     issueType: typeof rawRequest?.issueType === 'string' ? rawRequest.issueType.trim() : '',
     priority: typeof rawRequest?.priority === 'string' ? rawRequest.priority.trim() : '',
-    releaseScope: typeof rawRequest?.releaseScope === 'string' ? rawRequest.releaseScope.trim() : '',
     severity: normalizeSeverity(rawRequest?.severity),
   };
 
@@ -143,7 +156,6 @@ export function renderQueueComment(request) {
     target: request.target,
     issueType: request.issueType,
     priority: request.priority,
-    releaseScope: request.releaseScope,
     severity: request.severity ?? 'none',
   };
   return [
@@ -259,8 +271,6 @@ export function buildIntakeArgs(request, outputPath) {
     request.issueType,
     '--priority',
     request.priority,
-    '--release-scope',
-    request.releaseScope,
     '--severity',
     request.severity ?? 'none',
     '--activate',
@@ -373,12 +383,12 @@ export function renderReceiptComment(receipt, queueCommentId = null) {
   if (receipt?.request?.target) lines.push(`- Target: \`${receipt.request.target}\``);
   if (receipt?.request) {
     lines.push(
-      `- Requested: \`${receipt.request.issueType}\` / \`${receipt.request.priority}\` / \`${receipt.request.releaseScope}\` / severity \`${receipt.request.severity ?? 'none'}\``,
+      `- Requested: \`${receipt.request.issueType}\` / \`${receipt.request.priority}\` / severity \`${receipt.request.severity ?? 'none'}\``,
     );
   }
   if (receipt?.intake?.receipt) {
     lines.push(
-      `- Read-back: Type \`${receipt.intake.receipt.issueType ?? 'missing'}\`, Priority \`${field(receipt, 'Priority') ?? 'missing'}\`, Release scope \`${field(receipt, 'Release scope') ?? 'missing'}\`, Severity \`${field(receipt, 'Severity') ?? 'none'}\``,
+      `- Read-back: Type \`${receipt.intake.receipt.issueType ?? 'missing'}\`, Priority \`${field(receipt, 'Priority') ?? 'missing'}\`, Severity \`${field(receipt, 'Severity') ?? 'none'}\`, Milestone \`${receipt.intake.receipt.milestone ?? 'none'}\``,
       `- Project #5: membership \`${receipt.intake.receipt.project?.membershipCount ?? 'unreadable'}\`, Status \`${receipt.intake.receipt.project?.status ?? 'unreadable'}\``,
     );
   }
