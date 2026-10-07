@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        After creation, run `ChipIn-one/.github` -> Actions -> `Issue metadata finalizer` and supply explicit Organization Issue Fields `Priority` and `Release scope`; set `Severity` only when applicable. The finalizer also ensures one Project #5 membership and a readable `Status`. Do not add legacy metadata labels/milestones or infer fallback values.
+        After creation, run `ChipIn-one/.github` -> Actions -> `Issue metadata finalizer` and supply explicit Organization Issue Field `Priority`; set `Severity` only when applicable. The finalizer also ensures one Project #5 membership and a readable `Status`; native Milestone is optional and preserved as-is. Do not add legacy metadata labels, do not create generic `PRE-PROD`/`POST-PROD` milestones, and do not infer fallback values.
   - type: textarea
     id: problem
     attributes:
