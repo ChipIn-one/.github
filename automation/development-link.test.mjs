@@ -13,6 +13,7 @@ function makeClient({
   issueNumber = 7,
   pullRequests = [10],
   bodies = {},
+  pullRequestBodySequence = {},
   stateBodies = {},
   linkedPullRequests = [],
   mutationFailure = null,
@@ -24,6 +25,7 @@ function makeClient({
   const links = new Set(linkedPullRequests);
   const calls = [];
   const ids = new Map(pullRequests.map((number) => [number, `PR_${number}`]));
+  const pullRequestReadCounts = new Map();
 
   return {
     calls,
@@ -33,13 +35,18 @@ function makeClient({
       if (query.includes("query DevelopmentLinkPullRequest")) {
         const number = variables.pullRequestNumber;
         const exists = ids.has(number) && !pullRequestUnreadable;
+        const readCount = pullRequestReadCounts.get(number) ?? 0;
+        pullRequestReadCounts.set(number, readCount + 1);
+        const sequencedBodies = pullRequestBodySequence[number] ?? [];
         return {
           repository: {
             nameWithOwner: REPOSITORY,
             pullRequest: exists ? {
               id: ids.get(number),
               number,
-              body: bodies[number] ?? `Task identity: ${REPOSITORY}#${issueNumber}`,
+              body: sequencedBodies[readCount]
+                ?? bodies[number]
+                ?? `Task identity: ${REPOSITORY}#${issueNumber}`,
               repository: { nameWithOwner: REPOSITORY },
             } : null,
           },
@@ -134,16 +141,26 @@ test("exact Issue + PR creates a native link and confirms read-back", async () =
   assert.equal(client.links.has(10), true);
 });
 
-test("task identity drift before mutation fails closed", async () => {
+test("task identity drift on the final PR reread fails closed", async () => {
   const client = makeClient({
     bodies: { 10: `Task identity: ${REPOSITORY}#7` },
-    stateBodies: { 10: `Task identity: ${REPOSITORY}#8` },
+    stateBodies: { 10: `Task identity: ${REPOSITORY}#7` },
+    pullRequestBodySequence: {
+      10: [
+        `Task identity: ${REPOSITORY}#7`,
+        `Task identity: ${REPOSITORY}#8`,
+      ],
+    },
   });
   await assert.rejects(
     reconcileDevelopmentLink(client, { repository: REPOSITORY, pullRequestNumber: 10 }),
     /Task identity changed while reconciling/u,
   );
   assert.equal(mutationCalls(client).length, 0);
+  assert.equal(
+    client.calls.filter(({ query }) => query.includes("query DevelopmentLinkPullRequest")).length,
+    2,
+  );
 });
 
 test("already linked is an idempotent noop success", async () => {
