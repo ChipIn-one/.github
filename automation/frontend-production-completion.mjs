@@ -313,12 +313,27 @@ export async function closeIssueAsCompleted(client, issue, repository = FRONTEND
   return { mutated: true, code: "closed-completed", detail: "Closed as completed." };
 }
 
-export async function runCompletionSweep(client, repository = FRONTEND_REPOSITORY) {
+export async function runCompletionSweep(
+  client,
+  repository = FRONTEND_REPOSITORY,
+  { reconcileProjectStatus = true } = {},
+) {
   const [issues, releases, project] = await Promise.all([
     readOpenFrontendIssues(client, repository),
     readProductionReleases(client, repository),
-    readProjectSnapshot(client, PROJECT_CONFIG),
+    reconcileProjectStatus ? readProjectSnapshot(client, PROJECT_CONFIG) : Promise.resolve(null),
   ]);
+  const reconcileProject = async (issue) => {
+    if (!reconcileProjectStatus) {
+      return {
+        mutated: false,
+        code: "project-reconciliation-disabled",
+        detail: "Project reconciliation is disabled for repository-local execution.",
+      };
+    }
+    return reconcileOpenDoneProjectStatus(client, issue, project, repository);
+  };
+
   const ancestryCache = new Map();
   const containsCommit = async (commitSha, releaseHeadSha) => {
     const key = commitSha + ":" + releaseHeadSha;
@@ -353,7 +368,7 @@ export async function runCompletionSweep(client, repository = FRONTEND_REPOSITOR
       containsCommit,
     });
     if (decision.action !== "close-completed") {
-      const projectReconciliation = await reconcileOpenDoneProjectStatus(client, issue, project, repository);
+      const projectReconciliation = await reconcileProject(issue);
       results.push({
         issue,
         decision: projectReconciliation.mutated
@@ -402,7 +417,7 @@ export async function runCompletionSweep(client, repository = FRONTEND_REPOSITOR
       continue;
     }
 
-    const projectReconciliation = await reconcileOpenDoneProjectStatus(client, issue, project, repository);
+    const projectReconciliation = await reconcileProject(issue);
     results.push({
       issue,
       decision: {
@@ -444,7 +459,12 @@ async function main() {
   const token = process.env.CHIPIN_CANONICAL_WRITE_TOKEN;
   if (!token) throw new Error("CHIPIN_CANONICAL_WRITE_TOKEN is required");
 
-  const results = await runCompletionSweep(new GitHubClient(token));
+  const reconcileProjectStatus = process.env.CHIPIN_FRONTEND_COMPLETION_PROJECT_RECONCILE !== "0";
+  const results = await runCompletionSweep(
+    new GitHubClient(token),
+    FRONTEND_REPOSITORY,
+    { reconcileProjectStatus },
+  );
   const summary = formatSweepSummary(results);
   process.stdout.write(summary);
   if (process.env.GITHUB_STEP_SUMMARY) {
