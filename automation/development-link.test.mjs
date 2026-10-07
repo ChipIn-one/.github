@@ -13,6 +13,7 @@ function makeClient({
   issueNumber = 7,
   pullRequests = [10],
   bodies = {},
+  stateBodies = {},
   linkedPullRequests = [],
   mutationFailure = null,
   readBackFailure = false,
@@ -71,7 +72,7 @@ function makeClient({
               id: ids.get(number),
               number,
               url: `https://github.com/${REPOSITORY}/pull/${number}`,
-              body: bodies[number] ?? `Task identity: ${REPOSITORY}#${issueNumber}`,
+              body: stateBodies[number] ?? bodies[number] ?? `Task identity: ${REPOSITORY}#${issueNumber}`,
               repository: { nameWithOwner: REPOSITORY },
             } : null,
           },
@@ -131,6 +132,18 @@ test("exact Issue + PR creates a native link and confirms read-back", async () =
   assert.equal(receipt.readBackConfirmed, true);
   assert.equal(mutationCalls(client).length, 1);
   assert.equal(client.links.has(10), true);
+});
+
+test("task identity drift before mutation fails closed", async () => {
+  const client = makeClient({
+    bodies: { 10: `Task identity: ${REPOSITORY}#7` },
+    stateBodies: { 10: `Task identity: ${REPOSITORY}#8` },
+  });
+  await assert.rejects(
+    reconcileDevelopmentLink(client, { repository: REPOSITORY, pullRequestNumber: 10 }),
+    /Task identity changed while reconciling/u,
+  );
+  assert.equal(mutationCalls(client).length, 0);
 });
 
 test("already linked is an idempotent noop success", async () => {
