@@ -61,6 +61,6 @@ Development-linked PRs and their merge state remain implementation evidence and 
 
 For frontend code work, merge to `dev` is integration only. Close the Issue only after the required implementation is merged to production branch `main`.
 
-For backend code work, merge to `develop` is integration only. The backend repository currently has no production branch, so branch-based automatic closure is intentionally blocked rather than inferred from `develop` or staging. A backend production branch or another explicit terminal production event must be defined before completion can be automated.
+Repository-specific completion triggers outside frontend are out of scope for this change and remain owned by their repositories.
 
 Knowledge-base and standalone non-code work close when their accepted durable outcome is complete; they do not need a synthetic terminal Project status.

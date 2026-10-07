@@ -85,6 +85,6 @@ Development-linked PRs are implementation evidence. Their merge state must not b
 
 For frontend code work, merge to integration branch `dev` is not completion. Close only after the required implementation is merged to production branch `main`.
 
-For backend code work, merge to integration branch `develop` is not completion. The backend repository currently has no production branch, so no branch-based automatic close is authorized. Do not infer terminal completion from `develop`, staging, labels, Milestone, or Project Status; define an explicit backend production branch/event first.
+Repository-specific completion triggers other than the frontend rule above are outside this shared change and remain repository-owned.
 
 Knowledge-base and standalone non-code work close when their accepted durable outcome is complete on the canonical source of truth. Ambiguous completion evidence fails closed.
