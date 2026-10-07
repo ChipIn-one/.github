@@ -298,9 +298,13 @@ export async function reconcileDevelopmentLink(client, {
     throw new Error(`Pull request identity changed while reconciling ${repository}#${prNumber}.`);
   }
 
+  const finalPullRequest = await readPullRequest(client, repository, prNumber);
+  if (finalPullRequest.id !== pullRequest.id || finalPullRequest.id !== before.pullRequest.id) {
+    throw new Error(`Pull request identity changed while reconciling ${repository}#${prNumber}.`);
+  }
   const revalidatedTask = resolveTaskIdentity({
     explicitTaskIdentity,
-    pullRequestBody: before.pullRequest.body,
+    pullRequestBody: finalPullRequest.body,
   });
   if (revalidatedTask.canonical !== task.canonical) {
     throw new Error(
