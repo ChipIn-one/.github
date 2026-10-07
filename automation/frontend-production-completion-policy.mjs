@@ -18,12 +18,17 @@ export function evaluateRequiredRelationships(issue) {
     );
   }
 
-  const openSubIssues = (issue.subIssues ?? []).filter((item) => item.state === "open");
-  if (openSubIssues.length > 0) {
+  const incompleteSubIssues = (issue.subIssues ?? []).filter((item) => (
+    item.state !== "closed" || item.stateReason !== "completed"
+  ));
+  if (incompleteSubIssues.length > 0) {
     return leaveOpen(
-      "required-sub-issue-open",
-      "Required sub-issue(s) are still open: "
-        + openSubIssues.map((item) => (item.repository ?? "unknown") + "#" + item.number).join(", ")
+      "required-sub-issue-incomplete",
+      "Required sub-issue(s) are not closed/completed: "
+        + incompleteSubIssues.map((item) => (
+          (item.repository ?? "unknown") + "#" + item.number
+          + " (" + (item.state ?? "unknown") + "/" + (item.stateReason ?? "unknown") + ")"
+        )).join(", ")
         + ".",
     );
   }

@@ -176,14 +176,33 @@ test("required native relationships fail closed while unfinished or unreadable",
   assert.equal(unreadable.code, "required-relationships-unreadable");
 
   const openSubIssue = await evaluateIssueForCompletion(issue({
-    subIssues: [{ repository, number: 99, state: "open" }],
+    subIssues: [{ repository, number: 99, state: "open", stateReason: null }],
   }), {
     repository,
     releases: [release()],
     containsCommit: async () => true,
   });
-  assert.equal(openSubIssue.code, "required-sub-issue-open");
+  assert.equal(openSubIssue.code, "required-sub-issue-incomplete");
   assert.match(openSubIssue.detail, /#99/u);
+
+  const cancelledSubIssue = await evaluateIssueForCompletion(issue({
+    subIssues: [{ repository, number: 98, state: "closed", stateReason: "not_planned" }],
+  }), {
+    repository,
+    releases: [release()],
+    containsCommit: async () => true,
+  });
+  assert.equal(cancelledSubIssue.code, "required-sub-issue-incomplete");
+  assert.match(cancelledSubIssue.detail, /closed\/not_planned/u);
+
+  const missingReasonSubIssue = await evaluateIssueForCompletion(issue({
+    subIssues: [{ repository, number: 97, state: "closed", stateReason: null }],
+  }), {
+    repository,
+    releases: [release()],
+    containsCommit: async () => true,
+  });
+  assert.equal(missingReasonSubIssue.code, "required-sub-issue-incomplete");
 
   const openBlocker = await evaluateIssueForCompletion(issue({
     blockedBy: [{ repository, number: 77, state: "open" }],
@@ -196,7 +215,7 @@ test("required native relationships fail closed while unfinished or unreadable",
   assert.match(openBlocker.detail, /#77/u);
 
   const finishedRelationships = await evaluateIssueForCompletion(issue({
-    subIssues: [{ repository, number: 99, state: "closed" }],
+    subIssues: [{ repository, number: 99, state: "closed", stateReason: "completed" }],
     blockedBy: [{ repository, number: 77, state: "closed" }],
   }), {
     repository,
