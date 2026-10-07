@@ -1,0 +1,189 @@
+name: KB documentation validation
+
+on:
+  pull_request:
+    branches:
+      - master
+  push:
+    branches:
+      - master
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kb-docs-validation
+  cancel-in-progress: false
+
+jobs:
+  validate-kb:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      KB_REPOSITORY: ChipIn-one/chipin-knowledge-base
+      KB_BRANCH: master
+      KB_PATH: kb
+      RECEIPT_PATH: kb-docs-validation.json
+      GH_TOKEN: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
+    steps:
+      - name: Resolve exact KB revision
+        id: target
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GH_TOKEN:-}"
+          sha="$(gh api "repos/${KB_REPOSITORY}/git/ref/heads/${KB_BRANCH}" --jq '.object.sha')"
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Unable to resolve an immutable KB revision." >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact KB revision
+        id: checkout
+        if: steps.target.outcome == 'success'
+        continue-on-error: true
+        uses: actions/checkout@v7
+        with:
+          repository: ChipIn-one/chipin-knowledge-base
+          ref: ${{ steps.target.outputs.sha }}
+          path: kb
+          fetch-depth: 0
+          token: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Verify checkout provenance
+        id: provenance
+        if: steps.checkout.outcome == 'success'
+        continue-on-error: true
+        env:
+          TARGET_SHA: ${{ steps.target.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha="$(git -C "$KB_PATH" rev-parse HEAD)"
+          test "$actual_sha" = "$TARGET_SHA"
+          git -C "$KB_PATH" branch -f "$KB_BRANCH" "$TARGET_SHA"
+          validator_blob="$(git -C "$KB_PATH" rev-parse "$TARGET_SHA:infra/check-docs.py")"
+          requirements_blob="$(git -C "$KB_PATH" rev-parse "$TARGET_SHA:infra/requirements-docs.txt")"
+          echo "head_sha=$actual_sha" >> "$GITHUB_OUTPUT"
+          echo "validator_blob=$validator_blob" >> "$GITHUB_OUTPUT"
+          echo "requirements_blob=$requirements_blob" >> "$GITHUB_OUTPUT"
+
+      - name: Use Python
+        id: python
+        if: steps.provenance.outcome == 'success'
+        continue-on-error: true
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: kb/infra/requirements-docs.txt
+
+      - name: Install pinned docs dependencies
+        id: dependencies
+        if: steps.python.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -r "$KB_PATH/infra/requirements-docs.txt"
+          echo "python_version=$(python --version 2>&1 | awk '{ print $2 }')" >> "$GITHUB_OUTPUT"
+          echo "markdown_it_version=$(python -c 'import markdown_it; print(markdown_it.__version__)')" >> "$GITHUB_OUTPUT"
+
+      - name: Run validator self-test
+        id: self_test
+        if: steps.dependencies.outcome == 'success'
+        continue-on-error: true
+        working-directory: kb
+        run: python infra/check-docs.py --self-test
+
+      - name: Run full KB validation
+        id: full_check
+        if: steps.dependencies.outcome == 'success'
+        continue-on-error: true
+        working-directory: kb
+        run: python infra/check-docs.py --base master
+
+      - name: Write exact-revision receipt
+        if: always()
+        env:
+          TARGET_SHA: ${{ steps.target.outputs.sha }}
+          CHECKOUT_SHA: ${{ steps.provenance.outputs.head_sha }}
+          VALIDATOR_BLOB: ${{ steps.provenance.outputs.validator_blob }}
+          REQUIREMENTS_BLOB: ${{ steps.provenance.outputs.requirements_blob }}
+          PYTHON_VERSION: ${{ steps.dependencies.outputs.python_version }}
+          MARKDOWN_IT_VERSION: ${{ steps.dependencies.outputs.markdown_it_version }}
+          TARGET_OUTCOME: ${{ steps.target.outcome }}
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          PROVENANCE_OUTCOME: ${{ steps.provenance.outcome }}
+          PYTHON_OUTCOME: ${{ steps.python.outcome }}
+          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
+          SELF_TEST_OUTCOME: ${{ steps.self_test.outcome }}
+          FULL_CHECK_OUTCOME: ${{ steps.full_check.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          outcome=incomplete
+          if [ "$TARGET_OUTCOME" = success ] && \
+             [ "$CHECKOUT_OUTCOME" = success ] && \
+             [ "$PROVENANCE_OUTCOME" = success ] && \
+             [ "$PYTHON_OUTCOME" = success ] && \
+             [ "$DEPENDENCIES_OUTCOME" = success ] && \
+             [ "$SELF_TEST_OUTCOME" = success ] && \
+             [ "$FULL_CHECK_OUTCOME" = success ]; then
+            outcome=complete
+          fi
+          jq -n \
+            --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg repository "$KB_REPOSITORY" \
+            --arg branch "$KB_BRANCH" \
+            --arg targetSha "${TARGET_SHA:-}" \
+            --arg checkoutSha "${CHECKOUT_SHA:-}" \
+            --arg validatorBlob "${VALIDATOR_BLOB:-}" \
+            --arg requirementsBlob "${REQUIREMENTS_BLOB:-}" \
+            --arg pythonVersion "${PYTHON_VERSION:-}" \
+            --arg markdownItVersion "${MARKDOWN_IT_VERSION:-}" \
+            --arg outcome "$outcome" \
+            --arg selfTest "$SELF_TEST_OUTCOME" \
+            --arg fullCheck "$FULL_CHECK_OUTCOME" \
+            '{generatedAt:$generatedAt,repository:$repository,branch:$branch,targetSha:$targetSha,checkoutSha:$checkoutSha,validatorBlob:$validatorBlob,requirementsBlob:$requirementsBlob,runtime:{python:$pythonVersion,markdownItPy:$markdownItVersion},checks:{selfTest:$selfTest,fullCheck:$fullCheck},outcome:$outcome}' \
+            > "$RECEIPT_PATH"
+          cat "$RECEIPT_PATH"
+
+      - name: Upload validation receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kb-docs-validation-${{ github.run_id }}
+          path: kb-docs-validation.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce fail-closed validation
+        if: always()
+        env:
+          TARGET_OUTCOME: ${{ steps.target.outcome }}
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          PROVENANCE_OUTCOME: ${{ steps.provenance.outcome }}
+          PYTHON_OUTCOME: ${{ steps.python.outcome }}
+          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
+          SELF_TEST_OUTCOME: ${{ steps.self_test.outcome }}
+          FULL_CHECK_OUTCOME: ${{ steps.full_check.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for value in \
+            "$TARGET_OUTCOME" \
+            "$CHECKOUT_OUTCOME" \
+            "$PROVENANCE_OUTCOME" \
+            "$PYTHON_OUTCOME" \
+            "$DEPENDENCIES_OUTCOME" \
+            "$SELF_TEST_OUTCOME" \
+            "$FULL_CHECK_OUTCOME"; do
+            test "$value" = success
+          done
