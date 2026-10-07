@@ -37,6 +37,26 @@ See [issue-intake.md](./issue-intake.md) for CLI examples, connector request for
 
 See [metadata-migration.md](./metadata-migration.md) for the prepared diff, permissions, and activation procedure.
 
+## Knowledge-base documentation validation
+
+`.github/workflows/kb-docs-validation.yml` is the trusted external host for the existing
+`ChipIn-one/chipin-knowledge-base/infra/check-docs.py` validator. It does not copy or reimplement
+validator logic.
+
+- the workflow resolves `chipin-knowledge-base@master` to an immutable SHA with the existing
+  `CHIPIN_DEV_READ_TOKEN`, then checks out that exact revision with persisted credentials disabled;
+- Python 3.13 installs the KB-pinned `infra/requirements-docs.txt`, then runs both validator
+  `--self-test` and the full `--base master` check;
+- an artifact receipt records target/check-out SHA, validator and dependency blob SHAs, runtime
+  versions, both check outcomes, and an overall complete/incomplete result;
+- missing credentials, unresolved/mismatched provenance, dependency setup failure, or either
+  validator failure fail closed;
+- the host runs on this repository's PRs and pushes, on a daily schedule, and by manual dispatch.
+
+This is an external current-master validation host, not a cross-repository PR status check. Native
+GitHub Actions events cannot attach this repository's job as a required check to a private KB pull
+request without separate cross-repository check-run/dispatch infrastructure.
+
 ## Tests
 
 ```sh
