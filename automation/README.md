@@ -4,7 +4,7 @@ This directory contains narrow, fail-closed automation for ChipIn GitHub coordin
 
 ## Workflow status model
 
-Project #5 `Status` is intentionally limited to `Backlog`, `Todo`, and `In Progress`. Terminal completion is native Issue closure, not a Project status. The retired DEV-readiness reader/writer workflows are not part of the active automation surface; PR merge state remains native GitHub evidence.
+Project #5 `Status` uses `Backlog`, `Todo`, `In Progress`, and `Done`. `Done` is accepted only as a derived mirror of an Issue already `closed/completed`; terminal completion authority remains native Issue closure. `DEV`/`PROD` stay retired. The retired DEV-readiness reader/writer workflows are not part of the active automation surface; PR merge state remains native GitHub evidence.
 
 ## Issue intake
 
