@@ -7,6 +7,7 @@ import {
   pendingQueueItems,
   renderQueueComment,
   renderReceiptComment,
+  validateQueuedRequest,
   validateRequestEvent,
 } from './issue-intake-request.mjs';
 
@@ -15,12 +16,11 @@ const config = {
   project: {
     number: 5,
     statusField: 'Status',
-    statusValues: ['Backlog', 'Todo', 'In Progress', 'DEV', 'PROD', 'Done'],
+    statusValues: ['Backlog', 'Todo', 'In Progress'],
   },
   issueFields: {
     Priority: { id: 1, options: ['P0', 'P1', 'P2', 'P3'] },
     Severity: { id: 2, options: ['Critical', 'Major', 'Minor'] },
-    'Release scope': { id: 3, options: ['PRE-PROD', 'POST-PROD'] },
   },
   issueTypes: { Task: 10, Feature: 11, Bug: 12 },
 };
@@ -38,7 +38,6 @@ function event(overrides = {}) {
     target: 'ChipIn-one/chipin-frontend#308',
     issueType: 'Feature',
     priority: 'P2',
-    releaseScope: 'POST-PROD',
     severity: 'none',
   };
   return {
@@ -59,28 +58,24 @@ test('parses one exact hidden JSON request marker', () => {
     target: 'ChipIn-one/chipin-backend#146',
     issueType: 'Feature',
     priority: 'P2',
-    releaseScope: 'POST-PROD',
   })), {
     target: 'ChipIn-one/chipin-backend#146',
     issueType: 'Feature',
     priority: 'P2',
-    releaseScope: 'POST-PROD',
     severity: 'none',
   });
 });
 
-test('rejects duplicate markers and unsupported payload keys', () => {
+test('rejects duplicate markers, retired releaseScope, and unsupported payload keys', () => {
   assert.throws(
     () => parseRequestBody(body({
       target: 'ChipIn-one/chipin-frontend#308',
       issueType: 'Feature',
       priority: 'P2',
-      releaseScope: 'POST-PROD',
     }) + '\n' + body({
       target: 'ChipIn-one/chipin-frontend#308',
       issueType: 'Feature',
       priority: 'P2',
-      releaseScope: 'POST-PROD',
     })),
     /exactly one/,
   );
@@ -90,6 +85,14 @@ test('rejects duplicate markers and unsupported payload keys', () => {
       issueType: 'Feature',
       priority: 'P2',
       releaseScope: 'POST-PROD',
+    })),
+    /Unsupported intake request keys: releaseScope/,
+  );
+  assert.throws(
+    () => parseRequestBody(body({
+      target: 'ChipIn-one/chipin-frontend#308',
+      issueType: 'Feature',
+      priority: 'P2',
       command: 'rm -rf /',
     })),
     /Unsupported intake request keys/,
@@ -103,6 +106,7 @@ test('trusted exact request validates without guessing classification', () => {
   assert.equal(result.actor, 'syllik');
   assert.equal(result.request.target, 'ChipIn-one/chipin-frontend#308');
   assert.equal(result.request.severity, 'none');
+  assert.equal(Object.hasOwn(result.request, 'releaseScope'), false);
 });
 
 test('untrusted author fails closed', () => {
@@ -138,6 +142,24 @@ test('bridge and manual finalizer share one serialized canonical-write drain aft
   assert.doesNotMatch(manual, /issue-intake\.mjs apply reconcile/);
 });
 
+test('legacy queued v1 request with retired releaseScope fails closed', () => {
+  const result = validateQueuedRequest(config, {
+    schemaVersion: 1,
+    requestIssue: 100,
+    requestIssueUrl: 'https://github.com/ChipIn-one/.github/issues/100',
+    actor: 'syllik',
+    triggerActor: 'syllik',
+    target: 'ChipIn-one/chipin-frontend#308',
+    issueType: 'Feature',
+    priority: 'P2',
+    severity: 'none',
+    releaseScope: 'POST-PROD',
+  });
+  assert.equal(result.valid, false);
+  assert.match(result.blockers.join('\n'), /Unsupported queued intake request keys: releaseScope/);
+  assert.equal(Object.hasOwn(result.request, 'releaseScope'), false);
+});
+
 test('durable queue preserves every pending snapshot even when multiple requests target the same issue', () => {
   const issue = { number: 100 };
   const queuedA = {
@@ -146,7 +168,6 @@ test('durable queue preserves every pending snapshot even when multiple requests
     target: 'ChipIn-one/chipin-frontend#308',
     issueType: 'Feature',
     priority: 'P2',
-    releaseScope: 'POST-PROD',
     severity: 'none',
   };
   const queuedB = { ...queuedA, priority: 'P1' };
@@ -170,7 +191,6 @@ test('unsupported target repository fails before canonical intake', () => {
     target: 'other-org/other-repo#1',
     issueType: 'Task',
     priority: 'P3',
-    releaseScope: 'POST-PROD',
     severity: 'none',
   };
   const result = validateRequestEvent({
@@ -198,7 +218,6 @@ test('Bug request requires explicit Severity through canonical classifier', () =
     target: 'ChipIn-one/chipin-backend#146',
     issueType: 'Bug',
     priority: 'P1',
-    releaseScope: 'PRE-PROD',
     severity: 'none',
   };
   const result = validateRequestEvent({
@@ -217,7 +236,6 @@ test('builds canonical reconcile argv without shell interpolation', () => {
     target: 'ChipIn-one/chipin-frontend#308',
     issueType: 'Feature',
     priority: 'P2',
-    releaseScope: 'POST-PROD',
     severity: 'none',
   }, '/tmp/intake.json'), [
     'apply',
@@ -227,8 +245,6 @@ test('builds canonical reconcile argv without shell interpolation', () => {
     'Feature',
     '--priority',
     'P2',
-    '--release-scope',
-    'POST-PROD',
     '--severity',
     'none',
     '--activate',
@@ -246,7 +262,6 @@ test('rendered success comment contains canonical read-back', () => {
       target: 'ChipIn-one/chipin-frontend#308',
       issueType: 'Feature',
       priority: 'P2',
-      releaseScope: 'POST-PROD',
       severity: 'none',
     },
     intake: {
@@ -256,13 +271,14 @@ test('rendered success comment contains canonical read-back', () => {
         fields: {
           Priority: 'P2',
           Severity: null,
-          'Release scope': 'POST-PROD',
         },
+        milestone: 'POST RELEASE 1.1',
         project: { membershipCount: 1, status: 'Backlog' },
       },
     },
   });
   assert.match(comment, /Outcome: \*\*COMPLETE\*\*/);
+  assert.match(comment, /Milestone `POST RELEASE 1\.1`/);
   assert.match(comment, /Project #5: membership `1`, Status `Backlog`/);
   assert.match(comment, /issue-metadata/);
 });

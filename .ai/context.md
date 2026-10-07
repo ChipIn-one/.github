@@ -11,9 +11,9 @@
 - Knowledge-base product specification has shared human ownership: either FE or BE owner may propose changes; significant or disputed shared product-spec changes require review by the other owner.
 - Cross-repository product parent issues live in `ChipIn-one/chipin-knowledge-base` when decomposition across repositories is needed.
 - Native sub-issues are required work; native blocking relations are dependencies; Development-linked PRs are implementation evidence; References are informational only and never gate status.
-- `DEV` means every required change is integrated into its configured integration branch. Deployment is separate evidence.
-- Code-related work terminates at `PROD`; standalone docs/research/external work terminates at `Done`.
-- `PROD`, `Done`, and product-parent closure are manual in v1.
-- A reopened required issue or changed required scope after `DEV` is reported as inconsistent; automation does not auto-regress status.
+- Project #5 `Status` tracks active workflow position only: `Backlog`, `Todo`, `In Progress`. Do not use or recreate `DEV`, `PROD`, or `Done` as Project statuses.
+- Native Issue state/reason is terminal authority: open means unfinished, closed/completed means complete, and closed/not planned means cancelled or intentionally abandoned.
+- PR merge state remains native implementation evidence and is not copied into Project Status.
+- Repository-specific completion triggers remain repository-owned. For frontend code work, `dev` is integration only and completion is after the required implementation reaches production branch `main`.
 - Project automation is fail-closed: unreadable, missing, ambiguous, unauthorized, or inconsistent structured state blocks mutation.
 - Human merge only.

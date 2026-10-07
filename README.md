@@ -11,7 +11,7 @@ Organisation-wide defaults and GitHub coordination tooling for `ChipIn-one`.
 
 ## Shared templates and repository overrides
 
-Supported Issue Forms are owned here and set only native GitHub Issue Type: `Bug`, `Feature`, or `Task`. Priority, Severity, and Release scope remain Organization Issue Fields; Project #5 Status remains the workflow field.
+Supported Issue Forms are owned here and set only native GitHub Issue Type: `Bug`, `Feature`, or `Task`. Priority and Severity remain Organization Issue Fields; native repository Milestones are the optional concrete release target; Project #5 Status remains the workflow field.
 
 GitHub uses the organization-profile Issue Forms only when a repository does not provide its own local template file. A repository-local template is therefore an explicit override and must remain compatible with the canonical schema or document why it differs.
 
@@ -29,11 +29,11 @@ Product/domain documentation lives in [chipin-knowledge-base](https://github.com
 
 `automation/issue-intake.mjs` completes new issue intake and repairs incomplete canonical metadata without guessing values.
 
-- explicit inputs are required for Issue Type, Priority, Release scope, and applicable Severity;
+- explicit inputs are required for Issue Type, Priority, and applicable Severity; missing Milestone is valid and intake preserves any existing Milestone;
 - existing human Issue Type/Issue Field values and Project Status are preserved;
 - missing Project #5 membership is added; duplicate membership fails closed for manual reconciliation;
 - `Backlog` is initialized only when the sole Project item has no Status;
-- every apply path performs fresh reads and final read-back before reporting success;
+- every apply path performs fresh reads and final read-back before reporting success; receipts include the preserved native Milestone;
 - API/agent create mode checkpoints the created issue identity before later stages so a retry cannot create a duplicate issue;
 - apply mode requires both `--activate issue-intake-v1` and `CHIPIN_ISSUE_WRITE=1`.
 
@@ -41,29 +41,26 @@ For the UI path, create the issue from a shared Issue Form, then run the manual 
 
 See [automation/issue-intake.md](automation/issue-intake.md) for CLI examples, reconciliation rules, credential requirements, and activation steps.
 
-## DEV readiness automation
+## Workflow and completion
 
-`automation/dev-readiness-live.mjs` is the fail-closed live reader for Project #5. The writer in `automation/dev-readiness-write.mjs` is intentionally narrower:
+Project #5 `Status` tracks active workflow position only:
 
-- the only mutation is Project #5 `Status -> DEV`;
-- a write requires a fresh live evaluator result of `READY_FOR_DEV`;
-- `PROD`, `Done`, closure and regression are never automated;
-- a second fresh read is performed immediately before the single allowed write;
-- each run can write at most one Project item;
-- post-write state is read back; inconsistent read-back is reported for manual handling and is never auto-regressed;
-- apply mode requires both `--activate dev-status-v1` and `CHIPIN_DEV_WRITE=1`.
+- `Backlog`
+- `Todo`
+- `In Progress`
 
-The workflow `.github/workflows/dev-readiness-dev-transition.yml` supports manual dry-run/apply and an hourly scheduled scan. Scheduled writes remain disabled unless repository variable `CHIPIN_DEV_WRITE_ENABLED=1` is explicitly configured. Read-only runs use `CHIPIN_DEV_READ_TOKEN`; mutations use the separate `CHIPIN_DEV_WRITE_TOKEN`.
+There is no terminal Project status. Do not use or recreate `DEV`, `PROD`, or `Done` as completion state.
 
+Native GitHub Issue state is the terminal source of truth:
 
-### Transition receipts and recovery
+- open = unfinished;
+- closed as completed = completed;
+- closed as not planned = cancelled / intentionally not completed.
 
-Every workflow run writes `dev-readiness-transition.json` and uploads it from the always-run artifact step as `dev-readiness-transition-<run-id>` with 30-day retention. For a scheduled run, open **Actions -> DEV readiness transition -> the exact run/attempt -> Artifacts** and inspect that receipt before taking recovery action. A missing receipt is itself an operational failure; the upload step does not silently warn.
+Development-linked PRs and their merge state remain implementation evidence and are not copied into Project Status.
 
-Receipt outcomes deliberately distinguish normal scheduling from uncertain mutations:
+For frontend code work, merge to `dev` is integration only. Close the Issue only after the required implementation is merged to production branch `main`.
 
-- `complete`, clean `noop` / `noop-after-refresh`, routine `NOT_READY`, and `skipped-write-cap` do not make an `--all` scan fail; an exact apply that skips an explicitly requested issue because of the cap is reported as blocked/nonzero;
-- `applied-but-read-back-inconsistent`, `applied-read-back-uncertain`, `mutation-outcome-uncertain`, and operational read exceptions require attention and make the run nonzero;
-- before a mutation, the writer persists `mutation-intent-recorded`; after GitHub acknowledges the expected Project item it persists `mutation-returned-read-back-pending` before final verification.
+Repository-specific completion triggers outside frontend are out of scope for this change and remain owned by their repositories.
 
-Receipts are recovery evidence, not an exactly-once log. If the last durable receipt is an intent/pending/uncertain state, if post-write verification is inconsistent, or if a receipt is lost, never restore a previous Project status and never repeat the mutation solely from the receipt. Re-read the exact live issue, canonical metadata, readiness evidence, and current Project #5 Status first. `DEV`, `PROD`, and `Done` are never auto-regressed. A new write is considered only from that fresh live state and under the normal activation/authorization gates.
+Knowledge-base and standalone non-code work close when their accepted durable outcome is complete; they do not need a synthetic terminal Project status.

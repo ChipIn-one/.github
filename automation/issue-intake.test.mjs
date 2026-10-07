@@ -16,12 +16,11 @@ const config = {
   project: {
     number: 5,
     statusField: 'Status',
-    statusValues: ['Backlog', 'Todo', 'In Progress', 'DEV', 'PROD', 'Done'],
+    statusValues: ['Backlog', 'Todo', 'In Progress'],
   },
   issueFields: {
     Priority: { id: 1, options: ['P0', 'P1', 'P2', 'P3'] },
     Severity: { id: 2, options: ['Critical', 'Major', 'Minor'] },
-    'Release scope': { id: 3, options: ['PRE-PROD', 'POST-PROD'] },
   },
   issueTypes: { Task: 10, Bug: 11, Feature: 12 },
 };
@@ -29,15 +28,13 @@ const config = {
 const classification = {
   issueType: 'Bug',
   priority: 'P1',
-  releaseScope: 'PRE-PROD',
   severity: 'Major',
 };
 
-function issueSnapshot({ type = null, priority = null, releaseScope = null, severity = null } = {}) {
+function issueSnapshot({ type = null, priority = null, severity = null } = {}) {
   const issueFieldValues = [];
   if (priority) issueFieldValues.push({ issue_field_id: 1, single_select_option: { name: priority } });
   if (severity) issueFieldValues.push({ issue_field_id: 2, single_select_option: { name: severity } });
-  if (releaseScope) issueFieldValues.push({ issue_field_id: 3, single_select_option: { name: releaseScope } });
   return {
     issue: {
       type: type ? { name: type } : null,
@@ -59,7 +56,6 @@ function project({ items = [] } = {}) {
     fields: [
       { name: 'Priority', isIssueField: true, issueField: { fullDatabaseId: '1', name: 'Priority' } },
       { name: 'Severity', isIssueField: true, issueField: { fullDatabaseId: '2', name: 'Severity' } },
-      { name: 'Release scope', isIssueField: true, issueField: { fullDatabaseId: '3', name: 'Release scope' } },
       {
         id: 'STATUS_FIELD',
         name: 'Status',
@@ -72,7 +68,7 @@ function project({ items = [] } = {}) {
 }
 
 function fullIssue() {
-  return issueSnapshot({ type: 'Bug', priority: 'P1', releaseScope: 'PRE-PROD', severity: 'Major' });
+  return issueSnapshot({ type: 'Bug', priority: 'P1', severity: 'Major' });
 }
 
 function argsFor(operation = 'reconcile', target = 'ChipIn-one/chipin-frontend#999') {
@@ -80,7 +76,6 @@ function argsFor(operation = 'reconcile', target = 'ChipIn-one/chipin-frontend#9
     'apply', operation, target,
     '--type', 'Bug',
     '--priority', 'P1',
-    '--release-scope', 'PRE-PROD',
     '--severity', 'Major',
     '--activate', 'issue-intake-v1',
   ];
@@ -130,6 +125,7 @@ test('fully explicit intake writes missing metadata, membership and Status, then
   assert.equal(result.receipt.project.membershipCount, 1);
   assert.equal(result.receipt.project.status, 'Backlog');
   assert.equal(result.receipt.issueType, 'Bug');
+  assert.equal(result.receipt.milestone, null);
 });
 
 test('project read-back tolerates indexing beyond the legacy six-read window and waits for Status', async () => {
@@ -223,7 +219,7 @@ test('stale Project snapshot never overwrites an existing human-owned Status', a
     project(),
     project(),
     project(),
-    project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'DEV' }] }),
+    project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'In Progress' }] }),
   ];
 
   const result = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, {
@@ -248,16 +244,43 @@ test('stale Project snapshot never overwrites an existing human-owned Status', a
   assert.equal(membershipWrites, 1);
   assert.equal(statusWrites, 0);
   assert.equal(result.receipt.project.membershipCount, 1);
-  assert.equal(result.receipt.project.status, 'DEV');
+  assert.equal(result.receipt.project.status, 'In Progress');
 });
 
-test('missing Release scope is actionable incomplete input, never a fabricated default', () => {
-  const { blockers } = validateClassification(config, {
+test('missing milestone is valid canonical intake and does not gate completion', () => {
+  const { blockers, classification: checked } = validateClassification(config, {
     issueType: 'Feature',
     priority: 'P2',
-    severity: null,
+    severity: 'none',
   });
-  assert.match(blockers.join('\n'), /Release scope is required/);
+  assert.deepEqual(blockers, []);
+  assert.deepEqual(checked, { issueType: 'Feature', priority: 'P2', severity: null });
+});
+
+test('retired Project status on the target issue fails closed', () => {
+  const legacyProject = project({
+    items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Done' }],
+  });
+  const plan = buildReconcilePlan({
+    config,
+    repository: 'ChipIn-one/chipin-frontend',
+    number: 999,
+    classification,
+    snapshot: fullIssue(),
+    project: legacyProject,
+  });
+  assert.equal(plan.action, 'incomplete');
+  assert.match(plan.blockers.join('\n'), /Project Status Done is retired or unsupported/);
+
+  const final = verifyFinalState({
+    config,
+    repository: 'ChipIn-one/chipin-frontend',
+    number: 999,
+    classification,
+    snapshot: fullIssue(),
+    project: legacyProject,
+  });
+  assert.match(final.blockers.join('\n'), /Read-back Project Status Done is retired or unsupported/);
 });
 
 test('existing human values are preserved and mismatches block overwrite', () => {
@@ -277,7 +300,7 @@ test('existing human values are preserved and mismatches block overwrite', () =>
     repository: 'ChipIn-one/chipin-frontend',
     number: 999,
     classification,
-    snapshot: issueSnapshot({ type: 'Bug', priority: 'P0', releaseScope: 'PRE-PROD', severity: 'Major' }),
+    snapshot: issueSnapshot({ type: 'Bug', priority: 'P0', severity: 'Major' }),
     project: project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Todo' }] }),
   });
   assert.equal(conflict.action, 'incomplete');
@@ -286,11 +309,11 @@ test('existing human values are preserved and mismatches block overwrite', () =>
 
 test('Severity is type-specific: Bug requires it while Task can omit it', () => {
   assert.match(validateClassification(config, {
-    issueType: 'Bug', priority: 'P1', releaseScope: 'PRE-PROD', severity: 'none',
+    issueType: 'Bug', priority: 'P1', severity: 'none',
   }).blockers.join('\n'), /Severity is required for Bug/);
 
   assert.deepEqual(validateClassification(config, {
-    issueType: 'Task', priority: 'P2', releaseScope: 'POST-PROD', severity: 'none',
+    issueType: 'Task', priority: 'P2', severity: 'none',
   }).blockers, []);
 });
 
