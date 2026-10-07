@@ -11,7 +11,7 @@ Organisation-wide defaults and GitHub coordination tooling for `ChipIn-one`.
 
 ## Shared templates and repository overrides
 
-Supported Issue Forms are owned here and set only native GitHub Issue Type: `Bug`, `Feature`, or `Task`. Priority, Severity, and Release scope remain Organization Issue Fields; Project #5 Status remains the workflow field.
+Supported Issue Forms are owned here and set only native GitHub Issue Type: `Bug`, `Feature`, or `Task`. Priority and Severity remain Organization Issue Fields; native repository Milestones are the optional concrete release target; Project #5 Status remains the workflow field.
 
 GitHub uses the organization-profile Issue Forms only when a repository does not provide its own local template file. A repository-local template is therefore an explicit override and must remain compatible with the canonical schema or document why it differs.
 
@@ -29,11 +29,11 @@ Product/domain documentation lives in [chipin-knowledge-base](https://github.com
 
 `automation/issue-intake.mjs` completes new issue intake and repairs incomplete canonical metadata without guessing values.
 
-- explicit inputs are required for Issue Type, Priority, Release scope, and applicable Severity;
+- explicit inputs are required for Issue Type, Priority, and applicable Severity; missing Milestone is valid and intake preserves any existing Milestone;
 - existing human Issue Type/Issue Field values and Project Status are preserved;
 - missing Project #5 membership is added; duplicate membership fails closed for manual reconciliation;
 - `Backlog` is initialized only when the sole Project item has no Status;
-- every apply path performs fresh reads and final read-back before reporting success;
+- every apply path performs fresh reads and final read-back before reporting success; receipts include the preserved native Milestone;
 - API/agent create mode checkpoints the created issue identity before later stages so a retry cannot create a duplicate issue;
 - apply mode requires both `--activate issue-intake-v1` and `CHIPIN_ISSUE_WRITE=1`.
 

@@ -16,17 +16,15 @@ const config = {
   issueFields: {
     Priority: { id: 1, dataType: 'single_select', options: ['P0', 'P1', 'P2', 'P3'] },
     Severity: { id: 2, dataType: 'single_select', options: ['Critical', 'Major', 'Minor'] },
-    'Release scope': { id: 3, dataType: 'single_select', options: ['PRE-PROD', 'POST-PROD'] },
   },
   issueTypes: { Task: 10, Bug: 11, Feature: 12 },
 };
 
-function issueSnapshot({ type = 'Feature', typeId = 12, priority = 'P1', scope = 'PRE-PROD', blockedBy = [], parent = null, subIssues = [] } = {}) {
+function issueSnapshot({ type = 'Feature', typeId = 12, priority = 'P1', blockedBy = [], parent = null, subIssues = [] } = {}) {
   return {
     issue: { type: type ? { id: typeId, name: type } : null, labels: [{ name: 'P1' }], body: 'References: https://github.com/example/repo/pull/1' },
     issueFieldValues: [
       ...(priority ? [{ issue_field_id: 1, single_select_option: { name: priority } }] : []),
-      ...(scope ? [{ issue_field_id: 3, single_select_option: { name: scope } }] : []),
     ],
     blockedBy,
     blocking: [],
