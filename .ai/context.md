@@ -2,6 +2,7 @@
 
 - Repository: `ChipIn-one/.github`.
 - Purpose: shared GitHub issue schema/forms and organization-level Project coordination mechanics.
+- This repository hosts read-only automated validation of the current knowledge-base documentation revision; validator logic and KB content remain owned by `ChipIn-one/chipin-knowledge-base`.
 - Integration branch: `master`.
 - This repository does not own frontend/backend executors, agent roles, code review, build/test/deploy workflows, product behavior, API semantics, or repository-specific technical rules.
 - Repository-specific code/AI review policy stays local to `chipin-frontend` and `chipin-backend`; shared organization coordination does not choose or require a review agent for either repository.
