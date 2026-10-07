@@ -7,6 +7,7 @@ import {
   pendingQueueItems,
   renderQueueComment,
   renderReceiptComment,
+  validateQueuedRequest,
   validateRequestEvent,
 } from './issue-intake-request.mjs';
 
@@ -139,6 +140,24 @@ test('bridge and manual finalizer share one serialized canonical-write drain aft
   assert.doesNotMatch(bridge, /issue-intake-request\.mjs apply/);
   assert.match(manual, /Create durable control issue/);
   assert.doesNotMatch(manual, /issue-intake\.mjs apply reconcile/);
+});
+
+test('legacy queued v1 request with retired releaseScope fails closed', () => {
+  const result = validateQueuedRequest(config, {
+    schemaVersion: 1,
+    requestIssue: 100,
+    requestIssueUrl: 'https://github.com/ChipIn-one/.github/issues/100',
+    actor: 'syllik',
+    triggerActor: 'syllik',
+    target: 'ChipIn-one/chipin-frontend#308',
+    issueType: 'Feature',
+    priority: 'P2',
+    severity: 'none',
+    releaseScope: 'POST-PROD',
+  });
+  assert.equal(result.valid, false);
+  assert.match(result.blockers.join('\n'), /Unsupported queued intake request keys: releaseScope/);
+  assert.equal(Object.hasOwn(result.request, 'releaseScope'), false);
 });
 
 test('durable queue preserves every pending snapshot even when multiple requests target the same issue', () => {

@@ -25,6 +25,18 @@ const ALLOWED_REQUEST_KEYS = new Set([
   'severity',
 ]);
 
+const ALLOWED_QUEUED_KEYS = new Set([
+  'schemaVersion',
+  'requestIssue',
+  'requestIssueUrl',
+  'actor',
+  'triggerActor',
+  'target',
+  'issueType',
+  'priority',
+  'severity',
+]);
+
 function normalizeSeverity(value) {
   if (value == null || value === '' || String(value).toLowerCase() === 'none') return 'none';
   return String(value);
@@ -102,6 +114,10 @@ function markerJson(body, marker) {
 
 export function validateQueuedRequest(config, rawRequest) {
   const blockers = [];
+  const unexpected = Object.keys(rawRequest ?? {}).filter((key) => !ALLOWED_QUEUED_KEYS.has(key));
+  if (unexpected.length) {
+    blockers.push(`Unsupported queued intake request keys: ${unexpected.join(', ')}.`);
+  }
   const request = {
     target: typeof rawRequest?.target === 'string' ? rawRequest.target.trim() : '',
     issueType: typeof rawRequest?.issueType === 'string' ? rawRequest.issueType.trim() : '',
