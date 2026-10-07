@@ -1,0 +1,19 @@
+name: Reconcile frontend production completion
+description: Close eligible frontend Issues after their linked implementation reaches production main.
+inputs:
+  token:
+    description: Repository-local GitHub token with contents read, pull requests read, and issues write.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Reconcile frontend production completion
+      shell: bash
+      env:
+        CHIPIN_CANONICAL_WRITE_TOKEN: ${{ inputs.token }}
+        CHIPIN_FRONTEND_COMPLETION_WRITE: "1"
+        CHIPIN_FRONTEND_COMPLETION_PROJECT_RECONCILE: "0"
+      run: |
+        set -euo pipefail
+        test "$GITHUB_REPOSITORY" = "ChipIn-one/chipin-frontend"
+        node "$GITHUB_ACTION_PATH/../frontend-production-completion.mjs"
