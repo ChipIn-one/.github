@@ -257,6 +257,32 @@ test('missing milestone is valid canonical intake and does not gate completion',
   assert.deepEqual(checked, { issueType: 'Feature', priority: 'P2', severity: null });
 });
 
+test('retired Project status on the target issue fails closed', () => {
+  const legacyProject = project({
+    items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Done' }],
+  });
+  const plan = buildReconcilePlan({
+    config,
+    repository: 'ChipIn-one/chipin-frontend',
+    number: 999,
+    classification,
+    snapshot: fullIssue(),
+    project: legacyProject,
+  });
+  assert.equal(plan.action, 'incomplete');
+  assert.match(plan.blockers.join('\n'), /Project Status Done is retired or unsupported/);
+
+  const final = verifyFinalState({
+    config,
+    repository: 'ChipIn-one/chipin-frontend',
+    number: 999,
+    classification,
+    snapshot: fullIssue(),
+    project: legacyProject,
+  });
+  assert.match(final.blockers.join('\n'), /Read-back Project Status Done is retired or unsupported/);
+});
+
 test('existing human values are preserved and mismatches block overwrite', () => {
   const same = buildReconcilePlan({
     config,

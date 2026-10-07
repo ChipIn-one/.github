@@ -116,6 +116,9 @@ export function buildReconcilePlan({ config, repository, number, classification,
   if (memberships.length === 0) operations.push({ kind: 'addProjectMembership' });
   else if (memberships.length > 1) blockers.push('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items); manual reconciliation is required.');
   else if (!memberships[0].status) operations.push({ kind: 'initializeStatus', itemId: memberships[0].id, value: INITIAL_STATUS });
+  else if (!config.project.statusValues.includes(memberships[0].status)) {
+    blockers.push('Project Status ' + memberships[0].status + ' is retired or unsupported; move the item to one of: ' + config.project.statusValues.join(', ') + '.');
+  }
   return {
     issue: key(repository, number),
     issueUrl: snapshot?.issue?.html_url || snapshot?.issue?.url || null,
@@ -214,6 +217,9 @@ export function verifyFinalState({ config, repository, number, classification, s
   if (memberships.length !== 1) blockers.push('Read-back Project membership count is ' + memberships.length + ', expected exactly 1.');
   const status = memberships.length === 1 ? memberships[0].status || null : null;
   if (!status) blockers.push('Read-back Project Status is missing.');
+  else if (!config.project.statusValues.includes(status)) {
+    blockers.push('Read-back Project Status ' + status + ' is retired or unsupported; expected one of: ' + config.project.statusValues.join(', ') + '.');
+  }
   return {
     blockers,
     receipt: {
