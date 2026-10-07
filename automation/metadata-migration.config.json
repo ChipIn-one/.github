@@ -7,10 +7,7 @@
     "statusValues": [
       "Backlog",
       "Todo",
-      "In Progress",
-      "DEV",
-      "PROD",
-      "Done"
+      "In Progress"
     ]
   },
   "issueFields": {

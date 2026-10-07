@@ -16,7 +16,7 @@ const config = {
   project: {
     number: 5,
     statusField: 'Status',
-    statusValues: ['Backlog', 'Todo', 'In Progress', 'DEV', 'PROD', 'Done'],
+    statusValues: ['Backlog', 'Todo', 'In Progress'],
   },
   issueFields: {
     Priority: { id: 1, options: ['P0', 'P1', 'P2', 'P3'] },

@@ -16,7 +16,7 @@ const config = {
   project: {
     number: 5,
     statusField: 'Status',
-    statusValues: ['Backlog', 'Todo', 'In Progress', 'DEV', 'PROD', 'Done'],
+    statusValues: ['Backlog', 'Todo', 'In Progress'],
   },
   issueFields: {
     Priority: { id: 1, options: ['P0', 'P1', 'P2', 'P3'] },
@@ -219,7 +219,7 @@ test('stale Project snapshot never overwrites an existing human-owned Status', a
     project(),
     project(),
     project(),
-    project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'DEV' }] }),
+    project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'In Progress' }] }),
   ];
 
   const result = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, {
@@ -244,7 +244,7 @@ test('stale Project snapshot never overwrites an existing human-owned Status', a
   assert.equal(membershipWrites, 1);
   assert.equal(statusWrites, 0);
   assert.equal(result.receipt.project.membershipCount, 1);
-  assert.equal(result.receipt.project.status, 'DEV');
+  assert.equal(result.receipt.project.status, 'In Progress');
 });
 
 test('missing milestone is valid canonical intake and does not gate completion', () => {

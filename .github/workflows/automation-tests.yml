@@ -1,9 +1,7 @@
-name: DEV readiness policy tests
+name: Automation tests
 
 on:
   pull_request:
-    branches:
-      - master
   push:
     branches:
       - master
@@ -13,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  evaluate-fixtures:
+  test:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -57,5 +55,5 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '24.21.0'
-      - name: Run DEV readiness tests
+      - name: Run automation tests
         run: node --test automation/*.test.mjs

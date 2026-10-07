@@ -2,7 +2,6 @@
 import { mkdir, open, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { INTEGRATION_BRANCHES } from './dev-readiness.mjs';
 import {
   GitHubClient,
   readIssueSnapshot,
@@ -14,7 +13,11 @@ import {
 const APPLY_ACTIVATION = 'issue-intake-v1';
 const APPLY_ENV = 'CHIPIN_ISSUE_WRITE';
 const INITIAL_STATUS = 'Backlog';
-const SUPPORTED = new Set(Object.keys(INTEGRATION_BRANCHES));
+const SUPPORTED = new Set([
+  'ChipIn-one/chipin-frontend',
+  'ChipIn-one/chipin-backend',
+  'ChipIn-one/chipin-knowledge-base',
+]);
 
 export function isSupportedIntakeRepository(repository) {
   return SUPPORTED.has(repository);

@@ -13,7 +13,7 @@ import {
 } from "./metadata-migration.mjs";
 
 const config = {
-  project: { number: 5, statusField: "Status", statusValues: ["Backlog", "Todo", "In Progress", "DEV", "PROD", "Done"] },
+  project: { number: 5, statusField: "Status", statusValues: ["Backlog", "Todo", "In Progress"] },
   issueFields: {
     Priority: { id: 1, dataType: "single_select", options: ["P0", "P1"] },
     Severity: { id: 2, dataType: "single_select", options: ["Critical", "Major", "Minor"] },
@@ -109,7 +109,7 @@ test("Project reader paginates fields and items independently", async () => {
     },
     I2: {
       totalCount: 3,
-      nodes: [item(3, "DEV")],
+      nodes: [item(3, "In Progress")],
       pageInfo: { hasNextPage: false, endCursor: "I3" },
     },
   };
