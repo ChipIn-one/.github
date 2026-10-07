@@ -43,13 +43,14 @@ See [automation/issue-intake.md](automation/issue-intake.md) for CLI examples, r
 
 ## Workflow and completion
 
-Project #5 `Status` tracks active workflow position only:
+Project #5 `Status` tracks workflow position plus one derived completion mirror:
 
 - `Backlog`
 - `Todo`
 - `In Progress`
+- `Done` — display mirror for an Issue already `closed/completed`
 
-There is no terminal Project status. Do not use or recreate `DEV`, `PROD`, or `Done` as completion state.
+Do not use or recreate `DEV` or `PROD`. `Done` is not completion authority and must not cause an Issue to be closed.
 
 Native GitHub Issue state is the terminal source of truth:
 
