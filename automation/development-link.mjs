@@ -298,6 +298,16 @@ export async function reconcileDevelopmentLink(client, {
     throw new Error(`Pull request identity changed while reconciling ${repository}#${prNumber}.`);
   }
 
+  const revalidatedTask = resolveTaskIdentity({
+    explicitTaskIdentity,
+    pullRequestBody: before.pullRequest.body,
+  });
+  if (revalidatedTask.canonical !== task.canonical) {
+    throw new Error(
+      `Task identity changed while reconciling ${repository}#${prNumber}: ${task.canonical} -> ${revalidatedTask.canonical}.`,
+    );
+  }
+
   if (before.linked) {
     return {
       result: "already-linked",
