@@ -3,7 +3,7 @@ import process from "node:process";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { GitHubClient } from "./github-metadata.mjs";
+import { GitHubClient, readProjectSnapshot } from "./github-metadata.mjs";
 import {
   FRONTEND_REPOSITORY,
   INTEGRATION_BRANCH,
@@ -36,6 +36,36 @@ const OPEN_ISSUES_QUERY = [
   "      }",
   "    }",
   "  }",
+  "}",
+].join("\n");
+
+const PROJECT_CONFIG = {
+  organization: "ChipIn-one",
+  project: { number: 5, statusField: "Status" },
+};
+const REOPEN_FALLBACK_STATUS = "In Progress";
+
+const PROJECT_ITEM_STATUS_QUERY = [
+  "query FrontendCompletionProjectItem($itemId: ID!) {",
+  "  node(id: $itemId) {",
+  "    __typename",
+  "    ... on ProjectV2Item {",
+  "      id",
+  "      fieldValueByName(name: \"Status\") {",
+  "        __typename",
+  "        ... on ProjectV2ItemFieldSingleSelectValue { name }",
+  "      }",
+  "    }",
+  "  }",
+  "}",
+].join("\n");
+
+const SET_PROJECT_STATUS = [
+  "mutation SetFrontendCompletionStatus($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {",
+  "  updateProjectV2ItemFieldValue(input: {",
+  "    projectId: $projectId, itemId: $itemId, fieldId: $fieldId,",
+  "    value: { singleSelectOptionId: $optionId }",
+  "  }) { projectV2Item { id } }",
   "}",
 ].join("\n");
 
@@ -156,6 +186,93 @@ export async function readProductionReleases(client, repository = FRONTEND_REPOS
     .sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt));
 }
 
+function projectStatusCoordinates(project, desiredStatus) {
+  const fields = (project?.fields ?? []).filter((field) => field?.name === PROJECT_CONFIG.project.statusField);
+  if (fields.length !== 1) {
+    throw new Error("Project Status field is missing or ambiguous (" + fields.length + " matches)");
+  }
+  const field = fields[0];
+  if (field.isIssueField === true) throw new Error("Project Status must remain project-local");
+  const options = (field.options ?? []).filter((option) => option?.name === desiredStatus);
+  if (options.length !== 1) {
+    throw new Error(desiredStatus + " Status option is missing or ambiguous (" + options.length + " matches)");
+  }
+  if (!project?.id || !field?.id || !options[0]?.id) {
+    throw new Error("Project Status mutation coordinates are unreadable");
+  }
+  return {
+    projectId: project.id,
+    fieldId: field.id,
+    optionId: options[0].id,
+  };
+}
+
+async function readProjectItemStatus(client, itemId) {
+  const data = await client.graphql(PROJECT_ITEM_STATUS_QUERY, { itemId });
+  const item = data?.node;
+  if (item?.id !== itemId) throw new Error("Project item status read did not return the expected item");
+  return item.fieldValueByName?.name ?? null;
+}
+
+export async function reconcileOpenDoneProjectStatus(
+  client,
+  issue,
+  project,
+  repository = FRONTEND_REPOSITORY,
+) {
+  const memberships = (project?.items ?? []).filter((item) => (
+    item?.repository === repository && item?.number === issue.number
+  ));
+  if (memberships.length === 0) {
+    return { mutated: false, code: "project-membership-missing", detail: "Issue is not present in Project #5." };
+  }
+  if (memberships.length !== 1) {
+    return {
+      mutated: false,
+      code: "project-membership-ambiguous",
+      detail: "Project #5 has " + memberships.length + " items for this Issue; manual reconciliation is required.",
+    };
+  }
+
+  const itemId = memberships[0].id;
+  if (!itemId) {
+    return { mutated: false, code: "project-item-unreadable", detail: "Project #5 item id is unreadable." };
+  }
+
+  const currentStatus = await readProjectItemStatus(client, itemId);
+  if (currentStatus !== "Done") {
+    return { mutated: false, code: "project-status-valid", detail: "Project Status is not Done." };
+  }
+
+  const { owner, repo } = splitRepository(repository);
+  const currentIssue = await client.request("/repos/" + owner + "/" + repo + "/issues/" + issue.number);
+  if (currentIssue.pull_request) throw new Error("Refusing to reconcile PR #" + issue.number + " as an Issue");
+  if (currentIssue.state !== "open") {
+    return { mutated: false, code: "issue-no-longer-open", detail: "Issue is no longer open." };
+  }
+
+  const coordinates = projectStatusCoordinates(project, REOPEN_FALLBACK_STATUS);
+  const data = await client.graphql(SET_PROJECT_STATUS, {
+    projectId: coordinates.projectId,
+    itemId,
+    fieldId: coordinates.fieldId,
+    optionId: coordinates.optionId,
+  });
+  if (data?.updateProjectV2ItemFieldValue?.projectV2Item?.id !== itemId) {
+    throw new Error("Project Status mutation did not return the expected item id");
+  }
+
+  const readBack = await readProjectItemStatus(client, itemId);
+  if (readBack !== REOPEN_FALLBACK_STATUS) {
+    throw new Error("Project Status did not read back as " + REOPEN_FALLBACK_STATUS);
+  }
+  return {
+    mutated: true,
+    code: "project-status-reactivated",
+    detail: "Open Issue had derived Done; normalized Project Status to " + REOPEN_FALLBACK_STATUS + ".",
+  };
+}
+
 export async function compareContainsCommit(client, repository, commitSha, releaseHeadSha) {
   if (!/^[0-9a-f]{40}$/iu.test(commitSha) || !/^[0-9a-f]{40}$/iu.test(releaseHeadSha)) {
     throw new Error("Commit ancestry check requires full 40-character SHAs");
@@ -197,9 +314,10 @@ export async function closeIssueAsCompleted(client, issue, repository = FRONTEND
 }
 
 export async function runCompletionSweep(client, repository = FRONTEND_REPOSITORY) {
-  const [issues, releases] = await Promise.all([
+  const [issues, releases, project] = await Promise.all([
     readOpenFrontendIssues(client, repository),
     readProductionReleases(client, repository),
+    readProjectSnapshot(client, PROJECT_CONFIG),
   ]);
   const ancestryCache = new Map();
   const containsCommit = async (commitSha, releaseHeadSha) => {
@@ -235,7 +353,13 @@ export async function runCompletionSweep(client, repository = FRONTEND_REPOSITOR
       containsCommit,
     });
     if (decision.action !== "close-completed") {
-      results.push({ issue, decision });
+      const projectReconciliation = await reconcileOpenDoneProjectStatus(client, issue, project, repository);
+      results.push({
+        issue,
+        decision: projectReconciliation.mutated
+          ? { ...decision, detail: decision.detail + " " + projectReconciliation.detail }
+          : decision,
+      });
       continue;
     }
 
@@ -264,15 +388,28 @@ export async function runCompletionSweep(client, repository = FRONTEND_REPOSITOR
     }
 
     const mutation = await closeIssueAsCompleted(client, issue, repository);
+    if (mutation.mutated || mutation.code === "already-closed") {
+      results.push({
+        issue,
+        decision: mutation.mutated
+          ? {
+            action: "closed",
+            code: mutation.code,
+            detail: decision.detail + " " + mutation.detail,
+          }
+          : { action: "leave-open", code: mutation.code, detail: mutation.detail },
+      });
+      continue;
+    }
+
+    const projectReconciliation = await reconcileOpenDoneProjectStatus(client, issue, project, repository);
     results.push({
       issue,
-      decision: mutation.mutated
-        ? {
-          action: "closed",
-          code: mutation.code,
-          detail: decision.detail + " " + mutation.detail,
-        }
-        : { action: "leave-open", code: mutation.code, detail: mutation.detail },
+      decision: {
+        action: "leave-open",
+        code: mutation.code,
+        detail: mutation.detail + (projectReconciliation.mutated ? " " + projectReconciliation.detail : ""),
+      },
     });
   }
   return results;

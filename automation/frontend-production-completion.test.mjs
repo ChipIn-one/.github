@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { evaluateIssueForCompletion } from "./frontend-production-completion-policy.mjs";
@@ -7,6 +8,7 @@ import {
   compareContainsCommit,
   readProductionReleases,
   readRequiredRelationships,
+  reconcileOpenDoneProjectStatus,
 } from "./frontend-production-completion.mjs";
 
 const repository = "ChipIn-one/chipin-frontend";
@@ -376,6 +378,93 @@ test("required relationship reads normalize native sub-issues and blockers", asy
     state: "closed",
     stateReason: "completed",
   }]);
+});
+
+test("reopened open Issue cannot remain in derived Done", async () => {
+  let status = "Done";
+  const calls = [];
+  const client = {
+    request: async (path) => {
+      calls.push({ kind: "request", path });
+      return { state: "open" };
+    },
+    graphql: async (query, variables) => {
+      if (query.includes("query FrontendCompletionProjectItem")) {
+        calls.push({ kind: "read-status", variables });
+        return {
+          node: {
+            id: "PVTI_issue_1",
+            fieldValueByName: status ? { name: status } : null,
+          },
+        };
+      }
+      if (query.includes("mutation SetFrontendCompletionStatus")) {
+        calls.push({ kind: "set-status", variables });
+        assert.equal(variables.optionId, "option-in-progress");
+        status = "In Progress";
+        return { updateProjectV2ItemFieldValue: { projectV2Item: { id: "PVTI_issue_1" } } };
+      }
+      throw new Error("unexpected GraphQL operation");
+    },
+  };
+  const project = {
+    id: "PVT_project_5",
+    fields: [{
+      id: "PVTF_status",
+      name: "Status",
+      isIssueField: false,
+      options: [
+        { id: "option-in-progress", name: "In Progress" },
+        { id: "option-done", name: "Done" },
+      ],
+    }],
+    items: [{ id: "PVTI_issue_1", repository, number: 1, status: "Done" }],
+  };
+
+  const result = await reconcileOpenDoneProjectStatus(client, issue({ reopenedAt: "2026-10-05T10:00:00Z" }), project);
+  assert.equal(result.mutated, true);
+  assert.equal(result.code, "project-status-reactivated");
+  assert.equal(status, "In Progress");
+  assert.equal(calls.filter((call) => call.kind === "set-status").length, 1);
+});
+
+test("project normalization never turns a closed not-planned Issue into Done", async () => {
+  let mutationCount = 0;
+  const client = {
+    request: async () => ({ state: "closed", state_reason: "not_planned" }),
+    graphql: async (query) => {
+      if (query.includes("query FrontendCompletionProjectItem")) {
+        return { node: { id: "PVTI_issue_1", fieldValueByName: { name: "Done" } } };
+      }
+      mutationCount += 1;
+      throw new Error("status mutation must not run for a closed Issue");
+    },
+  };
+  const project = {
+    id: "PVT_project_5",
+    fields: [{
+      id: "PVTF_status",
+      name: "Status",
+      isIssueField: false,
+      options: [{ id: "option-in-progress", name: "In Progress" }],
+    }],
+    items: [{ id: "PVTI_issue_1", repository, number: 1, status: "Done" }],
+  };
+
+  const result = await reconcileOpenDoneProjectStatus(client, issue(), project);
+  assert.equal(result.mutated, false);
+  assert.equal(result.code, "issue-no-longer-open");
+  assert.equal(mutationCount, 0);
+});
+
+test("privileged completion workflow is schedule-only and cannot dispatch branch code with the write token", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/frontend-production-completion.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(workflow, /^  schedule:$/m);
+  assert.doesNotMatch(workflow, /workflow_dispatch:/u);
+  assert.match(workflow, /CHIPIN_ISSUE_WRITE_TOKEN/u);
 });
 
 test("production release discovery ignores non-canonical main merges", async () => {
