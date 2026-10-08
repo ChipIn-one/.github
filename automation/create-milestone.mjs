@@ -137,7 +137,7 @@ const confirmUnchangedControl = async (issueNumber, originalIssue, request, api)
 
 const isMilestoneControlIssue = issue => !issue?.pull_request
     && typeof issue?.title === 'string'
-    && /^\\[create-milestone\\]/i.test(issue.title);
+    && /^\[create-milestone\]/i.test(issue.title);
 
 export const runMilestoneControl = async (issueNumber, api) => {
     let recognizedControl = false;
