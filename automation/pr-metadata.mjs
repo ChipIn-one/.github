@@ -11,6 +11,7 @@ const CATEGORIES = { implementation: "pr:implementation", release: "pr:release" 
 const PROJECT_QUERY = 'query PRMembership($after:String){ organization(login:"ChipIn-one"){ projectV2(number:5){id items(first:100,after:$after){totalCount pageInfo{hasNextPage endCursor} nodes{id content{__typename ... on PullRequest{id number repository{nameWithOwner}}}}}}}}';
 const PROJECT_ADD = 'mutation AddPR($project:ID!,$pr:ID!){addProjectV2ItemById(input:{projectId:$project,contentId:$pr}){item{id}}}';
 const FULL_REF = /^ChipIn-one\/chipin-frontend#([1-9]\d*)$/u;
+const PR_NATIVE_QUERY = 'query PRNativeIdentity($number:Int!,$after:String){repository(owner:"ChipIn-one",name:"chipin-frontend"){nameWithOwner pullRequest(number:$number){number closingIssuesReferences(first:100,after:$after,userLinkedOnly:true){totalCount pageInfo{hasNextPage endCursor} nodes{id number repository{nameWithOwner}}}}}}';
 
 export function classifyPR(pr) {
   if (pr.base?.repo?.full_name !== REPO || pr.head?.repo?.full_name !== REPO) throw new Error("SCOPE: same-repo frontend PR only");
@@ -59,6 +60,36 @@ export function uniqueProjectItem(items, id) {
   if (selected.length>1) throw new Error("PROJECT: duplicate PR membership, manual reconciliation required");
   return selected[0]??null;
 }
+// A single-Issue implementation identity also forbids stale manual Development links
+// to any other Issue (for example after a PR body edit).
+export async function assertSingleNativeIssue(client,number,issueNumber,requireLinked=false) {
+  let cursor=null,total=null;
+  const seen=new Set();const nodes=[];
+  do {
+    const data=await client.graphql(PR_NATIVE_QUERY,{number,after:cursor});
+    const root=data?.repository,pr=root?.pullRequest,refs=pr?.closingIssuesReferences;
+    if (root?.nameWithOwner!==REPO || pr?.number!==number ||
+        !Number.isInteger(refs?.totalCount) || !refs?.pageInfo || !Array.isArray(refs.nodes))
+      throw new Error("NATIVE_IDENTITY: PR linked-Issue read is unavailable");
+    if (total!==null && total!==refs.totalCount) throw new Error("NATIVE_IDENTITY: linked-Issue count changed during read");
+    total=refs.totalCount;
+    for (const node of refs.nodes) {
+      if (!node?.id || !Number.isInteger(node.number) || node.repository?.nameWithOwner!==REPO || seen.has(node.id))
+        throw new Error("NATIVE_IDENTITY: unreadable/duplicate linked Issue");
+      seen.add(node.id);nodes.push(node);
+    }
+    if (refs.pageInfo.hasNextPage && (!refs.pageInfo.endCursor || cursor===refs.pageInfo.endCursor))
+      throw new Error("NATIVE_IDENTITY: invalid linked-Issue pagination");
+    cursor=refs.pageInfo.hasNextPage?refs.pageInfo.endCursor:null;
+  } while(cursor);
+  if (nodes.length!==total) throw new Error("NATIVE_IDENTITY: incomplete linked-Issue read-back");
+  if (nodes.some(x=>x.number!==issueNumber) || nodes.length>1)
+    throw new Error("NATIVE_IDENTITY: PR has a conflicting native linked Issue; single-Issue contract blocks reassignment");
+  if (requireLinked && nodes.length!==1)
+    throw new Error("NATIVE_IDENTITY: expected one native linked Issue on read-back");
+  return nodes.length===1;
+}
+
 export async function readProject(client) {
   const items=[];const seen=new Set(); let cursor=null, projectId=null, count=null;
   do {
@@ -103,7 +134,9 @@ async function verifyRelease(client,refs) {
     const impl=await client.request(ROOT+"/pulls/"+num);
     if (!impl?.merged_at || impl.base?.ref!=="dev") throw new Error("RELEASE: PR #"+num+" not merged into dev");
     const task=implementationIdentity(impl.body);
+    await assertSingleNativeIssue(client,num,task.issueNumber);
     const linked=await reconcileDevelopmentLink(client,{repository:REPO,pullRequestNumber:num});
+    await assertSingleNativeIssue(client,num,task.issueNumber,true);
     if (!linked.readBackConfirmed || linked.issueNumber!==task.issueNumber)
       throw new Error("RELEASE_NATIVE_LINK: included implementation PR lacks exact native Development read-back");
     issues.push(task.issueNumber);
@@ -154,7 +187,9 @@ export async function reconcilePR(client,policy,number,expectedSha) {
   let issue=null,taskIdentity=null;
   if (kind==="implementation") {
     const identity=implementationIdentity(pr.body);
+    await assertSingleNativeIssue(client,n,identity.issueNumber);
     const native=await reconcileDevelopmentLink(client,{repository:REPO,pullRequestNumber:n});
+    await assertSingleNativeIssue(client,n,identity.issueNumber,true);
     if (!native.readBackConfirmed || native.issueNumber!==identity.issueNumber) throw new Error("NATIVE_LINK: missing exact userLinkedOnly read-back");
     issue=await client.request(ROOT+"/issues/"+identity.issueNumber);
     if (issue?.number!==identity.issueNumber || issue.pull_request) throw new Error("IDENTITY: target is not an Issue");

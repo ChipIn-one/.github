@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {classifyPR,implementationIdentity,releaseReferences,bodyGaps,chooseOwner,chooseReviewer,uniqueProjectItem,ensureProjectPR,ensureCategory,readProject,reconcilePR} from "./pr-metadata.mjs";
+import {classifyPR,implementationIdentity,releaseReferences,bodyGaps,chooseOwner,chooseReviewer,uniqueProjectItem,ensureProjectPR,ensureCategory,readProject,reconcilePR,assertSingleNativeIssue} from "./pr-metadata.mjs";
 const repo="ChipIn-one/chipin-frontend";
 const pr=(base,head)=>({base:{ref:base,repo:{full_name:repo}},head:{ref:head,repo:{full_name:repo}}});
 test("routes implementation and release exactly",()=>{
@@ -90,6 +90,12 @@ test("release retries preserve manual values, avoid duplicate Project item and n
   let projectAdds=0,labelAdds=0,issueWrites=0,nativeReads=0;
   const client={
     async graphql(query) {
+      if (query.includes("query PRNativeIdentity")) {
+        nativeReads++;
+        return {repository:{nameWithOwner:repo,pullRequest:{number:10,
+          closingIssuesReferences:{totalCount:1,pageInfo:{hasNextPage:false,endCursor:null},
+            nodes:[{id:"ISSUE_5",number:5,repository:{nameWithOwner:repo}}]}}}};
+      }
       if (query.includes("query DevelopmentLinkPullRequest")) {
         nativeReads++;
         return {repository:{nameWithOwner:repo,pullRequest:{
@@ -135,4 +141,20 @@ test("release retries preserve manual values, avoid duplicate Project item and n
   assert.ok(two.blockers.some(x=>x.includes("REVIEWER_POLICY")));
   assert.equal(items.length,1);
   assert.deepEqual(labels.map(x=>x.name),["manual-label","pr:release"]);
+});
+
+test("native single-Issue contract detects stale identity and missing read-back",async()=>{
+  let size=2;
+  const client={async graphql(){
+    const nodes=Array.from({length:size},(_,i)=>({id:"ISSUE_"+(i+5),number:i+5,
+      repository:{nameWithOwner:repo}}));
+    return {repository:{nameWithOwner:repo,pullRequest:{number:10,closingIssuesReferences:{
+      totalCount:nodes.length,pageInfo:{hasNextPage:false,endCursor:null},nodes}}}};
+  }};
+  await assert.rejects(assertSingleNativeIssue(client,10,5),/NATIVE_IDENTITY: PR has a conflicting/u);
+  size=0;
+  assert.equal(await assertSingleNativeIssue(client,10,5),false);
+  await assert.rejects(assertSingleNativeIssue(client,10,5,true),/expected one native/u);
+  size=1;
+  assert.equal(await assertSingleNativeIssue(client,10,5,true),true);
 });
