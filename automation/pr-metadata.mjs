@@ -62,7 +62,12 @@ export function uniqueProjectItem(items, id) {
 export async function readProject(client) {
   const items=[];const seen=new Set(); let cursor=null, projectId=null, count=null;
   do {
-    const result=await client.graphql(PROJECT_QUERY,{after:cursor});
+    let result;
+    try {
+      result=await client.graphql(PROJECT_QUERY,{after:cursor});
+    } catch (error) {
+      throw new Error("PROJECT_PERMISSION: Project #5 GraphQL read failed; configure FE token with org Projects v2 read/write: "+error.message);
+    }
     const p=result?.organization?.projectV2;
     if (!p?.id || !p.items?.pageInfo || !Array.isArray(p.items.nodes) || !Number.isInteger(p.items.totalCount))
       throw new Error("PROJECT_PERMISSION: Project #5 unreadable; needs organization Projects read/write grant");
@@ -102,13 +107,16 @@ async function verifyRelease(client,refs) {
   if ([...new Set(issues)].sort((a,b)=>a-b).join(",")!==[...refs.issues].sort((a,b)=>a-b).join(","))
     throw new Error("RELEASE: listed Issue set does not match included PR identities");
 }
-async function ensureCategory(client,prNumber,kind) {
+export async function ensureCategory(client,prNumber,kind) {
   const label=CATEGORIES[kind];
+  const current=await client.request(ROOT+"/issues/"+prNumber+"/labels");
+  if (!Array.isArray(current)) throw new Error("LABEL: unreadable existing labels");
+  const conflicting=CATEGORIES[kind==="release"?"implementation":"release"];
+  if (current.some(x=>x.name===conflicting))
+    throw new Error("LABEL_CONFLICT: existing manual PR category "+conflicting+" conflicts with "+label+"; no overwrite");
   if (!await client.request(ROOT+"/labels/"+encodeURIComponent(label),{allow404:true})) {
     await client.request(ROOT+"/labels",{method:"POST",body:{name:label,color:kind==="release"?"0366d6":"0e8a16",description:"ChipIn PR category"}});
   }
-  const current=await client.request(ROOT+"/issues/"+prNumber+"/labels");
-  if (!Array.isArray(current)) throw new Error("LABEL: unreadable existing labels");
   if (!current.some(x=>x.name===label)) await client.request(ROOT+"/issues/"+prNumber+"/labels",{method:"POST",body:{labels:[label]}});
   const final=await client.request(ROOT+"/issues/"+prNumber+"/labels");
   if (!Array.isArray(final)||!final.some(x=>x.name===label)) throw new Error("LABEL: failed read-back");
@@ -175,9 +183,15 @@ export async function reconcilePR(client,policy,number,expectedSha) {
       if (!await shaCIGreen(client,pr.head.sha)) {
         blockers.push("REVIEW_CI: no successful frontend-ci on current head "+pr.head.sha+"; request deferred");
       } else {
-        await eligibleReviewer(client,selected);
-        await client.request(ROOT+"/pulls/"+n+"/requested_reviewers",{method:"POST",body:{reviewers:[selected]}});
-        if (!(await client.request(url)).requested_reviewers?.some(x=>x.login===selected)) throw new Error("REVIEW_READ_BACK: missing");
+        const prior=await client.listAll(ROOT+"/pulls/"+n+"/reviews");
+        if (!Array.isArray(prior)) throw new Error("REVIEW_POLICY: review history unreadable");
+        const alreadyReviewed=prior.some(x=>x.user?.login===selected && x.commit_id===pr.head.sha
+          && ["APPROVED","CHANGES_REQUESTED","COMMENTED"].includes(x.state));
+        if (!alreadyReviewed) {
+          await eligibleReviewer(client,selected);
+          await client.request(ROOT+"/pulls/"+n+"/requested_reviewers",{method:"POST",body:{reviewers:[selected]}});
+          if (!(await client.request(url)).requested_reviewers?.some(x=>x.login===selected)) throw new Error("REVIEW_READ_BACK: missing");
+        }
       }
     }
   } catch(e) {blockers.push(e.message);}

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {classifyPR,implementationIdentity,releaseReferences,bodyGaps,chooseOwner,chooseReviewer,uniqueProjectItem,ensureProjectPR} from "./pr-metadata.mjs";
+import {classifyPR,implementationIdentity,releaseReferences,bodyGaps,chooseOwner,chooseReviewer,uniqueProjectItem,ensureProjectPR,ensureCategory,readProject,reconcilePR} from "./pr-metadata.mjs";
 const repo="ChipIn-one/chipin-frontend";
 const pr=(base,head)=>({base:{ref:base,repo:{full_name:repo}},head:{ref:head,repo:{full_name:repo}}});
 test("routes implementation and release exactly",()=>{
@@ -62,4 +62,61 @@ test("Project write requires actual read-back, not mutation claim",async()=>{
   }};
   await assert.rejects(ensureProjectPR(client,"PR_NEW"),/missing PR item/);
   assert.equal(writes,1);
+});
+
+test("Project GraphQL permission failures become actionable blockers",async()=>{
+  await assert.rejects(readProject({async graphql(){throw new Error("403 Forbidden");}}),/PROJECT_PERMISSION:.*org Projects v2/u);
+});
+test("manual category conflicts block instead of adding competing labels",async()=>{
+  let writes=0;
+  const client={async request(path,opts={}) {
+    if(opts.method)writes++;
+    if(path.includes("/issues/42/labels"))return[{name:"pr:release"}];
+    throw new Error("unexpected "+path);
+  }};
+  await assert.rejects(ensureCategory(client,42,"implementation"),/LABEL_CONFLICT/u);
+  assert.equal(writes,0);
+});
+test("release retries preserve manual values, avoid duplicate Project item and never change Issues",async()=>{
+  const SHA="a".repeat(40), PATH="/repos/ChipIn-one/chipin-frontend";
+  const body="Included implementation PRs: "+repo+"#10\nIncluded Issues: "+repo+"#5\n"
+    +"## Summary\nrelease\n## Tests\nCI pending\n## Version impact\nnone\n## Dependencies\nnone";
+  const release={number:20,node_id:"PR_20",state:"open",body,user:{login:"pr-author"},
+    head:{ref:"dev",sha:SHA,repo:{full_name:repo}},base:{ref:"main",repo:{full_name:repo}},
+    requested_reviewers:[]};
+  const impl={number:10,merged_at:"2026-10-08T12:00:00Z",base:{ref:"dev"},
+    body:"Task identity: "+repo+"#5"};
+  const labels=[{name:"manual-label"}],items=[];
+  let projectAdds=0,labelAdds=0,issueWrites=0;
+  const client={
+    async graphql(query) {
+      if(query.startsWith("query"))return {organization:{projectV2:{id:"PROJECT_5",
+        items:{totalCount:items.length,pageInfo:{hasNextPage:false,endCursor:null},nodes:items}}}};
+      projectAdds++;items.push({id:"ITEM_20",content:{__typename:"PullRequest",id:"PR_20"}});
+      return{addProjectV2ItemById:{item:{id:"ITEM_20"}}};
+    },
+    async request(path,opts={}) {
+      if (opts.method && path.includes("/issues/"))issueWrites++;
+      if(path===PATH+"/pulls/20")return release;
+      if(path===PATH+"/pulls/10")return impl;
+      if(path===PATH+"/issues/20")return{number:20,assignees:[{login:"human-owner"}]};
+      if(path===PATH+"/issues/20/labels") {
+        if(opts.method==="POST"){labelAdds++;labels.push({name:"pr:release"});}
+        return labels;
+      }
+      if(path===PATH+"/labels/pr%3Arelease")return{name:"pr:release"};
+      throw new Error("unexpected REST request "+path);
+    }
+  };
+  const policy={repository:repo,project:5,ownerPolicy:{allowIssueOwner:true,allowAuthorFallback:false,
+    implementationOwner:null,releaseOwner:null},reviewerPolicy:{implementation:[],release:[]}};
+  await assert.rejects(reconcilePR(client,policy,20,"b".repeat(40)),/SHA/u);
+  const one=await reconcilePR(client,policy,20,SHA);
+  const two=await reconcilePR(client,policy,20,SHA);
+  assert.equal(one.kind,"release");assert.equal(one.project.created,true);
+  assert.equal(two.project.created,false);
+  assert.equal(projectAdds,1);assert.equal(labelAdds,1);assert.equal(issueWrites,1); // additive PR label only
+  assert.ok(two.blockers.some(x=>x.includes("REVIEWER_POLICY")));
+  assert.equal(items.length,1);
+  assert.deepEqual(labels.map(x=>x.name),["manual-label","pr:release"]);
 });
