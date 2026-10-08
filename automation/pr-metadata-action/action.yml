@@ -1,0 +1,22 @@
+name: Frontend PR metadata
+description: Shared FE-only PR metadata reconcile with native Development and Project #5 read-back.
+inputs:
+  pull-request-number:
+    description: Exact PR number
+    required: true
+  head-sha:
+    description: Event PR SHA
+    required: true
+  token:
+    description: Token with Issues/PR and organization Projects v2 access
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Reconcile PR metadata
+      shell: bash
+      env:
+        CHIPIN_PR_NUMBER: ${{ inputs.pull-request-number }}
+        CHIPIN_PR_SHA: ${{ inputs.head-sha }}
+        CHIPIN_PR_METADATA_TOKEN: ${{ inputs.token }}
+      run: node "$GITHUB_ACTION_PATH/../pr-metadata.mjs"
