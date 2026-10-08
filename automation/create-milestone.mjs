@@ -139,7 +139,7 @@ const isMilestoneControlIssue = issue => !issue?.pull_request
     && typeof issue?.title === 'string'
     && /^\[create-milestone\]/i.test(issue.title);
 
-export const runMilestoneControl = async (issueNumber, api) => {
+export const runMilestoneControl = async (issueNumber, api, triggeringActor) => {
     let recognizedControl = false;
     let result;
     let successReceiptWritten = false;
@@ -150,8 +150,19 @@ export const runMilestoneControl = async (issueNumber, api) => {
         const request = parseMilestoneRequest(issue);
         if (!request) return { status: 'ignored' };
 
-        const permission = await api.getPermission(issue.user?.login);
-        if (!canCreateMilestone(permission)) {
+        // Editing and manually dispatching both execute with this repository's
+        // GitHub token. Require the triggering user to be independently authorized,
+        // so a triage editor cannot borrow the Issue author's write permission.
+        if (typeof triggeringActor !== 'string' || !/^[A-Za-z\d](?:[A-Za-z\d-]{0,38})$/.test(triggeringActor)) {
+            throw new Error('A valid trusted triggering actor is required.');
+        }
+        const actorPermission = await api.getPermission(triggeringActor);
+        if (!canCreateMilestone(actorPermission)) {
+            throw new Error('Triggering actor requires repository write, maintain, or admin permission.');
+        }
+        const authorPermission = issue.user?.login === triggeringActor
+            ? actorPermission : await api.getPermission(issue.user?.login);
+        if (!canCreateMilestone(authorPermission)) {
             throw new Error('Issue author requires repository write, maintain, or admin permission.');
         }
         const recheck = () => confirmUnchangedControl(issueNumber, issue, request, api);
@@ -181,6 +192,11 @@ export const runMilestoneControl = async (issueNumber, api) => {
         }
         if (actual?.state === 'closed') {
             throw new Error('Control Issue was closed for another reason; its terminal state was preserved.');
+        }
+        // A fresh successful GET is more authoritative than the earlier PATCH:
+        // another user may have reopened the Issue after PATCH completed.
+        if (actual !== undefined) {
+            throw new Error('Milestone exists, but control Issue read-back is not closed/completed.');
         }
         if (!closeError && patch?.state === 'closed' && patch.state_reason === 'completed') {
             return { status: 'completed', ...result };
@@ -293,10 +309,16 @@ if (isMainModule) {
         if (!Number.isSafeInteger(number) || number < 1 || String(rawNumber) !== String(number)) {
             throw new Error('A valid control Issue number is required.');
         }
+        // GITHUB_ACTOR is runner-provided for both Issue events and manual
+        // dispatch. Cross-check the signed Issue event's sender when present.
+        const actor = process.env.GITHUB_ACTOR;
+        if (process.env.GITHUB_EVENT_NAME === 'issues' && event.sender?.login !== actor) {
+            throw new Error('Issue event sender does not match the trusted GitHub actor.');
+        }
         runMilestoneControl(number, makeGitHubApi({
             token: process.env.GITHUB_TOKEN,
             repository: process.env.GITHUB_REPOSITORY,
-        })).then(result => {
+        }), actor).then(result => {
             console.log(`Create milestone control: ${result.status}`);
         }).catch(error => {
             console.error(displayError(error));

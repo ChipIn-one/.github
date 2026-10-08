@@ -22,9 +22,12 @@ Due date: 2026-11-01
 ```
 
 `Description` is required; `Due date` is optional (UTC YYYY-MM-DD).
-The original Issue author must have `write`, `maintain` or `admin`
-permission in the caller repository. Unauthorized/malformed requests do not
-create milestones. Open and closed milestones are considered for dedup; an
+The original Issue author **and** the GitHub event actor (Issue editor
+or manual workflow-dispatch initiator) must each have `write`, `maintain`
+or `admin` permission in the caller repository. The action uses runner-provided
+`GITHUB_ACTOR` and cross-checks the sender on Issue events. This prevents a
+triage-level editor from acquiring milestone-creation privileges by modifying
+a write-author's Issue. Unauthorized/malformed requests do not create milestones. Open and closed milestones are considered for dedup; an
 existing closed milestone is never reopened. Success returns a URL, number and
 state in a single bot receipt and closes the control Issue. Errors keep it open
 with an actionable receipt, suitable for retries by editing or manual dispatch.

@@ -121,20 +121,54 @@ describe('control Issue state transition', () => {
     it('ignores ordinary issue without mutating or checking permissions', () => {
         const test = adapter(issue('Ordinary'));
         test.api.getPermission = failWrite;
-        return runMilestoneControl(15, test.api).then(result => {
+        return runMilestoneControl(15, test.api, 'author').then(result => {
             assert.equal(result.status, 'ignored');
             assert.equal(test.stats.creates, 0);
         });
     });
+    it('rejects a triage editor even if the original author is a writer', async () => {
+        const test = adapter();
+        const actors = [];
+        test.api.getPermission = async login => {
+            actors.push(login);
+            return { permission: login === 'triage-editor' ? 'triage' : 'write' };
+        };
+        await assert.rejects(runMilestoneControl(15, test.api, 'triage-editor'), /Triggering actor requires/);
+        assert.deepEqual(actors, ['triage-editor']);
+        assert.equal(test.stats.creates, 0);
+        assert.equal(test.stats.closes, 0);
+    });
+    it('rejects a low-permission Issue author even if the actor is authorized', async () => {
+        const test = adapter();
+        test.api.getPermission = async login => ({ permission: login === 'author' ? 'triage' : 'write' });
+        await assert.rejects(runMilestoneControl(15, test.api, 'maintainer'), /Issue author requires/);
+        assert.equal(test.stats.creates, 0);
+        assert.equal(test.stats.closes, 0);
+    });
+    it('fails closed when the trusted actor is unavailable', async () => {
+        const test = adapter();
+        await assert.rejects(runMilestoneControl(15, test.api), /trusted triggering actor/);
+        assert.equal(test.stats.creates, 0);
+    });
+    it('allows a distinct writer to execute an existing writer-authored control Issue', async () => {
+        const test = adapter();
+        const checked = [];
+        test.api.getPermission = async login => {
+            checked.push(login);
+            return { permission: 'write' };
+        };
+        assert.equal((await runMilestoneControl(15, test.api, 'authorized-editor')).status, 'completed');
+        assert.deepEqual(checked, ['authorized-editor', 'author']);
+    });
     it('creates, comments and closes, then retry is a no-op', () => {
         const test = adapter();
-        return runMilestoneControl(15, test.api).then(result => {
+        return runMilestoneControl(15, test.api, 'author').then(result => {
             assert.equal(result.status, 'completed');
             assert.equal(test.getState(), 'closed');
             assert.equal(test.stats.creates, 1);
             assert.equal(test.stats.closes, 1);
             assert.match(test.comments[0], /Number: \*\*#8\*\*/);
-            return runMilestoneControl(15, test.api).then(retry => {
+            return runMilestoneControl(15, test.api, 'author').then(retry => {
                 assert.equal(retry.status, 'ignored');
                 assert.equal(test.stats.creates, 1);
             });
@@ -142,13 +176,13 @@ describe('control Issue state transition', () => {
     });
     it('unauthorized and invalid Issue leave actionable receipt and stay open', () => {
         const noWrite = adapter(issue(), 'read');
-        return assert.rejects(runMilestoneControl(15, noWrite.api), /requires repository write/)
+        return assert.rejects(runMilestoneControl(15, noWrite.api, 'author'), /requires repository write/)
             .then(() => {
                 assert.equal(noWrite.stats.creates, 0);
                 assert.equal(noWrite.getState(), 'open');
                 assert.match(noWrite.comments[0], /write, maintain, or admin/);
                 const bad = adapter(issue('[create-milestone] x', 'Shell: bad'));
-                return assert.rejects(runMilestoneControl(15, bad.api), /Only Description/).then(() => {
+                return assert.rejects(runMilestoneControl(15, bad.api, 'author'), /Only Description/).then(() => {
                     assert.equal(bad.stats.creates, 0);
                     assert.equal(bad.getState(), 'open');
                 });
@@ -156,18 +190,18 @@ describe('control Issue state transition', () => {
     });
     it('API failures comment once and keep issue open for retry', () => {
         const test = adapter(issue(), 'write', 'create');
-        return assert.rejects(runMilestoneControl(15, test.api), /503/).then(() => {
+        return assert.rejects(runMilestoneControl(15, test.api, 'author'), /503/).then(() => {
             assert.equal(test.getState(), 'open');
             assert.match(test.comments[0], /503/);
         });
     });
     it('close failure does not duplicate milestones and reports actionable error', () => {
         const test = adapter(issue(), 'write', 'close');
-        return assert.rejects(runMilestoneControl(15, test.api), /close failed/).then(() => {
+        return assert.rejects(runMilestoneControl(15, test.api, 'author'), /close failed/).then(() => {
             assert.equal(test.stats.creates, 1);
             assert.equal(test.getState(), 'open');
             assert.match(test.comments[0], /close failed/);
-            return assert.rejects(runMilestoneControl(15, test.api), /close failed/).then(() => {
+            return assert.rejects(runMilestoneControl(15, test.api, 'author'), /close failed/).then(() => {
                 assert.equal(test.stats.creates, 1);
                 assert.match(test.comments[0], /close failed/);
             });
@@ -197,19 +231,19 @@ describe('recovery receipt routing', () => {
 
     it('ignores normal Issue when first GET fails but recovery succeeds', async () => {
         const api = makeApi('Fix a broken expense view');
-        const result = await runMilestoneControl(15, api);
+        const result = await runMilestoneControl(15, api, 'author');
         assert.deepEqual(result, { status: 'ignored' });
         assert.equal(api.writes.length, 0);
     });
     it('posts one actionable receipt for a recovered control Issue', async () => {
         const api = makeApi('[create-milestone] Product 1.2');
-        await assert.rejects(runMilestoneControl(15, api), /GET 503/);
+        await assert.rejects(runMilestoneControl(15, api, 'author'), /GET 503/);
         assert.equal(api.writes.length, 1);
         assert.match(api.writes[0], /Milestone request not completed: GET 503/);
     });
     it('ignores ordinary Issue edited after an initial transport failure', async () => {
         const api = makeApi('Ordinary issue with [create-milestone] mentioned inside');
-        const result = await runMilestoneControl(15, api);
+        const result = await runMilestoneControl(15, api, 'author');
         assert.equal(result.status, 'ignored');
         assert.deepEqual(api.writes, []);
     });
@@ -240,7 +274,7 @@ describe('concurrent cancellation and ambiguous closure', () => {
         const initial = original();
         t.api.getIssue = async () => t.snapshots.shift() ?? initial;
         t.snapshots.push(initial, issue('[create-milestone] FE 1.3', 'Description: Updated'));
-        await assert.rejects(runMilestoneControl(15, t.api), /request changed/);
+        await assert.rejects(runMilestoneControl(15, t.api, 'author'), /request changed/);
         assert.equal(t.counts().creates, 0);
         assert.equal(t.counts().closes, 0);
         assert.match(t.comments[0], /request changed/);
@@ -248,7 +282,7 @@ describe('concurrent cancellation and ambiguous closure', () => {
     it('never creates after cancellation during permission or list read', async () => {
         const t = mkApi();
         t.snapshots.push(original(), { ...original(), state: 'closed', state_reason: 'not_planned' });
-        await assert.rejects(runMilestoneControl(15, t.api), /cancelled/);
+        await assert.rejects(runMilestoneControl(15, t.api, 'author'), /cancelled/);
         assert.equal(t.counts().creates, 0);
         assert.equal(t.counts().closes, 0);
         assert.equal(t.comments.length, 0);
@@ -257,14 +291,14 @@ describe('concurrent cancellation and ambiguous closure', () => {
         const t = mkApi();
         t.api.listMilestones = async () => [milestone()];
         t.snapshots.push(original(), { ...original(), body: 'Description: Updated' });
-        await assert.rejects(runMilestoneControl(15, t.api), /request changed/);
+        await assert.rejects(runMilestoneControl(15, t.api, 'author'), /request changed/);
         assert.equal(t.counts().creates, 0);
         assert.equal(t.counts().closes, 0);
     });
     it('does not close when request was cancelled after success receipt', async () => {
         const t = mkApi();
         t.snapshots.push(original(), original(), original(), { ...original(), state: 'closed', state_reason: 'not_planned' });
-        await assert.rejects(runMilestoneControl(15, t.api), /cancelled/);
+        await assert.rejects(runMilestoneControl(15, t.api, 'author'), /cancelled/);
         assert.equal(t.counts().closes, 0);
         assert.match(t.comments[0], /Milestone created/);
         assert.doesNotMatch(t.comments[0], /remains open/);
@@ -273,7 +307,7 @@ describe('concurrent cancellation and ambiguous closure', () => {
         const test = mkApi();
         const changed = { ...original(), body: 'Description: Edited after creation' };
         test.snapshots.push(original(), original(), original(), changed);
-        await assert.rejects(runMilestoneControl(15, test.api), /request changed/);
+        await assert.rejects(runMilestoneControl(15, test.api, 'author'), /request changed/);
         assert.equal(test.counts().creates, 1);
         assert.equal(test.counts().closes, 0);
         assert.match(test.comments[0], /Milestone created/);
@@ -285,16 +319,27 @@ describe('concurrent cancellation and ambiguous closure', () => {
         const test = mkApi();
         const changed = { ...original(), title: '[create-milestone] Different release' };
         test.snapshots.push(original(), original(), changed);
-        await assert.rejects(runMilestoneControl(15, test.api), /request changed/);
+        await assert.rejects(runMilestoneControl(15, test.api, 'author'), /request changed/);
         assert.equal(test.counts().creates, 1);
         assert.equal(test.counts().closes, 0);
         assert.match(test.comments[0], /Milestone created/);
         assert.match(test.comments[0], /Control Issue not completed/);
     });
+    it('does not claim completed when an Issue is reopened after successful PATCH', async () => {
+        const test = mkApi();
+        // PATCH returned success, but the subsequent successful GET observes
+        // that the control Issue was reopened by another user.
+        test.api.closeIssue = async () => ({ state: 'closed', state_reason: 'completed' });
+        await assert.rejects(runMilestoneControl(15, test.api, 'author'), /read-back is not closed\/completed/);
+        assert.equal(test.counts().creates, 1);
+        assert.match(test.comments[0], /Milestone created/);
+        assert.match(test.comments[0], /Control Issue not completed/);
+        assert.doesNotMatch(test.comments[0], /Milestone request not completed/);
+    });
     it('a lost PATCH response can be reconciled as completed from read-back', async () => {
         const t = mkApi();
         t.api.closeIssue = async () => { t.setState('closed'); throw new Error('connection dropped'); };
-        const done = await runMilestoneControl(15, t.api);
+        const done = await runMilestoneControl(15, t.api, 'author');
         assert.equal(done.status, 'completed');
         assert.match(t.comments[0], /Milestone created/);
     });
@@ -304,7 +349,7 @@ describe('concurrent cancellation and ambiguous closure', () => {
         t.api.closeIssue = async () => { closed = true; return { state: 'closed', state_reason: 'completed' }; };
         const get = t.api.getIssue;
         t.api.getIssue = async () => { if (closed) throw new Error('GET 503'); return get(); };
-        const done = await runMilestoneControl(15, t.api);
+        const done = await runMilestoneControl(15, t.api, 'author');
         assert.equal(done.status, 'completed');
         assert.match(t.comments[0], /Milestone created/);
     });
@@ -314,14 +359,14 @@ describe('concurrent cancellation and ambiguous closure', () => {
         t.api.closeIssue = async () => { lost = true; throw new Error('PATCH timeout'); };
         const get = t.api.getIssue;
         t.api.getIssue = async () => { if (lost) throw new Error('GET timeout'); return get(); };
-        await assert.rejects(runMilestoneControl(15, t.api), /PATCH timeout/);
+        await assert.rejects(runMilestoneControl(15, t.api, 'author'), /PATCH timeout/);
         assert.match(t.comments[0], /Milestone created/);
         assert.doesNotMatch(t.comments[0], /remains open/);
     });
     it('confirmed open after close failure receives one accurate error receipt', async () => {
         const t = mkApi();
         t.api.closeIssue = async () => { throw new Error('close failed'); };
-        await assert.rejects(runMilestoneControl(15, t.api), /close failed/);
+        await assert.rejects(runMilestoneControl(15, t.api, 'author'), /close failed/);
         assert.match(t.comments[0], /not completed: close failed/);
         assert.equal(t.counts().creates, 1);
     });
