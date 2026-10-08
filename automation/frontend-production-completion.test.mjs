@@ -9,6 +9,7 @@ import {
   readProductionReleases,
   readRequiredRelationships,
   reconcileOpenDoneProjectStatus,
+  runCompletionSweep,
 } from "./frontend-production-completion.mjs";
 
 const repository = "ChipIn-one/chipin-frontend";
@@ -457,14 +458,106 @@ test("project normalization never turns a closed not-planned Issue into Done", a
   assert.equal(mutationCount, 0);
 });
 
-test("privileged completion workflow is schedule-only and cannot dispatch branch code with the write token", async () => {
+test("privileged completion workflow runs only from trusted master events and cannot dispatch branch code", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/frontend-production-completion.yml", import.meta.url),
     "utf8",
   );
+  assert.match(workflow, /^  push:$/m);
+  assert.match(workflow, /^    branches:\n      - master$/m);
   assert.match(workflow, /^  schedule:$/m);
   assert.doesNotMatch(workflow, /workflow_dispatch:/u);
   assert.match(workflow, /CHIPIN_ISSUE_WRITE_TOKEN/u);
+});
+
+test("repository-local completion skips Project access and still closes production-complete Issues", async () => {
+  let patched = false;
+  const mergeCommitSha = "1111111111111111111111111111111111111111";
+  const releaseHeadSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const client = {
+    graphql: async (query) => {
+      if (!query.includes("query FrontendCompletionCandidates")) {
+        throw new Error("Project GraphQL must not run in repository-local mode");
+      }
+      return {
+        repository: {
+          issues: {
+            totalCount: 1,
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: [{
+              number: 1,
+              title: "Production-complete",
+              url: "https://github.com/ChipIn-one/chipin-frontend/issues/1",
+              state: "OPEN",
+              updatedAt: "2026-10-07T10:00:00Z",
+              lastEditedAt: null,
+              linkedBranches: { totalCount: 0 },
+              timelineItems: { nodes: [] },
+              closedByPullRequestsReferences: {
+                totalCount: 1,
+                nodes: [{
+                  number: 10,
+                  url: "https://github.com/ChipIn-one/chipin-frontend/pull/10",
+                  state: "MERGED",
+                  mergedAt: "2026-10-01T10:00:00Z",
+                  baseRefName: "dev",
+                  headRefName: "feat/issue-1-work",
+                  headRefOid: "2222222222222222222222222222222222222222",
+                  repository: { nameWithOwner: repository },
+                  headRepository: { nameWithOwner: repository },
+                  mergeCommit: { oid: mergeCommitSha },
+                }],
+              },
+            }],
+          },
+        },
+      };
+    },
+    listAll: async (path) => {
+      if (path.includes("/pulls?state=closed&base=main")) {
+        return [{
+          number: 20,
+          merged_at: "2026-10-02T10:00:00Z",
+          base: { ref: "main" },
+          head: { ref: "dev", sha: releaseHeadSha, repo: { full_name: repository } },
+          html_url: "https://github.com/ChipIn-one/chipin-frontend/pull/20",
+        }];
+      }
+      if (path.endsWith("/dependencies/blocked_by") || path.endsWith("/sub_issues")) return [];
+      throw new Error("Unexpected list path: " + path);
+    },
+    request: async (path, options = {}) => {
+      if (path.includes("/compare/")) {
+        return { status: "ahead", merge_base_commit: { sha: mergeCommitSha } };
+      }
+      if (path.endsWith("/issues/1") && (options.method ?? "GET") === "GET") {
+        return { state: "open", updated_at: "2026-10-07T10:00:00Z" };
+      }
+      if (path.endsWith("/issues/1") && options.method === "PATCH") {
+        patched = true;
+        assert.deepEqual(options.body, { state: "closed", state_reason: "completed" });
+        return { state: "closed", state_reason: "completed" };
+      }
+      throw new Error("Unexpected request path: " + path);
+    },
+  };
+
+  const results = await runCompletionSweep(client, repository, { reconcileProjectStatus: false });
+
+  assert.equal(patched, true);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].decision.code, "closed-completed");
+});
+
+test("repository-local composite action uses only the caller repository token and disables Project reconciliation", async () => {
+  const action = await readFile(
+    new URL("./frontend-production-completion-action/action.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(action, /CHIPIN_FRONTEND_COMPLETION_PROJECT_RECONCILE: "0"/u);
+  assert.match(action, /GITHUB_REPOSITORY/u);
+  assert.match(action, /ChipIn-one\/chipin-frontend/u);
+  assert.match(action, /frontend-production-completion\.mjs/u);
 });
 
 test("production release discovery ignores non-canonical main merges", async () => {
