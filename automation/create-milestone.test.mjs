@@ -11,6 +11,8 @@ const issue = (title = '[create-milestone] FE 1.2', body = 'Description: Fronten
 });
 const milestone = (title = 'FE 1.2', state = 'open', number = 8) => ({
     title, state, number,
+    description: 'Frontend iteration',
+    due_on: '2026-11-01T23:59:59.000Z',
     html_url: 'https://github.com/ChipIn-one/chipin-frontend/milestone/8',
 });
 const failWrite = () => Promise.reject(new Error('Unexpected create'));
@@ -79,6 +81,61 @@ describe('idempotency and race handling', () => {
             listMilestones: () => Promise.resolve([]),
             createMilestone: () => Promise.reject(Object.assign(new Error('invalid'), { status: 422 })),
         }), /invalid/));
+    it('verifies new milestone Description on read-back', async () => {
+        const request = { title: 'FE 1.2', description: 'Frontend iteration' };
+        for (const description of [undefined, null, 'Different description']) {
+            await assert.rejects(findOrCreateMilestone(request, {
+                listMilestones: async () => [],
+                createMilestone: async () => milestone(),
+                getMilestone: async () => ({ ...milestone(), description, due_on: null }),
+            }), /metadata read-back/);
+        }
+    });
+    it('verifies optional Due date for a newly created milestone', async () => {
+        const request = {
+            title: 'FE 1.2', description: 'Frontend iteration',
+            due_on: '2026-11-01T23:59:59Z',
+        };
+        for (const due_on of [null, '2026-11-02T23:59:59Z', 'not-a-date']) {
+            await assert.rejects(findOrCreateMilestone(request, {
+                listMilestones: async () => [],
+                createMilestone: async () => milestone(),
+                getMilestone: async () => ({ ...milestone(), due_on }),
+            }), /metadata read-back/);
+        }
+        const matching = await findOrCreateMilestone(request, {
+            listMilestones: async () => [],
+            createMilestone: async () => milestone(),
+            getMilestone: async () => milestone(),
+        });
+        assert.equal(matching.created, true);
+        assert.equal(matching.milestone.number, 8);
+    });
+    it('requires no due date when none was requested during creation', async () => {
+        const request = { title: 'FE 1.2', description: 'Frontend iteration' };
+        await assert.rejects(findOrCreateMilestone(request, {
+            listMilestones: async () => [],
+            createMilestone: async () => milestone(),
+            getMilestone: async () => milestone(),
+        }), /metadata read-back/);
+        const created = await findOrCreateMilestone(request, {
+            listMilestones: async () => [],
+            createMilestone: async () => milestone(),
+            getMilestone: async () => ({ ...milestone(), due_on: null }),
+        });
+        assert.equal(created.created, true);
+    });
+    it('reuses existing milestones without rewriting or validating their metadata', async () => {
+        const existing = { ...milestone(), description: 'Legacy desc', due_on: '2030-01-01T00:00:00Z' };
+        const result = await findOrCreateMilestone({
+            title: 'FE 1.2', description: 'New description', due_on: '2026-11-01T23:59:59Z',
+        }, {
+            listMilestones: async () => [existing],
+            createMilestone: failWrite,
+        });
+        assert.equal(result.created, false);
+        assert.equal(result.milestone.description, 'Legacy desc');
+    });
     it('requires a successful create read-back', () =>
         assert.rejects(findOrCreateMilestone({ title: 'FE 1.2' }, {
             listMilestones: () => Promise.resolve([]),
@@ -263,7 +320,7 @@ describe('concurrent cancellation and ambiguous closure', () => {
             getPermission: async () => ({ permission: 'write' }),
             listMilestones: async () => [],
             createMilestone: async () => { creates++; return milestone(); },
-            getMilestone: async () => milestone(),
+            getMilestone: async () => ({ ...milestone(), description: 'Current release', due_on: null }),
             upsertReceipt: async (_n, body) => { comments[0] = body; },
             closeIssue: async () => { closes++; issueState = 'closed'; return { state: 'closed', state_reason: 'completed' }; },
         };

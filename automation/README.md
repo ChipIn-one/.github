@@ -64,13 +64,14 @@ substituting a textual link.
 `create-milestone.mjs` is a shared repository-scoped control-Issue reconciler exposed by
 `automation/create-milestone-action/action.yml`.
 The allowlist contains **FE and BE only**; KB remains specification/documentation
-and does not receive a product-release milestone caller. Its FE, BE and KB callers each
+and does not receive a product-release milestone caller. The FE and BE callers each
 grant only `contents: read` and `issues: write`, and pass the local `GITHUB_TOKEN`;
 no shared PAT, webhook, Project API, or alternate release metadata is needed.
 
 Control Issues use `[create-milestone] <title>` and mandatory `Description:`
-with optional `Due date: YYYY-MM-DD`. The original Issue author must have
-write/maintain/admin permission. Ordinary Issues are ignored. Closed and open
+with optional `Due date: YYYY-MM-DD`. Both the original Issue author and
+the triggering GitHub actor must have write/maintain/admin permission.
+Ordinary Issues are ignored. Closed and open
 milestones both participate in deduplication, and existing release objects are
 never reopened or changed. Callers serialize competing requests through
 `concurrency.queue: max`, and the reconciler re-reads conflicts and writes an

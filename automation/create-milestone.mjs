@@ -90,6 +90,22 @@ const verifyMilestone = (milestone, title) => {
     return milestone;
 };
 
+const verifyCreatedMilestone = (milestone, request) => {
+    const verified = verifyMilestone(milestone, request.title);
+    // A successful POST alone is not sufficient: confirm the exact metadata
+    // requested by the control Issue. Do not modify existing milestones.
+    const expectedDue = request.due_on === undefined ? null : Date.parse(request.due_on);
+    const actualDue = verified.due_on == null ? null
+        : typeof verified.due_on === 'string' ? Date.parse(verified.due_on) : NaN;
+    if (verified.description !== request.description
+        || !Number.isFinite(expectedDue) && expectedDue !== null
+        || !Number.isFinite(actualDue) && actualDue !== null
+        || actualDue !== expectedDue) {
+        throw new Error('Created milestone metadata read-back does not match Description or Due date; inspect before retrying.');
+    }
+    return verified;
+};
+
 export const findOrCreateMilestone = async (request, api, beforeCreate = async () => {}) => {
     const milestones = await api.listMilestones();
     const found = matchingMilestone(milestones, request.title);
@@ -101,7 +117,7 @@ export const findOrCreateMilestone = async (request, api, beforeCreate = async (
     try {
         const created = await api.createMilestone(request);
         const receipt = await api.getMilestone(created.number);
-        return { milestone: verifyMilestone(receipt, request.title), created: true };
+        return { milestone: verifyCreatedMilestone(receipt, request), created: true };
     } catch (error) {
         if (error.status !== 422) throw error;
         const updated = await api.listMilestones();
