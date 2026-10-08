@@ -87,9 +87,24 @@ test("release retries preserve manual values, avoid duplicate Project item and n
   const impl={number:10,merged_at:"2026-10-08T12:00:00Z",base:{ref:"dev"},
     body:"Task identity: "+repo+"#5"};
   const labels=[{name:"manual-label"}],items=[];
-  let projectAdds=0,labelAdds=0,issueWrites=0;
+  let projectAdds=0,labelAdds=0,issueWrites=0,nativeReads=0;
   const client={
     async graphql(query) {
+      if (query.includes("query DevelopmentLinkPullRequest")) {
+        nativeReads++;
+        return {repository:{nameWithOwner:repo,pullRequest:{
+          id:"PR_10",number:10,body:impl.body,repository:{nameWithOwner:repo}}}};
+      }
+      if (query.includes("query DevelopmentLinkTarget")) {
+        nativeReads++;
+        return {repository:{nameWithOwner:repo,taskIssue:{
+          id:"ISSUE_5",number:5,url:"https://github.com/"+repo+"/issues/5",
+          repository:{nameWithOwner:repo},closedByPullRequestsReferences:{
+            totalCount:1,pageInfo:{hasNextPage:false,endCursor:null},nodes:[{
+              id:"PR_10",number:10,url:"https://github.com/"+repo+"/pull/10",
+              repository:{nameWithOwner:repo}}]}},
+          implementationPr:{id:"PR_10",number:10,body:impl.body,repository:{nameWithOwner:repo}}}};
+      }
       if(query.startsWith("query"))return {organization:{projectV2:{id:"PROJECT_5",
         items:{totalCount:items.length,pageInfo:{hasNextPage:false,endCursor:null},nodes:items}}}};
       projectAdds++;items.push({id:"ITEM_20",content:{__typename:"PullRequest",id:"PR_20"}});
@@ -116,6 +131,7 @@ test("release retries preserve manual values, avoid duplicate Project item and n
   assert.equal(one.kind,"release");assert.equal(one.project.created,true);
   assert.equal(two.project.created,false);
   assert.equal(projectAdds,1);assert.equal(labelAdds,1);assert.equal(issueWrites,1); // additive PR label only
+  assert.ok(nativeReads>=4); // native userLinkedOnly read-back on both retries
   assert.ok(two.blockers.some(x=>x.includes("REVIEWER_POLICY")));
   assert.equal(items.length,1);
   assert.deepEqual(labels.map(x=>x.name),["manual-label","pr:release"]);

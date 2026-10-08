@@ -102,7 +102,11 @@ async function verifyRelease(client,refs) {
   for (const num of refs.prs) {
     const impl=await client.request(ROOT+"/pulls/"+num);
     if (!impl?.merged_at || impl.base?.ref!=="dev") throw new Error("RELEASE: PR #"+num+" not merged into dev");
-    issues.push(implementationIdentity(impl.body).issueNumber);
+    const task=implementationIdentity(impl.body);
+    const linked=await reconcileDevelopmentLink(client,{repository:REPO,pullRequestNumber:num});
+    if (!linked.readBackConfirmed || linked.issueNumber!==task.issueNumber)
+      throw new Error("RELEASE_NATIVE_LINK: included implementation PR lacks exact native Development read-back");
+    issues.push(task.issueNumber);
   }
   if ([...new Set(issues)].sort((a,b)=>a-b).join(",")!==[...refs.issues].sort((a,b)=>a-b).join(","))
     throw new Error("RELEASE: listed Issue set does not match included PR identities");
