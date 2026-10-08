@@ -62,7 +62,9 @@ substituting a textual link.
 ## Repository-local milestone creation
 
 `create-milestone.mjs` is a shared repository-scoped control-Issue reconciler exposed by
-`automation/create-milestone-action/action.yml`. Its FE, BE and KB callers each
+`automation/create-milestone-action/action.yml`.
+The allowlist contains **FE and BE only**; KB remains specification/documentation
+and does not receive a product-release milestone caller. Its FE, BE and KB callers each
 grant only `contents: read` and `issues: write`, and pass the local `GITHUB_TOKEN`;
 no shared PAT, webhook, Project API, or alternate release metadata is needed.
 

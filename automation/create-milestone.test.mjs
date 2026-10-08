@@ -207,11 +207,25 @@ describe('HTTP adapter', () => {
             assert.match(methods[1].url, /issues\/comments\/77$/);
         });
     });
+    it('limits milestone operations to FE and BE repositories', () => {
+        const fetchImpl = () => Promise.reject(new Error('Should not reach API'));
+        assert.throws(
+            () => makeGitHubApi({ token: 'test-only', repository: 'ChipIn-one/chipin-knowledge-base', fetchImpl }),
+            /only in ChipIn-one\/chipin-frontend and ChipIn-one\/chipin-backend/,
+        );
+        assert.throws(
+            () => makeGitHubApi({ token: 'test-only', repository: 'ChipIn-one\/.github', fetchImpl }),
+            /only in ChipIn-one\/chipin-frontend and ChipIn-one\/chipin-backend/,
+        );
+        assert.doesNotThrow(
+            () => makeGitHubApi({ token: 'test-only', repository: 'ChipIn-one/chipin-backend', fetchImpl }),
+        );
+    });
     it('fails closed on invalid token or paginated API response', () => {
         assert.throws(() => makeGitHubApi({ repository: 'a/b' }), /required/);
         const fetchImpl = () => Promise.resolve({ ok: true, text: () => Promise.resolve('{}') });
         return assert.rejects(makeGitHubApi({
-            token: 'token', repository: 'a/b', fetchImpl,
+            token: 'token', repository: 'ChipIn-one/chipin-backend', fetchImpl,
         }).listMilestones(), /paginated/);
     });
 });

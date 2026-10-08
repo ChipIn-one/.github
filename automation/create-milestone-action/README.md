@@ -1,7 +1,10 @@
 # Repository-local milestone control
 
 This composite action implements `ChipIn-one/.github#51`; policy code and
-Node tests reside one directory above this `action.yml`. It uses the
+Node tests reside one directory above this `action.yml`.
+Only `ChipIn-one/chipin-frontend` and `ChipIn-one/chipin-backend` are
+allowed to invoke milestone operations. KB has no milestone entrypoint;
+unsupported repositories fail closed, even with valid credentials. It uses the
 **caller's** `GITHUB_TOKEN` and runner-provided `GITHUB_REPOSITORY`, so it
 cannot create milestones in another repository.
 

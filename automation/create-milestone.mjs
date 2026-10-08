@@ -6,6 +6,10 @@ import { pathToFileURL } from 'node:url';
 const PREFIX = /^\[create-milestone\](?:\s+)(.+)$/i;
 const RECEIPT_MARKER = '<!-- chipin:create-milestone:v1 -->';
 const AUTHORIZED = new Set(['write', 'maintain', 'admin']);
+const MILESTONE_REPOSITORIES = new Set([
+    'ChipIn-one/chipin-frontend',
+    'ChipIn-one/chipin-backend',
+]);
 
 const displayError = error => {
     const message = error instanceof Error ? error.message : String(error);
@@ -149,6 +153,9 @@ export const runMilestoneControl = (issueNumber, api) => {
 export const makeGitHubApi = ({ token, repository, fetchImpl = fetch }) => {
     if (!token || !/^[-\w.]+\/[-\w.]+$/.test(repository)) {
         throw new Error('GITHUB_TOKEN and GITHUB_REPOSITORY are required.');
+    }
+    if (!MILESTONE_REPOSITORIES.has(repository)) {
+        throw new Error('Milestone creation is supported only in ChipIn-one/chipin-frontend and ChipIn-one/chipin-backend.');
     }
     const prefix = `/repos/${repository}`;
     const request = (method, path, body) => fetchImpl(`https://api.github.com${path}`, {
