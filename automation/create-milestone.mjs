@@ -196,6 +196,9 @@ export const runMilestoneControl = async (issueNumber, api, triggeringActor) => 
         // A fresh successful GET is more authoritative than the earlier PATCH:
         // another user may have reopened the Issue after PATCH completed.
         if (actual !== undefined) {
+            // Keep the concrete PATCH error when the follow-up read confirms
+            // the Issue remains open; only a successful PATCH may be stale.
+            if (closeError) throw closeError;
             throw new Error('Milestone exists, but control Issue read-back is not closed/completed.');
         }
         if (!closeError && patch?.state === 'closed' && patch.state_reason === 'completed') {
