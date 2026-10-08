@@ -94,7 +94,7 @@ describe('control Issue state transition', () => {
         const stats = { creates: 0, closes: 0 };
         let state = valid.state;
         const api = {
-            getIssue: () => Promise.resolve({ ...valid, state }),
+            getIssue: () => Promise.resolve({ ...valid, state, state_reason: state === 'closed' ? 'completed' : null }),
             getPermission: () => Promise.resolve({ permission }),
             listMilestones: () => Promise.resolve(milestones),
             createMilestone: () => {
@@ -172,6 +172,96 @@ describe('control Issue state transition', () => {
                 assert.match(test.comments[0], /close failed/);
             });
         });
+    });
+});
+
+describe('concurrent cancellation and ambiguous closure', () => {
+    const original = () => issue('[create-milestone] FE 1.2', 'Description: Current release');
+    const mkApi = () => {
+        const snapshots = [];
+        const comments = [];
+        let issueState = 'open';
+        let current = original();
+        let creates = 0;
+        let closes = 0;
+        const api = {
+            getIssue: async () => { current = snapshots.shift() ?? current; return { ...current, state: issueState === 'closed' ? 'closed' : current.state, state_reason: issueState === 'closed' ? 'completed' : current.state_reason }; },
+            getPermission: async () => ({ permission: 'write' }),
+            listMilestones: async () => [],
+            createMilestone: async () => { creates++; return milestone(); },
+            getMilestone: async () => milestone(),
+            upsertReceipt: async (_n, body) => { comments[0] = body; },
+            closeIssue: async () => { closes++; issueState = 'closed'; return { state: 'closed', state_reason: 'completed' }; },
+        };
+        return { api, snapshots, comments, setState: value => { issueState = value; }, counts: () => ({ creates, closes }) };
+    };
+    it('never creates after title/body change during milestone listing', async () => {
+        const t = mkApi();
+        const initial = original();
+        t.api.getIssue = async () => t.snapshots.shift() ?? initial;
+        t.snapshots.push(initial, issue('[create-milestone] FE 1.3', 'Description: Updated'));
+        await assert.rejects(runMilestoneControl(15, t.api), /request changed/);
+        assert.equal(t.counts().creates, 0);
+        assert.equal(t.counts().closes, 0);
+        assert.match(t.comments[0], /request changed/);
+    });
+    it('never creates after cancellation during permission or list read', async () => {
+        const t = mkApi();
+        t.snapshots.push(original(), { ...original(), state: 'closed', state_reason: 'not_planned' });
+        await assert.rejects(runMilestoneControl(15, t.api), /cancelled/);
+        assert.equal(t.counts().creates, 0);
+        assert.equal(t.counts().closes, 0);
+        assert.equal(t.comments.length, 0);
+    });
+    it('does not write receipt or close when existing milestone request changed', async () => {
+        const t = mkApi();
+        t.api.listMilestones = async () => [milestone()];
+        t.snapshots.push(original(), { ...original(), body: 'Description: Updated' });
+        await assert.rejects(runMilestoneControl(15, t.api), /request changed/);
+        assert.equal(t.counts().creates, 0);
+        assert.equal(t.counts().closes, 0);
+    });
+    it('does not close when request was cancelled after success receipt', async () => {
+        const t = mkApi();
+        t.snapshots.push(original(), original(), original(), { ...original(), state: 'closed', state_reason: 'not_planned' });
+        await assert.rejects(runMilestoneControl(15, t.api), /cancelled/);
+        assert.equal(t.counts().closes, 0);
+        assert.match(t.comments[0], /Milestone created/);
+        assert.doesNotMatch(t.comments[0], /remains open/);
+    });
+    it('a lost PATCH response can be reconciled as completed from read-back', async () => {
+        const t = mkApi();
+        t.api.closeIssue = async () => { t.setState('closed'); throw new Error('connection dropped'); };
+        const done = await runMilestoneControl(15, t.api);
+        assert.equal(done.status, 'completed');
+        assert.match(t.comments[0], /Milestone created/);
+    });
+    it('failed GET after PATCH accepts confirmed completed PATCH response', async () => {
+        const t = mkApi();
+        let closed = false;
+        t.api.closeIssue = async () => { closed = true; return { state: 'closed', state_reason: 'completed' }; };
+        const get = t.api.getIssue;
+        t.api.getIssue = async () => { if (closed) throw new Error('GET 503'); return get(); };
+        const done = await runMilestoneControl(15, t.api);
+        assert.equal(done.status, 'completed');
+        assert.match(t.comments[0], /Milestone created/);
+    });
+    it('does not overwrite success receipt when PATCH result and closure GET are both unknown', async () => {
+        const t = mkApi();
+        let lost = false;
+        t.api.closeIssue = async () => { lost = true; throw new Error('PATCH timeout'); };
+        const get = t.api.getIssue;
+        t.api.getIssue = async () => { if (lost) throw new Error('GET timeout'); return get(); };
+        await assert.rejects(runMilestoneControl(15, t.api), /PATCH timeout/);
+        assert.match(t.comments[0], /Milestone created/);
+        assert.doesNotMatch(t.comments[0], /remains open/);
+    });
+    it('confirmed open after close failure receives one accurate error receipt', async () => {
+        const t = mkApi();
+        t.api.closeIssue = async () => { throw new Error('close failed'); };
+        await assert.rejects(runMilestoneControl(15, t.api), /close failed/);
+        assert.match(t.comments[0], /not completed: close failed/);
+        assert.equal(t.counts().creates, 1);
     });
 });
 

@@ -90,24 +90,26 @@ const verifyMilestone = (milestone, title) => {
     return milestone;
 };
 
-export const findOrCreateMilestone = (request, api) => api.listMilestones()
-    .then(milestones => {
-        const found = matchingMilestone(milestones, request.title);
-        if (found) {
-            return { milestone: verifyMilestone(found, request.title), created: false };
-        }
-        return api.createMilestone(request)
-            .then(created => api.getMilestone(created.number)
-                .then(receipt => ({ milestone: verifyMilestone(receipt, request.title), created: true })))
-            .catch(error => {
-                if (error.status !== 422) throw error;
-                return api.listMilestones().then(updated => {
-                    const raced = matchingMilestone(updated, request.title);
-                    if (!raced) throw error;
-                    return { milestone: verifyMilestone(raced, request.title), created: false };
-                });
-            });
-    });
+export const findOrCreateMilestone = async (request, api, beforeCreate = async () => {}) => {
+    const milestones = await api.listMilestones();
+    const found = matchingMilestone(milestones, request.title);
+    if (found) return { milestone: verifyMilestone(found, request.title), created: false };
+
+    // The permission and list reads may be slow. Do not create from a
+    // cancelled/edited request merely because an earlier snapshot was valid.
+    await beforeCreate();
+    try {
+        const created = await api.createMilestone(request);
+        const receipt = await api.getMilestone(created.number);
+        return { milestone: verifyMilestone(receipt, request.title), created: true };
+    } catch (error) {
+        if (error.status !== 422) throw error;
+        const updated = await api.listMilestones();
+        const raced = matchingMilestone(updated, request.title);
+        if (!raced) throw error;
+        return { milestone: verifyMilestone(raced, request.title), created: false };
+    }
+};
 
 const milestoneReceipt = ({ milestone, created }) => `${RECEIPT_MARKER}\n`
     + `Milestone ${created ? 'created' : 'already exists'}: ${milestone.html_url}\n\n`
@@ -116,38 +118,80 @@ const milestoneReceipt = ({ milestone, created }) => `${RECEIPT_MARKER}\n`
 const errorReceipt = error => `${RECEIPT_MARKER}\nMilestone request not completed: ${displayError(error)}\n\n`
     + 'Correct the request or permissions, then edit the Issue or run Create milestone with this Issue number. The Issue remains open.';
 
-export const runMilestoneControl = (issueNumber, api) => {
-    let issue;
-    return api.getIssue(issueNumber)
-        .then(value => {
-            issue = value;
-            if (issue.pull_request || issue.state !== 'open') return { status: 'ignored' };
-            const request = parseMilestoneRequest(issue);
-            if (!request) return { status: 'ignored' };
-            return api.getPermission(issue.user?.login)
-                .then(permission => {
-                    if (!canCreateMilestone(permission)) {
-                        throw new Error('Issue author requires repository write, maintain, or admin permission.');
-                    }
-                    return findOrCreateMilestone(request, api);
-                })
-                .then(result => api.upsertReceipt(issueNumber, milestoneReceipt(result))
-                    .then(() => {
-                        return api.closeIssue(issueNumber);
-                    })
-                    .then(() => api.getIssue(issueNumber))
-                    .then(updated => {
-                        if (updated.state !== 'closed') {
-                            throw new Error('Milestone exists, but control Issue closure was not confirmed.');
-                        }
-                        return { status: 'completed', ...result };
-                    }));
-        })
-        .catch(error => {
-            if (!issue || issue.state !== 'open') throw error;
-            return api.upsertReceipt(issueNumber, errorReceipt(error))
-                .then(() => { throw error; });
-        });
+const confirmUnchangedControl = async (issueNumber, originalIssue, request, api) => {
+    const latest = await api.getIssue(issueNumber);
+    if (latest.state !== 'open' || latest.pull_request) {
+        throw new Error('Control Issue is no longer open; the milestone request was cancelled.');
+    }
+    if (latest.user?.login !== originalIssue.user?.login
+        || JSON.stringify(parseMilestoneRequest(latest)) !== JSON.stringify(request)) {
+        throw new Error('Control Issue request changed; retry the updated request instead.');
+    }
+    return latest;
+};
+
+export const runMilestoneControl = async (issueNumber, api) => {
+    let result;
+    let successReceiptWritten = false;
+    try {
+        const issue = await api.getIssue(issueNumber);
+        if (issue.pull_request || issue.state !== 'open') return { status: 'ignored' };
+        const request = parseMilestoneRequest(issue);
+        if (!request) return { status: 'ignored' };
+
+        const permission = await api.getPermission(issue.user?.login);
+        if (!canCreateMilestone(permission)) {
+            throw new Error('Issue author requires repository write, maintain, or admin permission.');
+        }
+        const recheck = () => confirmUnchangedControl(issueNumber, issue, request, api);
+        result = await findOrCreateMilestone(request, api, recheck);
+        // Also guard the existing-milestone and read-back paths before writing
+        // any receipt: an Issue may have changed after the initial GET.
+        await recheck();
+        await api.upsertReceipt(issueNumber, milestoneReceipt(result));
+        successReceiptWritten = true;
+        await recheck(); // Last observable validation before closing the Issue.
+
+        let patch, closeError;
+        try {
+            patch = await api.closeIssue(issueNumber);
+        } catch (error) {
+            closeError = error;
+        }
+        let actual;
+        try {
+            actual = await api.getIssue(issueNumber);
+        } catch {
+            // A successful PATCH response still confirms completion if a
+            // subsequent GET is unavailable. A lost PATCH response does not.
+        }
+        if (actual?.state === 'closed' && actual.state_reason === 'completed') {
+            return { status: 'completed', ...result };
+        }
+        if (actual?.state === 'closed') {
+            throw new Error('Control Issue was closed for another reason; its terminal state was preserved.');
+        }
+        if (!closeError && patch?.state === 'closed' && patch.state_reason === 'completed') {
+            return { status: 'completed', ...result };
+        }
+        if (closeError) throw closeError;
+        throw new Error('Milestone exists, but control Issue closure was not confirmed.');
+    } catch (error) {
+        // If PATCH succeeded but its response/GET was lost, the Issue may be
+        // closed. Never overwrite its success receipt with a false "open" error.
+        let current;
+        try {
+            current = await api.getIssue(issueNumber);
+        } catch {
+            if (successReceiptWritten) throw error;
+            // Without a fresh state read we cannot safely claim it is open.
+            throw error;
+        }
+        if (current?.state === 'open') {
+            await api.upsertReceipt(issueNumber, errorReceipt(error));
+        }
+        throw error;
+    }
 };
 
 export const makeGitHubApi = ({ token, repository, fetchImpl = fetch }) => {
