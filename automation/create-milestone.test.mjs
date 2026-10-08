@@ -175,6 +175,46 @@ describe('control Issue state transition', () => {
     });
 });
 
+describe('recovery receipt routing', () => {
+    const recoveredIssue = title => issue(title, 'Description: Initial release');
+    const makeApi = title => {
+        let reads = 0;
+        const writes = [];
+        return {
+            getIssue: async () => {
+                if (++reads === 1) throw new Error('GET 503');
+                return recoveredIssue(title);
+            },
+            getPermission: failWrite,
+            listMilestones: failWrite,
+            createMilestone: failWrite,
+            getMilestone: failWrite,
+            upsertReceipt: async (_num, body) => { writes.push(body); },
+            closeIssue: failWrite,
+            writes,
+        };
+    };
+
+    it('ignores normal Issue when first GET fails but recovery succeeds', async () => {
+        const api = makeApi('Fix a broken expense view');
+        const result = await runMilestoneControl(15, api);
+        assert.deepEqual(result, { status: 'ignored' });
+        assert.equal(api.writes.length, 0);
+    });
+    it('posts one actionable receipt for a recovered control Issue', async () => {
+        const api = makeApi('[create-milestone] Product 1.2');
+        await assert.rejects(runMilestoneControl(15, api), /GET 503/);
+        assert.equal(api.writes.length, 1);
+        assert.match(api.writes[0], /Milestone request not completed: GET 503/);
+    });
+    it('ignores ordinary Issue edited after an initial transport failure', async () => {
+        const api = makeApi('Ordinary issue with [create-milestone] mentioned inside');
+        const result = await runMilestoneControl(15, api);
+        assert.equal(result.status, 'ignored');
+        assert.deepEqual(api.writes, []);
+    });
+});
+
 describe('concurrent cancellation and ambiguous closure', () => {
     const original = () => issue('[create-milestone] FE 1.2', 'Description: Current release');
     const mkApi = () => {

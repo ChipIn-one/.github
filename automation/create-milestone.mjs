@@ -135,12 +135,18 @@ const confirmUnchangedControl = async (issueNumber, originalIssue, request, api)
     return latest;
 };
 
+const isMilestoneControlIssue = issue => !issue?.pull_request
+    && typeof issue?.title === 'string'
+    && /^\\[create-milestone\\]/i.test(issue.title);
+
 export const runMilestoneControl = async (issueNumber, api) => {
+    let recognizedControl = false;
     let result;
     let successReceiptWritten = false;
     try {
         const issue = await api.getIssue(issueNumber);
         if (issue.pull_request || issue.state !== 'open') return { status: 'ignored' };
+        recognizedControl = isMilestoneControlIssue(issue);
         const request = parseMilestoneRequest(issue);
         if (!request) return { status: 'ignored' };
 
@@ -192,7 +198,13 @@ export const runMilestoneControl = async (issueNumber, api) => {
             // Without a fresh state read we cannot safely claim it is open.
             throw error;
         }
-        if (current?.state === 'open') {
+        // A temporary GET failure may recover to an ordinary Issue.
+        // Ordinary Issues must not acquire a milestone bot receipt or fail
+        // merely because this workflow was triggered for an edit.
+        if (!recognizedControl && !result && !isMilestoneControlIssue(current)) {
+            return { status: 'ignored' };
+        }
+        if (current?.state === 'open' && (result || isMilestoneControlIssue(current))) {
             // A milestone may already have been created successfully even if
             // a later Issue edit or closure failed. Never call that creation a
             // failure; report the exact partial outcome for a safe retry.
