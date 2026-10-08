@@ -229,6 +229,28 @@ describe('concurrent cancellation and ambiguous closure', () => {
         assert.match(t.comments[0], /Milestone created/);
         assert.doesNotMatch(t.comments[0], /remains open/);
     });
+    it('keeps milestone success truthful when the Issue is edited after the receipt', async () => {
+        const test = mkApi();
+        const changed = { ...original(), body: 'Description: Edited after creation' };
+        test.snapshots.push(original(), original(), original(), changed);
+        await assert.rejects(runMilestoneControl(15, test.api), /request changed/);
+        assert.equal(test.counts().creates, 1);
+        assert.equal(test.counts().closes, 0);
+        assert.match(test.comments[0], /Milestone created/);
+        assert.match(test.comments[0], /Number: /);
+        assert.match(test.comments[0], /Control Issue not completed: Control Issue request changed/);
+        assert.doesNotMatch(test.comments[0], /Milestone request not completed/);
+    });
+    it('reports confirmed milestone even when request edits before initial receipt', async () => {
+        const test = mkApi();
+        const changed = { ...original(), title: '[create-milestone] Different release' };
+        test.snapshots.push(original(), original(), changed);
+        await assert.rejects(runMilestoneControl(15, test.api), /request changed/);
+        assert.equal(test.counts().creates, 1);
+        assert.equal(test.counts().closes, 0);
+        assert.match(test.comments[0], /Milestone created/);
+        assert.match(test.comments[0], /Control Issue not completed/);
+    });
     it('a lost PATCH response can be reconciled as completed from read-back', async () => {
         const t = mkApi();
         t.api.closeIssue = async () => { t.setState('closed'); throw new Error('connection dropped'); };

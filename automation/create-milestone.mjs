@@ -117,6 +117,11 @@ const milestoneReceipt = ({ milestone, created }) => `${RECEIPT_MARKER}\n`
     + 'Existing milestone metadata and Issue assignments were not modified.';
 const errorReceipt = error => `${RECEIPT_MARKER}\nMilestone request not completed: ${displayError(error)}\n\n`
     + 'Correct the request or permissions, then edit the Issue or run Create milestone with this Issue number. The Issue remains open.';
+const incompleteControlReceipt = (result, error) => milestoneReceipt(result)
+    + `\n\nControl Issue not completed: ${displayError(error)}\n`
+    + 'The milestone already exists; the control Issue remains open. '
+    + 'Correct the request or retry without creating a second milestone.';
+
 
 const confirmUnchangedControl = async (issueNumber, originalIssue, request, api) => {
     const latest = await api.getIssue(issueNumber);
@@ -188,7 +193,11 @@ export const runMilestoneControl = async (issueNumber, api) => {
             throw error;
         }
         if (current?.state === 'open') {
-            await api.upsertReceipt(issueNumber, errorReceipt(error));
+            // A milestone may already have been created successfully even if
+            // a later Issue edit or closure failed. Never call that creation a
+            // failure; report the exact partial outcome for a safe retry.
+            await api.upsertReceipt(issueNumber, result
+                ? incompleteControlReceipt(result, error) : errorReceipt(error));
         }
         throw error;
     }
