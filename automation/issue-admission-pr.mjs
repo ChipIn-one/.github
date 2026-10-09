@@ -6,7 +6,7 @@ import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { GitHubClient } from './github-metadata.mjs';
 import { readAdmission, assertFreshReceipt } from './issue-admission.mjs';
-import { readTaskIdentityMarker } from './development-link.mjs';
+import { readTaskIdentityMarker, readKBTaskOwnerMarker } from './development-link.mjs';
 
 const BRANCHES = new Map([
   ['ChipIn-one/chipin-frontend', 'dev'],
@@ -37,9 +37,7 @@ export function taskIdentitiesForPr(repository, pr) {
 
 export function selectedOwnerForPr(repository, body) {
   if (repository !== 'ChipIn-one/chipin-knowledge-base') return null;
-  const owners = String(body ?? '').match(/^Task owner:\s*@?([a-z\d-]+)\s*$/gim) ?? [];
-  if (owners.length !== 1) throw new Error('KB PR requires one explicit Task owner: @login line.');
-  return owners[0].split(':')[1].trim().replace(/^@/, '');
+  return readKBTaskOwnerMarker(body);
 }
 
 export async function preflightPr({ client, config, repository, number, expectedHeadSha, read = readAdmission }) {
