@@ -8,6 +8,7 @@ import {
   run as runIntake,
   validateClassification,
 } from './issue-intake.mjs';
+import { assertFreshReceipt, requiredOwner } from './issue-admission.mjs';
 import { GitHubClient } from './github-metadata.mjs';
 
 const REQUEST_SCHEMA_VERSION = 1;
@@ -23,6 +24,7 @@ const ALLOWED_REQUEST_KEYS = new Set([
   'issueType',
   'priority',
   'severity',
+  'owner',
 ]);
 
 const ALLOWED_QUEUED_KEYS = new Set([
@@ -84,6 +86,7 @@ export function parseRequestBody(body) {
       throw new Error(`Intake request field ${key} must be a non-empty string.`);
     }
   }
+  if (parsed.owner != null && (typeof parsed.owner !== 'string' || !parsed.owner.trim())) throw new Error('Request owner must be a GitHub login.');
   if (parsed.severity != null && typeof parsed.severity !== 'string') {
     throw new Error('Intake request field severity must be a string when present.');
   }
@@ -92,6 +95,7 @@ export function parseRequestBody(body) {
     issueType: parsed.issueType.trim(),
     priority: parsed.priority.trim(),
     severity: normalizeSeverity(parsed.severity),
+    ...(parsed.owner ? { owner: parsed.owner.trim() } : {}),
   };
 }
 
@@ -123,6 +127,7 @@ export function validateQueuedRequest(config, rawRequest) {
     issueType: typeof rawRequest?.issueType === 'string' ? rawRequest.issueType.trim() : '',
     priority: typeof rawRequest?.priority === 'string' ? rawRequest.priority.trim() : '',
     severity: normalizeSeverity(rawRequest?.severity),
+    ...(rawRequest?.owner ? { owner: rawRequest.owner } : {}),
   };
 
   try {
@@ -130,6 +135,8 @@ export function validateQueuedRequest(config, rawRequest) {
     if (!isSupportedIntakeRepository(target.repository)) {
       blockers.push('Target repository is outside canonical ChipIn intake scope: ' + target.repository + '.');
     }
+    try { requiredOwner(target.repository, request.owner ?? null); }
+    catch (error) { blockers.push(error.message); }
   } catch (error) {
     blockers.push(error.message);
   }
@@ -157,6 +164,7 @@ export function renderQueueComment(request) {
     issueType: request.issueType,
     priority: request.priority,
     severity: request.severity ?? 'none',
+    ...(request.owner ? { owner: request.owner } : {}),
   };
   return [
     '<!-- ' + QUEUE_MARKER,
@@ -234,6 +242,8 @@ export function validateRequestEvent({ event, config, trustedActors = TRUSTED_AC
       if (!isSupportedIntakeRepository(target.repository)) {
         blockers.push(`Target repository is outside canonical ChipIn intake scope: ${target.repository}.`);
       }
+      try { requiredOwner(target.repository, request.owner ?? null); }
+      catch (error) { blockers.push(error.message); }
     } catch (error) {
       blockers.push(error.message);
     }
@@ -273,6 +283,7 @@ export function buildIntakeArgs(request, outputPath) {
     request.priority,
     '--severity',
     request.severity ?? 'none',
+    ...(request.owner ? ['--owner', request.owner] : []),
     '--activate',
     'issue-intake-v1',
     '--output',
@@ -354,7 +365,7 @@ export async function applyCommand({
     const intake = await intakeRunner(buildIntakeArgs(request, intakeOutput), env);
     receipt.intake = intake;
     receipt.blockers.push(...(intake?.blockers ?? []));
-    if (intake?.action === 'complete' && receipt.blockers.length === 0) {
+    if (intake?.action === 'complete' && intake?.receipt?.status === 'INTAKE_COMPLETE' && intake?.issue === request.target && receipt.blockers.length === 0) {
       receipt.status = 'complete';
     } else if (receipt.blockers.length === 0) {
       receipt.blockers.push(`Canonical intake returned action ${intake?.action ?? 'unreadable'}, expected complete.`);
@@ -390,6 +401,8 @@ export function renderReceiptComment(receipt, queueCommentId = null) {
     lines.push(
       `- Read-back: Type \`${receipt.intake.receipt.issueType ?? 'missing'}\`, Priority \`${field(receipt, 'Priority') ?? 'missing'}\`, Severity \`${field(receipt, 'Severity') ?? 'none'}\`, Milestone \`${receipt.intake.receipt.milestone ?? 'none'}\``,
       `- Project #5: membership \`${receipt.intake.receipt.project?.membershipCount ?? 'unreadable'}\`, Status \`${receipt.intake.receipt.project?.status ?? 'unreadable'}\``,
+      `- Native assignees: \`${(receipt.intake.receipt.assignees ?? []).join(', ') || 'unreadable'}\`, required \`${receipt.intake.receipt.requiredAssignee ?? 'unreadable'}\``,
+      `- Admission: \`${receipt.intake.receipt.status ?? 'BLOCKED'}\`, revision \`${receipt.intake.receipt.revision ?? 'unreadable'}\`, read-back \`${receipt.intake.receipt.checkedAt ?? 'unreadable'}\``, 
     );
   }
   if (receipt?.intake?.applied?.length) {
@@ -406,7 +419,7 @@ export function renderReceiptComment(receipt, queueCommentId = null) {
     lines.push(
       '',
       '<!-- ' + RESULT_MARKER,
-      JSON.stringify({ queueCommentId, status: complete ? 'complete' : 'blocked' }),
+      JSON.stringify({ queueCommentId, status: complete ? 'complete' : 'blocked', intake: complete ? receipt.intake?.receipt : null }),
       '-->',
     );
   }
@@ -461,7 +474,7 @@ export async function drainQueue({
           );
           receipt.intake = intake;
           receipt.blockers.push(...(intake?.blockers ?? []));
-          if (intake?.action === 'complete' && receipt.blockers.length === 0) {
+          if (intake?.action === 'complete' && intake?.receipt?.status === 'INTAKE_COMPLETE' && intake?.issue === checked.request.target && receipt.blockers.length === 0) {
             receipt.status = 'complete';
           } else if (receipt.blockers.length === 0) {
             receipt.blockers.push('Canonical intake returned action ' + (intake?.action ?? 'unreadable') + ', expected complete.');
@@ -571,6 +584,7 @@ async function main(argv = process.argv.slice(2)) {
     if (receipt.status !== 'complete') {
       throw new Error(`Canonical intake bridge status is ${receipt.status ?? 'unreadable'}.`);
     }
+    assertFreshReceipt(receipt.intake?.receipt, { issue: receipt.request?.target });
     return;
   }
   throw new Error('Command must be validate, queue, drain, apply, render, or assert-success.');
