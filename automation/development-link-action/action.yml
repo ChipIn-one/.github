@@ -11,12 +11,27 @@ inputs:
     description: Optional explicit canonical task identity; must agree with any PR body marker.
     required: false
     default: ''
+  admission-token:
+    description: Read credential for org Issue Fields, Project #5 and native Issue read-back.
+    required: true
   token:
     description: GitHub token with permission to read the PR and write the Issue Development relationship.
     required: true
 runs:
   using: composite
   steps:
+    - name: Require canonical Issue admission before Development link
+      shell: bash
+      env:
+        CHIPIN_PR_REPOSITORY: ${{ inputs.repository }}
+        CHIPIN_PR_NUMBER: ${{ inputs.pull-request-number }}
+        GITHUB_TOKEN: ${{ inputs.admission-token }}
+      run: |
+        set -euo pipefail
+        test -n "${GITHUB_TOKEN:-}"
+        node "$GITHUB_ACTION_PATH/../issue-admission-pr.mjs" \
+          --repository "$CHIPIN_PR_REPOSITORY" --pr "$CHIPIN_PR_NUMBER" \
+          --config "$GITHUB_ACTION_PATH/../metadata-migration.config.json"
     - name: Reconcile native Development relationship
       shell: bash
       env:
