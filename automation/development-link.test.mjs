@@ -11,6 +11,7 @@ const REPOSITORY = "ChipIn-one/chipin-frontend";
 
 function makeClient({
   issueNumber = 7,
+  repository = REPOSITORY,
   pullRequests = [10],
   bodies = {},
   pullRequestBodySequence = {},
@@ -40,14 +41,14 @@ function makeClient({
         const sequencedBodies = pullRequestBodySequence[number] ?? [];
         return {
           repository: {
-            nameWithOwner: REPOSITORY,
+            nameWithOwner: repository,
             pullRequest: exists ? {
               id: ids.get(number),
               number,
               body: sequencedBodies[readCount]
                 ?? bodies[number]
-                ?? `Task identity: ${REPOSITORY}#${issueNumber}`,
-              repository: { nameWithOwner: REPOSITORY },
+                ?? `Task identity: ${repository}#${issueNumber}`,
+              repository: { nameWithOwner: repository },
             } : null,
           },
         };
@@ -58,17 +59,17 @@ function makeClient({
         const referenceNodes = [...links].map((linkedNumber) => ({
           id: ids.get(linkedNumber) ?? `PR_${linkedNumber}`,
           number: linkedNumber,
-          url: `https://github.com/${REPOSITORY}/pull/${linkedNumber}`,
-          repository: { nameWithOwner: REPOSITORY },
+          url: `https://github.com/${repository}/pull/${linkedNumber}`,
+          repository: { nameWithOwner: repository },
         }));
         return {
           repository: {
-            nameWithOwner: REPOSITORY,
+            nameWithOwner: repository,
             taskIssue: issueUnreadable ? null : {
               id: `ISSUE_${variables.issueNumber}`,
               number: variables.issueNumber,
-              url: `https://github.com/${REPOSITORY}/issues/${variables.issueNumber}`,
-              repository: { nameWithOwner: REPOSITORY },
+              url: `https://github.com/${repository}/issues/${variables.issueNumber}`,
+              repository: { nameWithOwner: repository },
               closedByPullRequestsReferences: relationshipUnreadable ? null : {
                 totalCount: referenceNodes.length,
                 pageInfo: { hasNextPage: false, endCursor: null },
@@ -78,9 +79,9 @@ function makeClient({
             implementationPr: ids.has(number) && !pullRequestUnreadable ? {
               id: ids.get(number),
               number,
-              url: `https://github.com/${REPOSITORY}/pull/${number}`,
-              body: stateBodies[number] ?? bodies[number] ?? `Task identity: ${REPOSITORY}#${issueNumber}`,
-              repository: { nameWithOwner: REPOSITORY },
+              url: `https://github.com/${repository}/pull/${number}`,
+              body: stateBodies[number] ?? bodies[number] ?? `Task identity: ${repository}#${issueNumber}`,
+              repository: { nameWithOwner: repository },
             } : null,
           },
         };
@@ -95,8 +96,8 @@ function makeClient({
             issue: {
               id: `ISSUE_${issueNumber}`,
               number: issueNumber,
-              url: `https://github.com/${REPOSITORY}/issues/${issueNumber}`,
-              repository: { nameWithOwner: REPOSITORY },
+              url: `https://github.com/${repository}/issues/${issueNumber}`,
+              repository: { nameWithOwner: repository },
             },
           },
         };
@@ -409,5 +410,54 @@ test('head/body drift during live Issue re-read blocks Development mutation', as
     }), /STALE: PR head, state, branch or body changed during live Issue admission/);
     assert.equal(mutationCalls(client).length, 0);
     assert.equal(reads, 2);
+  }
+});
+
+const KB_REPOSITORY = 'ChipIn-one/chipin-knowledge-base';
+function kbAdmittedClient(body) {
+  const client = makeClient({ repository: KB_REPOSITORY, bodies: { 10: body } });
+  client.request = async () => ({
+    number: 10, state: 'open', body,
+    head: { sha: ADMITTED_SHA, repo: { full_name: KB_REPOSITORY } },
+    base: { ref: 'master', repo: { full_name: KB_REPOSITORY } },
+  });
+  return client;
+}
+
+test('KB native link accepts exactly the owner that passed canonical admission', async () => {
+  const client = kbAdmittedClient('Task identity: ' + KB_REPOSITORY + '#7\\nTask owner: @syllik');
+  const outcome = await reconcileDevelopmentLink(client, {
+    repository: KB_REPOSITORY, pullRequestNumber: 10, expectedHeadSha: ADMITTED_SHA,
+    admission: {
+      ...allowedAdmission(async ({ selectedOwner }) => {
+        assert.equal(selectedOwner, 'syllik');
+        return { ...acceptedRead(), receipt: { ...acceptedRead().receipt, issue: KB_REPOSITORY + '#7' } };
+      }),
+    },
+  });
+  assert.equal(outcome.result, 'linked');
+  assert.equal(mutationCalls(client).length, 1);
+});
+
+test('KB owner edit, removal and duplicate marker block before native link mutation', async () => {
+  const bodies = [
+    'Task identity: ' + KB_REPOSITORY + '#7\\nTask owner: @another-owner',
+    'Task identity: ' + KB_REPOSITORY + '#7',
+    'Task identity: ' + KB_REPOSITORY + '#7\\nTask owner: @syllik\\nTask owner: @another-owner',
+  ];
+  for (const body of bodies) {
+    const client = kbAdmittedClient(body);
+    let admissionReads = 0;
+    await assert.rejects(() => reconcileDevelopmentLink(client, {
+      repository: KB_REPOSITORY, pullRequestNumber: 10, expectedHeadSha: ADMITTED_SHA,
+      admission: {
+        ...allowedAdmission(async () => {
+          admissionReads++;
+          return { ...acceptedRead(), receipt: { ...acceptedRead().receipt, issue: KB_REPOSITORY + '#7' } };
+        }),
+      },
+    }), /STALE: KB PR Task owner|STALE: KB PR requires one explicit Task owner/);
+    assert.equal(admissionReads, 0);
+    assert.equal(mutationCalls(client).length, 0);
   }
 });
