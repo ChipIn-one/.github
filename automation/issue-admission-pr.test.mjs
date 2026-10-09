@@ -77,11 +77,11 @@ test('final release boundary rechecks every admission receipt age', async () => 
   const start = owner();
   let calls = 0;
   try {
-    Date.now = () => calls > 0 ? start + 121_000 : start;
+    Date.now = () => calls > 1 ? start + 121_000 : start;
     const a = FE + '#71';
     const body = 'Included Issues: ' + a;
     const client = { request: async () => { calls++; return pr(FE, 'main', 'dev', body); } };
-    // The first PR read advances the fake clock; the stale Issue receipt must be rejected.
+    // First receipt passes at start; final PR re-read advances time and must expire it.
     await assert.rejects(() => preflightPr({ client, config: {}, repository: FE, number: 10,
       expectedHeadSha: 'a'.repeat(40), read: async () => ({ blockers: [], receipt: {
         contractVersion: 'chipin-issue-admission/v1', status: 'INTAKE_COMPLETE',
