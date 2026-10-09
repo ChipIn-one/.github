@@ -699,7 +699,7 @@ test('Project Status change at final receipt boundary blocks stale INTAKE_COMPLE
   assert.equal(result.action, 'incomplete');
   assert.equal(result.receipt.status, 'BLOCKED');
   assert.equal(result.receipt.project.status, 'In Progress');
-  assert.match(result.blockers.join(' '), /STALE: native Issue\\/metadata\\/Project/);
+  assert.ok(result.blockers.some(message => message.includes('STALE: native Issue/metadata/Project')));
 });
 
 test('late duplicate Project membership or missing final read denies writer completion', async () => {
@@ -747,5 +747,5 @@ test('Issue body drift after final Project read cannot admit older revision', as
   }));
   assert.equal(result.action, 'incomplete');
   assert.equal(result.receipt.status, 'BLOCKED');
-  assert.match(result.blockers.join(' '), /STALE: native Issue\\/metadata\\/Project/);
+  assert.ok(result.blockers.some(message => message.includes('STALE: native Issue/metadata/Project')));
 });
