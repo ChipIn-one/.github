@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { assertFreshReceipt } from './issue-admission.mjs';
 import {
   buildReconcilePlan,
   reserveCreateState,
@@ -289,6 +290,10 @@ test('Done is accepted only as a mirror of closed/completed Issue state', () => 
   });
   assert.deepEqual(final.blockers, []);
   assert.equal(final.receipt.project.status, 'Done');
+  assert.equal(final.receipt.contractVersion, 'chipin-terminal-reconciliation/v1');
+  assert.equal(final.receipt.status, 'TERMINAL_RECONCILED');
+  assert.throws(() => assertFreshReceipt(final.receipt, { issue: 'ChipIn-one/chipin-frontend#999' }),
+    /INTAKE_COMPLETE/);
 });
 
 test('Done on an open or not-planned Issue fails closed', () => {
