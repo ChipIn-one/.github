@@ -366,7 +366,7 @@ test('stale, cancelled, closed and expired Issues block before native Developmen
     await assert.rejects(() => reconcileDevelopmentLink(client, {
       repository: REPOSITORY, pullRequestNumber: 10, expectedHeadSha: ADMITTED_SHA,
       admission: allowedAdmission(async () => output),
-    }), /STALE|INTAKE_COMPLETE|admission receipt/);
+    }), /STALE|INTAKE_COMPLETE|admission receipt|Admission identity\/revision mismatch/);
     assert.equal(mutationCalls(client).length, 0);
   }
 });
