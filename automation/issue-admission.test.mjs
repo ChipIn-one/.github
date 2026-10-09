@@ -131,3 +131,67 @@ test('final writer receipt is only complete after positive final read-back', () 
   assert.deepEqual(r.blockers, []);
   assert.equal(r.receipt.status, 'INTAKE_COMPLETE');
 });
+
+test('full final read-back rejects Issue Fields, Project Status and native relationship drift', async () => {
+  const baseline = snapshot();
+  const cases = [
+    {
+      name: 'Priority changed without Issue updated_at changing',
+      lateIssue: {
+        ...baseline,
+        issueFieldValues: [{ issue_field_id: 1, single_select_option: { name: 'P2' } }],
+      },
+      lateProject: project(),
+    },
+    {
+      name: 'Project Status changed without Issue updated_at changing',
+      lateIssue: baseline,
+      lateProject: project(FE, 'Todo'),
+    },
+    {
+      name: 'native dependency changed without Issue updated_at changing',
+      lateIssue: {
+        ...baseline,
+        blockedBy: [{ repository: BE, number: 91, state: 'open' }],
+      },
+      lateProject: project(),
+    },
+    {
+      name: 'Project membership became ambiguous',
+      lateIssue: baseline,
+      lateProject: project(FE, 'Backlog', 2),
+    },
+  ];
+  for (const { name, lateIssue, lateProject } of cases) {
+    let issueReads = 0;
+    let projectReads = 0;
+    const result = await readAdmission({
+      client: {}, config, repository: FE, number: 71, overrides: {
+        readOrgSchema: async () => [],
+        readIssueSnapshot: async () => (++issueReads === 1 ? baseline : lateIssue),
+        readProjectSnapshot: async () => (++projectReads === 1 ? project() : lateProject),
+      },
+    });
+    assert.equal(issueReads, 2, name + ': native Issue must be read twice');
+    assert.equal(projectReads, 2, name + ': Project must be read twice');
+    assert.equal(result.receipt.status, 'BLOCKED', name);
+    assert.match(result.blockers.join('\n'), /STALE/, name);
+  }
+});
+
+test('second Project read failures cannot reuse an earlier positive snapshot', async () => {
+  let projectReads = 0;
+  const result = await readAdmission({
+    client: {}, config, repository: FE, number: 71, overrides: {
+      readOrgSchema: async () => [],
+      readIssueSnapshot: async () => snapshot(),
+      readProjectSnapshot: async () => {
+        if (++projectReads === 2) throw new Error('Project permission revoked');
+        return project();
+      },
+    },
+  });
+  assert.equal(projectReads, 2);
+  assert.equal(result.receipt.status, 'BLOCKED');
+  assert.match(result.blockers.join('\n'), /Second canonical read-back failed: Project permission revoked/);
+});
