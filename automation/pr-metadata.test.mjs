@@ -31,11 +31,14 @@ test("owner policy preserves manual and blocks ambiguity",()=>{
   assert.equal(chooseOwner({manual:["human"],issue:["approved"]}),null);
   assert.equal(chooseOwner({issue:["approved"],approved:"other"}),"approved");
   assert.throws(()=>chooseOwner({issue:["a","b"]}),/OWNER_POLICY/);
+  assert.equal(chooseOwner({issue:["syllik","other-human"],approved:"syllik"}),"syllik");
+  assert.throws(()=>chooseOwner({issue:["other1","other2"],approved:"syllik"}),/OWNER_POLICY/);
   assert.throws(()=>chooseOwner({author:"author"}),/OWNER_POLICY/);
   assert.equal(chooseOwner({author:"author",allowAuthor:true}),"author");
 });
 test("reviewer policy differs from assignment and forbids self-review",()=>{
   assert.equal(chooseReviewer({manual:["human"],approved:[],author:"owner"}),null);
+  assert.equal(chooseReviewer({manual:["approved-review-team"],approved:[],author:"owner"}),null);
   assert.throws(()=>chooseReviewer({approved:[],author:"owner"}),/REVIEWER_POLICY/);
   assert.throws(()=>chooseReviewer({approved:["owner"],author:"owner"}),/REVIEWER_POLICY/);
   assert.throws(()=>chooseReviewer({approved:["a","b"],author:"owner"}),/REVIEWER_POLICY/);
