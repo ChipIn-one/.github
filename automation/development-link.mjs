@@ -316,6 +316,7 @@ export async function reconcileDevelopmentLink(client, {
     );
   }
 
+  let admittedPRBody = null;
   if (expectedHeadSha !== null) {
     if (!/^[a-f0-9]{40}$/.test(expectedHeadSha)) throw new Error('Trusted PR head SHA must be exactly 40 lowercase hex characters.');
     // Before any Development mutation, re-read the trusted head/branches/body;
@@ -337,6 +338,7 @@ export async function reconcileDevelopmentLink(client, {
     if (!admittedMarker || admittedMarker.canonical !== task.canonical) {
       throw new Error('STALE: PR Task identity changed or disappeared after canonical admission.');
     }
+    admittedPRBody = current.body;
   }
 
   if (expectedHeadSha !== null) {
@@ -374,7 +376,7 @@ export async function reconcileDevelopmentLink(client, {
           'ChipIn-one/chipin-backend': 'develop',
           'ChipIn-one/chipin-knowledge-base': 'master',
         })[repository] ||
-        afterAdmission?.body !== current.body) {
+        afterAdmission?.body !== admittedPRBody) {
       throw new Error('STALE: PR head, state, branch or body changed during live Issue admission.');
     }
   }
