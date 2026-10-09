@@ -90,7 +90,15 @@ async function main() {
   if(!readToken||!writeToken) throw new Error("ORG_PROJECT_CREDENTIAL: dedicated org secrets required");
   const config=JSON.parse(await readFile(new URL("./metadata-migration.config.json",import.meta.url),"utf8"));
   const reader=new GitHubClient(readToken),writer=new GitHubClient(writeToken);
-  await reconcileOpenPRs({reader,writer,config});
+  if(process.env.CHIPIN_PR_NUMBER) {
+    const number=Number(process.env.CHIPIN_PR_NUMBER);
+    if(!Number.isInteger(number)||number<=0) throw new Error("Invalid explicit FE PR number");
+    const pr=await reader.request(ROOT+"/pulls/"+number);
+    const receipt=await reconcileProjectPR({reader,writer,config,number,expectedSha:pr?.head?.sha});
+    console.log(JSON.stringify(receipt,null,2));
+  } else {
+    await reconcileOpenPRs({reader,writer,config});
+  }
 }
 if(process.argv[1]&&pathToFileURL(resolve(process.argv[1])).href===import.meta.url)
   main().catch(e=>{console.error("ORG PROJECT BLOCKED: "+e.message);process.exitCode=1;});
