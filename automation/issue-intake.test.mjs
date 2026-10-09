@@ -639,3 +639,24 @@ test('closed/completed keeps its separate terminal Project Done reconciliation p
   assert.deepEqual(plan.operations, []);
   assert.equal(plan.action, 'noop');
 });
+
+test('PR-shaped, mismatched and unreadable native Issue identities cannot plan writes', () => {
+  const variants = [
+    snapshot => { snapshot.issue.pull_request = { url: 'https://api.github.com/repos/ChipIn-one/chipin-frontend/pulls/999' }; },
+    snapshot => { snapshot.issue.number = 1000; },
+    snapshot => { snapshot.issue.repository_url = 'https://api.github.com/repos/ChipIn-one/chipin-backend'; },
+    snapshot => { snapshot.issue.node_id = null; },
+  ];
+  for (const mutate of variants) {
+    const snapshot = issueSnapshot();
+    snapshot.issue.assignees = [];
+    mutate(snapshot);
+    const plan = buildReconcilePlan({
+      config, repository: 'ChipIn-one/chipin-frontend', number: 999,
+      classification, snapshot, project: project(),
+    });
+    assert.equal(plan.action, 'incomplete');
+    assert.deepEqual(plan.operations, []);
+    assert.match(plan.blockers.join(' '), /Native Issue identity.*PR-shaped/);
+  }
+});
