@@ -112,12 +112,20 @@ function projectStatusConsistencyBlockers(config, snapshot, status, prefix = '')
 export function buildReconcilePlan({ config, repository, number, classification, snapshot, project, selectedOwner = null }) {
   const operations = [];
   const blockers = [];
-  // Never plan writes for cancelled/unreadable Issues. Closed/completed is a
-  // distinct terminal reconciliation path; it cannot produce INTAKE_COMPLETE.
-  const state = snapshot?.issue?.state;
-  const reason = snapshot?.issue?.state_reason;
-  const writable = state === 'open' || (state === 'closed' && reason === 'completed');
-  if (!writable) blockers.push('Native Issue is not open or closed/completed; refusing all intake mutations.');
+  // GitHub /issues/{number} also returns PR-shaped resources. Verify exact
+  // native Issue identity BEFORE planning any metadata, owner or Project writes.
+  const native = snapshot?.issue;
+  const validIdentity = native?.number === number &&
+    native?.repository_url === 'https://api.github.com/repos/' + repository &&
+    typeof native?.node_id === 'string' && native.node_id.length > 0 &&
+    !native.pull_request;
+  if (!validIdentity) blockers.push('Native Issue identity is missing, mismatched or PR-shaped; refusing all intake mutations.');
+  // Closed/completed is a separate terminal reconciliation path, never admission.
+  const state = native?.state;
+  const reason = native?.state_reason;
+  const validState = state === 'open' || (state === 'closed' && reason === 'completed');
+  if (!validState) blockers.push('Native Issue is not open or closed/completed; refusing all intake mutations.');
+  const writable = validIdentity && validState;
   if (!SUPPORTED.has(repository)) blockers.push('Repository is outside ChipIn intake scope: ' + repository + '.');
   const observed = observedMetadata(config, snapshot);
   blockers.push(...observed.blockers);
