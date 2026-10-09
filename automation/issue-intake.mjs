@@ -252,10 +252,12 @@ export function verifyFinalState({ config, repository, number, classification, s
     blockers,
     receipt: {
       ...admission.receipt,
+      status: blockers.length ? 'BLOCKED' : 'INTAKE_COMPLETE',
+      blockers: [...blockers],
       issueUrl: snapshot?.issue?.html_url || snapshot?.issue?.url || null,
       issueType: observed.issueType,
       fields: observed.fields,
-      project: { number: config.project.number, membershipCount: memberships.length, status },
+      project: { number: config.project.number, itemId: memberships.length === 1 ? memberships[0].id : null, membershipCount: memberships.length, status },
       milestone: snapshot?.issue?.milestone?.title ?? null,
       relationships: {
         blockedBy: snapshot?.blockedBy || [],
