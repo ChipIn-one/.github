@@ -3,7 +3,7 @@
   "project": 5,
   "ownerPolicy": {
     "allowIssueOwner": true,
-    "implementationOwner": null,
+    "implementationOwner": "syllik",
     "releaseOwner": null,
     "allowAuthorFallback": false
   },
