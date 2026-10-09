@@ -158,3 +158,6 @@ test("native single-Issue contract detects stale identity and missing read-back"
   size=1;
   assert.equal(await assertSingleNativeIssue(client,10,5,true),true);
 });
+
+// Keep the audited failure reproduction in the default org test suite.
+import "../evidence/pr54-ci-gate-reproduction.test.mjs";
