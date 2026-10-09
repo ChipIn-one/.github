@@ -120,7 +120,7 @@ test('fully explicit intake writes missing metadata, membership and Status, then
       issueReads += 1;
       return issueReads === 1 ? issueSnapshot() : fullIssue();
     },
-    readProjectSnapshot: async () => projects[projectReads++],
+    readProjectSnapshot: async () => projects[Math.min(projectReads++, projects.length - 1)],
     writeIssueMetadata: async () => { metadataWrites += 1; },
     addProjectMembership: async () => { membershipWrites += 1; return 'ITEM'; },
     initializeProjectStatus: async () => { statusWrites += 1; },
@@ -162,7 +162,7 @@ test('project read-back tolerates indexing beyond the legacy six-read window and
       issueReads += 1;
       return issueReads === 1 ? issueSnapshot() : fullIssue();
     },
-    readProjectSnapshot: async () => projects[projectReads++],
+    readProjectSnapshot: async () => projects[Math.min(projectReads++, projects.length - 1)],
     writeIssueMetadata: async () => {},
     addProjectMembership: async () => { membershipWrites += 1; return 'ITEM'; },
     initializeProjectStatus: async (_client, _config, _project, itemId) => {
@@ -204,7 +204,7 @@ test('late Status initialization gets its own read-back after the final membersh
       issueReads += 1;
       return issueReads === 1 ? issueSnapshot() : fullIssue();
     },
-    readProjectSnapshot: async () => projects[projectReads++],
+    readProjectSnapshot: async () => projects[Math.min(projectReads++, projects.length - 1)],
     writeIssueMetadata: async () => {},
     addProjectMembership: async () => 'ITEM',
     initializeProjectStatus: async () => { statusWrites += 1; },
@@ -242,7 +242,7 @@ test('stale Project snapshot never overwrites an existing human-owned Status', a
       issueReads += 1;
       return issueReads === 1 ? issueSnapshot() : fullIssue();
     },
-    readProjectSnapshot: async () => projects[projectReads++],
+    readProjectSnapshot: async () => projects[Math.min(projectReads++, projects.length - 1)],
     writeIssueMetadata: async () => {},
     addProjectMembership: async () => { membershipWrites += 1; return 'ITEM'; },
     initializeProjectStatus: async () => { statusWrites += 1; },
@@ -659,4 +659,93 @@ test('PR-shaped, mismatched and unreadable native Issue identities cannot plan w
     assert.deepEqual(plan.operations, []);
     assert.match(plan.blockers.join(' '), /Native Issue identity.*PR-shaped/);
   }
+});
+
+test('final intake read-back revalidates native Issue and Project revision before INTAKE_COMPLETE', async () => {
+  const stable = project({ items: [{
+    id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Backlog',
+  }] });
+  let issueReads = 0;
+  let projectReads = 0;
+  const result = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, {
+    config, client: {},
+    readGlobalContext: async () => ({ project: stable, blockers: [] }),
+    readIssueSnapshot: async () => { issueReads++; return fullIssue(); },
+    readProjectSnapshot: async () => { projectReads++; return stable; },
+    writeFile: async () => {},
+  }));
+  assert.equal(result.action, 'complete');
+  assert.equal(result.receipt.status, 'INTAKE_COMPLETE');
+  assert.equal(result.receipt.project.status, 'Backlog');
+  assert.ok(issueReads >= 4, 'final confirmation must reread the native Issue');
+  assert.ok(projectReads >= 2, 'final confirmation must reread Project #5');
+});
+
+test('Project Status change at final receipt boundary blocks stale INTAKE_COMPLETE', async () => {
+  const original = project({ items: [{
+    id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Backlog',
+  }] });
+  const changed = project({ items: [{
+    id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'In Progress',
+  }] });
+  let projectReads = 0;
+  const result = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, {
+    config, client: {},
+    readGlobalContext: async () => ({ project: original, blockers: [] }),
+    readIssueSnapshot: async () => fullIssue(),
+    readProjectSnapshot: async () => ++projectReads === 1 ? original : changed,
+    writeFile: async () => {},
+  }));
+  assert.equal(result.action, 'incomplete');
+  assert.equal(result.receipt.status, 'BLOCKED');
+  assert.equal(result.receipt.project.status, 'In Progress');
+  assert.match(result.blockers.join(' '), /STALE: native Issue\\/metadata\\/Project/);
+});
+
+test('late duplicate Project membership or missing final read denies writer completion', async () => {
+  const original = project({ items: [{
+    id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Backlog',
+  }] });
+  const duplicate = project({ items: [
+    { id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Backlog' },
+    { id: 'ITEM2', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Backlog' },
+  ] });
+  for (const failure of ['duplicate', 'unreadable']) {
+    let projectReads = 0;
+    const result = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, {
+      config, client: {},
+      readGlobalContext: async () => ({ project: original, blockers: [] }),
+      readIssueSnapshot: async () => fullIssue(),
+      readProjectSnapshot: async () => {
+        if (++projectReads === 1) return original;
+        if (failure === 'duplicate') return duplicate;
+        throw new Error('Project #5 API 403');
+      },
+      writeFile: async () => {},
+    }));
+    assert.equal(result.action, 'incomplete');
+    assert.notEqual(result.receipt?.status, 'INTAKE_COMPLETE');
+    assert.match(result.blockers.join(' '), failure === 'duplicate' ? /membership count 2/ : /403/);
+  }
+});
+
+test('Issue body drift after final Project read cannot admit older revision', async () => {
+  const stable = project({ items: [{
+    id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Backlog',
+  }] });
+  let issueReads = 0;
+  const result = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, {
+    config, client: {},
+    readGlobalContext: async () => ({ project: stable, blockers: [] }),
+    readIssueSnapshot: async () => {
+      const issue = fullIssue();
+      if (++issueReads >= 4) issue.issue.body += '\\nExtra human-owned acceptance detail.';
+      return issue;
+    },
+    readProjectSnapshot: async () => stable,
+    writeFile: async () => {},
+  }));
+  assert.equal(result.action, 'incomplete');
+  assert.equal(result.receipt.status, 'BLOCKED');
+  assert.match(result.blockers.join(' '), /STALE: native Issue\\/metadata\\/Project/);
 });
