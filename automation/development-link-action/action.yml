@@ -40,7 +40,7 @@ runs:
           --output "$RUNNER_TEMP/chipin-link-admission.json"
         # Link only the same exact admitted Issue; the later GitHub PR reread
         # still checks that the native Task identity has not changed.
-        node -e 'const r=require(process.argv[1]); if(r.receipts.length!==1 || !r.receipts[0].revision || !r.receipts[0].requiredAssignee)process.exit(2); const c=r.receipts[0]; for(const [k,v] of Object.entries({task_identity:c.issue,issue_revision:c.revision,required_owner:c.requiredAssignee}))process.stdout.write(k+"="+v+"\\n")' \
+        node -e 'const r=require(process.argv[1]); if(r.receipts.length!==1 || !r.receipts[0].revision || !r.receipts[0].requiredAssignee)process.exit(2); const c=r.receipts[0]; for(const [k,v] of Object.entries({task_identity:c.issue,issue_revision:c.revision,required_owner:c.requiredAssignee}))process.stdout.write(k+"="+v+"\n")' \
           "$RUNNER_TEMP/chipin-link-admission.json" >> "$GITHUB_OUTPUT"
     - name: Reconcile native Development relationship
       shell: bash
