@@ -387,3 +387,27 @@ test("the only write operation is addCloseIssueReferences", async () => {
   assert.match(writes[0].query, /addCloseIssueReferences/u);
   assert.doesNotMatch(writes[0].query, /closeIssue|reopen|updateIssue|updateProject|ProjectV2/u);
 });
+
+test('head/body drift during live Issue re-read blocks Development mutation', async () => {
+  for (const changed of ['head', 'body', 'state']) {
+    const client = admittedClient();
+    const originalRead = client.request;
+    let reads = 0;
+    client.request = async (...args) => {
+      const pr = await originalRead(...args);
+      if (++reads === 2) {
+        if (changed === 'head') pr.head.sha = 'b'.repeat(40);
+        if (changed === 'body') pr.body += '\\nChanged after admission';
+        if (changed === 'state') pr.state = 'closed';
+      }
+      return pr;
+    };
+    await assert.rejects(() => reconcileDevelopmentLink(client, {
+      repository: REPOSITORY, pullRequestNumber: 10,
+      expectedHeadSha: ADMITTED_SHA,
+      admission: allowedAdmission(async () => acceptedRead()),
+    }), /STALE: PR head, state, branch or body changed during live Issue admission/);
+    assert.equal(mutationCalls(client).length, 0);
+    assert.equal(reads, 2);
+  }
+});
