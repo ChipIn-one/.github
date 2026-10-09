@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Optional single FE pull request number; empty reconciles all labelled open PRs
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -28,6 +33,7 @@ jobs:
           package-manager-cache: false
       - name: Verify FE PR admission and reconcile org-only Project membership
         env:
+          CHIPIN_PR_NUMBER: ${{ inputs.pr_number || '' }}
           CHIPIN_DEV_READ_TOKEN: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
           CHIPIN_ISSUE_WRITE_TOKEN: ${{ secrets.CHIPIN_ISSUE_WRITE_TOKEN }}
         run: node automation/pr-project-writer.mjs
