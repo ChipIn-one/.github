@@ -537,10 +537,45 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
         if (!result.blockers.length) {
           try {
             snapshot = await readIssue(client, target.repository, target.number);
-            const final = verifyFinalState({ config, repository: target.repository, number: target.number, classification: checked.classification, snapshot, project, selectedOwner: args.owner });
-            result.receipt = final.receipt;
-            result.blockers.push(...final.blockers);
-          } catch (error) { result.blockers.push('Final read-back failed: ' + error.message); }
+            const first = verifyFinalState({
+              config, repository: target.repository, number: target.number,
+              classification: checked.classification, snapshot, project, selectedOwner: args.owner,
+            });
+            result.receipt = first.receipt;
+            result.blockers.push(...first.blockers);
+            if (!result.blockers.length) {
+              // A Project read performed before the final Issue fetch can become stale.
+              // Re-read BOTH authorities and require one unchanged combined revision.
+              // Never expose an INTAKE_COMPLETE writer receipt on divergent read-back.
+              const [latestIssue, latestProject] = await Promise.all([
+                readIssue(client, target.repository, target.number),
+                readProject(client, config),
+              ]);
+              const confirmed = verifyFinalState({
+                config, repository: target.repository, number: target.number,
+                classification: checked.classification, snapshot: latestIssue,
+                project: latestProject, selectedOwner: args.owner,
+              });
+              const blockers = [
+                ...verifyProjectSnapshot(config, latestProject),
+                ...confirmed.blockers,
+              ];
+              if (confirmed.receipt.revision !== first.receipt.revision) {
+                blockers.push('STALE: native Issue/metadata/Project changed during final intake read-back.');
+              }
+              result.blockers.push(...blockers);
+              result.receipt = {
+                ...confirmed.receipt,
+                status: blockers.length ? 'BLOCKED' : confirmed.receipt.status,
+                blockers,
+              };
+            }
+          } catch (error) {
+            result.blockers.push('Final read-back failed: ' + error.message);
+            if (result.receipt) {
+              result.receipt = { ...result.receipt, status: 'BLOCKED', blockers: [...result.blockers] };
+            }
+          }
         }
         result.action = result.blockers.length ? 'incomplete' : 'complete';
       }
