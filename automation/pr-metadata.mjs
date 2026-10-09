@@ -246,7 +246,7 @@ export async function requiredShaCIGreen(client, pr) {
   return {ok: blockers.length === 0, blockers, branch, headSha: sha,
     required: checks.map(x => x.context)};
 }
-export async function reconcilePR(client,policy,number,expectedSha,{admissionClient,admissionConfig}={}) {
+export async function reconcilePR(client,policy,number,expectedSha,{admissionClient,admissionConfig,admit=preflightPr}={}) {
   if (policy?.repository!==REPO || policy.project!==PROJECT || policy.ownerPolicy?.allowIssueOwner!==true
       || !Array.isArray(policy.reviewerPolicy?.implementation) || !Array.isArray(policy.reviewerPolicy?.release))
     throw new Error("CONFIG: explicit FE Project #5, owner and reviewer policy required");
@@ -260,7 +260,7 @@ export async function reconcilePR(client,policy,number,expectedSha,{admissionCli
   // Org #53 is the canonical authority; PR metadata is never an alternative
   // intake writer, and must not mutate Development/PR metadata without admission.
   if (!admissionClient || !admissionConfig) throw new Error("ADMISSION: read-only org credential and canonical config required");
-  const admitted=await preflightPr({
+  const admitted=await admit({
     client:admissionClient,config:admissionConfig,repository:REPO,
     number:n,expectedHeadSha:expectedSha
   });
