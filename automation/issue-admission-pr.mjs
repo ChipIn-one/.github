@@ -65,6 +65,9 @@ export async function preflightPr({ client, config, repository, number, expected
     base: { ref: value?.base?.ref, repo: value?.base?.repo?.full_name },
   });
   if (identity(latest) !== identity(pr)) throw new Error('STALE: PR identity/body/owner or branch changed during admission.');
+  // A slow FE release can read up to 30 Issues: early receipts may have
+  // expired while later Issues were being checked even if each passed alone.
+  for (const receipt of receipts) assertFreshReceipt(receipt, { issue: receipt.issue });
   return { contractVersion: 'chipin-pr-admission/v1', pr: repository + '#' + number,
     prHeadSha: pr.head.sha, verifiedAt: new Date().toISOString(), status: 'INTAKE_COMPLETE', receipts };
 }

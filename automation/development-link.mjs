@@ -272,6 +272,7 @@ export async function reconcileDevelopmentLink(client, {
   repository,
   pullRequestNumber,
   explicitTaskIdentity = null,
+  expectedHeadSha = null,
 }) {
   assertSupportedRepository(repository);
   const prNumber = parsePositiveInteger(pullRequestNumber, "Pull request number");
@@ -310,6 +311,29 @@ export async function reconcileDevelopmentLink(client, {
     throw new Error(
       `Task identity changed while reconciling ${repository}#${prNumber}: ${task.canonical} -> ${revalidatedTask.canonical}.`,
     );
+  }
+
+  if (expectedHeadSha !== null) {
+    if (!/^[a-f0-9]{40}$/.test(expectedHeadSha)) throw new Error('Trusted PR head SHA must be exactly 40 lowercase hex characters.');
+    // Before any Development mutation, re-read the trusted head/branches/body;
+    // the PR node ID alone survives pushes and cannot prove current admission.
+    let current;
+    try { current = await client.request('/repos/' + repository + '/pulls/' + prNumber); }
+    catch (error) { throw new Error('Current PR head before Development mutation is unreadable: ' + error.message); }
+    if (current?.number !== prNumber || current?.state !== 'open' ||
+        current?.head?.sha !== expectedHeadSha || current?.head?.repo?.full_name !== repository ||
+        current?.base?.repo?.full_name !== repository ||
+        current?.base?.ref !== ({
+          'ChipIn-one/chipin-frontend': 'dev',
+          'ChipIn-one/chipin-backend': 'develop',
+          'ChipIn-one/chipin-knowledge-base': 'master',
+        })[repository]) {
+      throw new Error('STALE: PR head SHA/state/branch changed after canonical admission.');
+    }
+    const admittedMarker = readTaskIdentityMarker(current.body);
+    if (!admittedMarker || admittedMarker.canonical !== task.canonical) {
+      throw new Error('STALE: PR Task identity changed or disappeared after canonical admission.');
+    }
   }
 
   if (before.linked) {
@@ -384,6 +408,7 @@ async function main() {
   const repository = args.get("--repository") || process.env.CHIPIN_PR_REPOSITORY;
   const pullRequestNumber = args.get("--pull-request") || process.env.CHIPIN_PR_NUMBER;
   const explicitTaskIdentity = args.get("--task") || process.env.CHIPIN_TASK_IDENTITY || null;
+  const expectedHeadSha = args.get("--expected-head-sha") || process.env.CHIPIN_EXPECTED_HEAD_SHA || null;
   if (!repository) throw new Error("PR repository is required.");
   if (!pullRequestNumber) throw new Error("Pull request number is required.");
 
@@ -392,6 +417,7 @@ async function main() {
     repository,
     pullRequestNumber,
     explicitTaskIdentity,
+    expectedHeadSha,
   });
   process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
 }

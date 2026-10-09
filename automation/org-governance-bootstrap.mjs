@@ -27,7 +27,7 @@ export function bootstrapAllowsPath(path) {
 
 export function verifyGovernanceBootstrap({ issue, pr, files, expectedHead }) {
   const blockers = [];
-  if (issue?.number !== BOOTSTRAP_ISSUE || issue?.user?.login !== 'syllik' ||
+  if (issue?.number !== BOOTSTRAP_ISSUE || issue?.state !== 'open' || issue?.user?.login !== 'syllik' ||
       !Array.isArray(issue?.assignees) || !issue.assignees.some(u => u?.login === 'syllik')) {
     blockers.push('Governance bootstrap requires exact .github#53, opened and native-assigned to syllik.');
   }

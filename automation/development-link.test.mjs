@@ -163,6 +163,20 @@ test("task identity drift on the final PR reread fails closed", async () => {
   );
 });
 
+test('link mutation blocks stale PR head after a positive preflight', async () => {
+  const client = makeClient();
+  client.request = async () => ({
+    number: 10, state: 'open', body: `Task identity: ${REPOSITORY}#7`,
+    head: { sha: 'b'.repeat(40), repo: { full_name: REPOSITORY } },
+    base: { ref: 'dev', repo: { full_name: REPOSITORY } },
+  });
+  await assert.rejects(() => reconcileDevelopmentLink(client, {
+    repository: REPOSITORY, pullRequestNumber: 10,
+    expectedHeadSha: 'a'.repeat(40),
+  }), /STALE: PR head SHA/);
+  assert.equal(mutationCalls(client).length, 0);
+});
+
 test("already linked is an idempotent noop success", async () => {
   const client = makeClient({ linkedPullRequests: [10] });
   const receipt = await reconcileDevelopmentLink(client, {

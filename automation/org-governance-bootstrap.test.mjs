@@ -4,7 +4,7 @@ import { bootstrapAllowsPath, verifyGovernanceBootstrap } from './org-governance
 
 const body = '## Problem\nAgent task admission is bypassable and needs strong governance.\n\n## Outcome\nA bounded canonical intake and read-back contract is introduced.\n\n## Acceptance\n- [ ] Live guards refuse missing Issue admission.';
 const SHA = 'a'.repeat(40);
-const ISSUE = { number: 53, user: { login: 'syllik' }, assignees: [{ login: 'syllik' }], title: 'Canonical issue intake governance contract', body };
+const ISSUE = { number: 53, state: 'open', user: { login: 'syllik' }, assignees: [{ login: 'syllik' }], title: 'Canonical issue intake governance contract', body };
 const PR = { number: 57, state: 'open', user: { login: 'syllik' },
   base: { ref: 'master', repo: { full_name: 'ChipIn-one/.github' } },
   head: { ref: 'feat/53-canonical-admission', repo: { full_name: 'ChipIn-one/.github' }, sha: SHA } };
@@ -22,6 +22,7 @@ test('only exact human-owned org governance #53 PR #57 at current head is a boun
 test('other org issue, writer, branch, actor, stale SHA are denied', () => {
   for (const [issue, pr, sha] of [
     [{ ...ISSUE, number: 54 }, PR, SHA],
+    [{ ...ISSUE, state: 'closed', state_reason: 'not_planned' }, PR, SHA],
     [{ ...ISSUE, assignees: [] }, PR, SHA],
     [ISSUE, { ...PR, number: 58 }, SHA],
     [ISSUE, { ...PR, head: { ...PR.head, ref: 'feat/something-else' } }, SHA],

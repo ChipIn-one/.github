@@ -72,6 +72,25 @@ test('PR body edits without a head commit cannot swap an admitted Issue', async 
   assert.equal(calls, 2);
 });
 
+test('final release boundary rechecks every admission receipt age', async () => {
+  const owner = Date.now;
+  const start = owner();
+  let calls = 0;
+  try {
+    Date.now = () => calls > 0 ? start + 121_000 : start;
+    const a = FE + '#71';
+    const body = 'Included Issues: ' + a;
+    const client = { request: async () => { calls++; return pr(FE, 'main', 'dev', body); } };
+    // The first PR read advances the fake clock; the stale Issue receipt must be rejected.
+    await assert.rejects(() => preflightPr({ client, config: {}, repository: FE, number: 10,
+      expectedHeadSha: 'a'.repeat(40), read: async () => ({ blockers: [], receipt: {
+        contractVersion: 'chipin-issue-admission/v1', status: 'INTAKE_COMPLETE',
+        issue: a, revision: 'rev', checkedAt: new Date(start).toISOString(), blockers: [],
+      } }),
+    }), /STALE admission receipt/);
+  } finally { Date.now = owner; }
+});
+
 test('current PR SHA is mandatory and a stale event blocks before metadata read', async () => {
   let reads = 0;
   const input = {

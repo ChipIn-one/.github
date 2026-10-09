@@ -48,6 +48,7 @@ runs:
         CHIPIN_PR_REPOSITORY: ${{ inputs.repository }}
         CHIPIN_PR_NUMBER: ${{ inputs.pull-request-number }}
         CHIPIN_TASK_IDENTITY: ${{ steps.admission.outputs.task_identity }}
+        CHIPIN_EXPECTED_HEAD_SHA: ${{ inputs.expected-head-sha }}
         CHIPIN_REQUESTED_TASK_IDENTITY: ${{ inputs.task-identity }}
         GITHUB_TOKEN: ${{ inputs.token }}
       run: |
