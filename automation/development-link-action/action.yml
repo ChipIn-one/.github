@@ -11,17 +11,53 @@ inputs:
     description: Optional explicit canonical task identity; must agree with any PR body marker.
     required: false
     default: ''
+  expected-head-sha:
+    description: Trusted PR head SHA; manual dispatch must provide it explicitly.
+    required: true
+  admission-token:
+    description: Read credential for org Issue Fields, Project #5 and native Issue read-back.
+    required: true
   token:
     description: GitHub token with permission to read the PR and write the Issue Development relationship.
     required: true
 runs:
   using: composite
   steps:
+    - name: Require canonical Issue admission before Development link
+      id: admission
+      shell: bash
+      env:
+        CHIPIN_PR_REPOSITORY: ${{ inputs.repository }}
+        CHIPIN_PR_NUMBER: ${{ inputs.pull-request-number }}
+        EXPECTED_HEAD_SHA: ${{ inputs.expected-head-sha }}
+        GITHUB_TOKEN: ${{ inputs.admission-token }}
+      run: |
+        set -euo pipefail
+        test -n "${GITHUB_TOKEN:-}"
+        node "$GITHUB_ACTION_PATH/../issue-admission-pr.mjs" \
+          --repository "$CHIPIN_PR_REPOSITORY" --pr "$CHIPIN_PR_NUMBER" --expected-head-sha "$EXPECTED_HEAD_SHA" \
+          --config "$GITHUB_ACTION_PATH/../metadata-migration.config.json" \
+          --output "$RUNNER_TEMP/chipin-link-admission.json"
+        # Link only the same exact admitted Issue; the later GitHub PR reread
+        # still checks that the native Task identity has not changed.
+        node -e 'const r=require(process.argv[1]); if(r.receipts.length!==1 || !r.receipts[0].revision || !r.receipts[0].requiredAssignee)process.exit(2); const c=r.receipts[0]; for(const [k,v] of Object.entries({task_identity:c.issue,issue_revision:c.revision,required_owner:c.requiredAssignee}))process.stdout.write(k+"="+v+"\n")' \
+          "$RUNNER_TEMP/chipin-link-admission.json" >> "$GITHUB_OUTPUT"
     - name: Reconcile native Development relationship
       shell: bash
       env:
         CHIPIN_PR_REPOSITORY: ${{ inputs.repository }}
         CHIPIN_PR_NUMBER: ${{ inputs.pull-request-number }}
-        CHIPIN_TASK_IDENTITY: ${{ inputs.task-identity }}
+        CHIPIN_TASK_IDENTITY: ${{ steps.admission.outputs.task_identity }}
+        CHIPIN_EXPECTED_HEAD_SHA: ${{ inputs.expected-head-sha }}
+        CHIPIN_EXPECTED_ADMISSION_REVISION: ${{ steps.admission.outputs.issue_revision }}
+        CHIPIN_SELECTED_OWNER: ${{ steps.admission.outputs.required_owner }}
+        CHIPIN_ADMISSION_TOKEN: ${{ inputs.admission-token }}
+        CHIPIN_REQUESTED_TASK_IDENTITY: ${{ inputs.task-identity }}
         GITHUB_TOKEN: ${{ inputs.token }}
-      run: node "$GITHUB_ACTION_PATH/../development-link.mjs"
+      run: |
+        set -euo pipefail
+        if [[ -n "$CHIPIN_REQUESTED_TASK_IDENTITY" && "$CHIPIN_REQUESTED_TASK_IDENTITY" != "$CHIPIN_TASK_IDENTITY" ]]; then
+          echo 'Explicit workflow task identity conflicts with admitted Issue.' >&2
+          exit 2
+        fi
+        node "$GITHUB_ACTION_PATH/../development-link.mjs"

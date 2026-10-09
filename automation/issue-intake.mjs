@@ -9,6 +9,8 @@ import {
   verifyOrgSchema,
   verifyProjectSnapshot,
 } from './github-metadata.mjs';
+import { createHash } from 'node:crypto';
+import { requiredOwner, validateBody, verifyAdmission, ADMISSION_CONTRACT } from './issue-admission.mjs';
 
 const APPLY_ACTIVATION = 'issue-intake-v1';
 const APPLY_ENV = 'CHIPIN_ISSUE_WRITE';
@@ -107,27 +109,50 @@ function projectStatusConsistencyBlockers(config, snapshot, status, prefix = '')
   return [prefix + 'Project Status Done is derived from Issue closed/completed; observed Issue state=' + (state || 'unreadable') + ', state_reason=' + (reason || 'unreadable') + '.'];
 }
 
-export function buildReconcilePlan({ config, repository, number, classification, snapshot, project }) {
+export function buildReconcilePlan({ config, repository, number, classification, snapshot, project, selectedOwner = null }) {
   const operations = [];
   const blockers = [];
+  // GitHub /issues/{number} also returns PR-shaped resources. Verify exact
+  // native Issue identity BEFORE planning any metadata, owner or Project writes.
+  const native = snapshot?.issue;
+  const validIdentity = native?.number === number &&
+    native?.repository_url === 'https://api.github.com/repos/' + repository &&
+    typeof native?.node_id === 'string' && native.node_id.length > 0 &&
+    !native.pull_request;
+  if (!validIdentity) blockers.push('Native Issue identity is missing, mismatched or PR-shaped; refusing all intake mutations.');
+  // Closed/completed is a separate terminal reconciliation path, never admission.
+  const state = native?.state;
+  const reason = native?.state_reason;
+  const validState = state === 'open' || (state === 'closed' && reason === 'completed');
+  if (!validState) blockers.push('Native Issue is not open or closed/completed; refusing all intake mutations.');
+  const writable = validIdentity && validState;
   if (!SUPPORTED.has(repository)) blockers.push('Repository is outside ChipIn intake scope: ' + repository + '.');
   const observed = observedMetadata(config, snapshot);
   blockers.push(...observed.blockers);
+  blockers.push(...validateBody(snapshot?.issue?.title, snapshot?.issue?.body));
+  let required = null;
+  try { required = requiredOwner(repository, selectedOwner); }
+  catch (error) { blockers.push(error.message); }
+  if (!Array.isArray(snapshot?.issue?.assignees)) blockers.push('Native Issue assignees are unreadable.');
+  else if (writable && required && !snapshot.issue.assignees.some(user => user?.login === required)) {
+    operations.push({ kind: 'addAssignee', login: required });
+  }
   const desired = {
     Priority: classification.priority,
     ...(classification.severity === null ? {} : { Severity: classification.severity }),
   };
   for (const [name, value] of Object.entries(desired)) {
     const current = observed.fields[name] ?? null;
-    if (current === null) operations.push({ kind: 'setIssueField', field: name, fieldId: config.issueFields[name].id, value });
+    if (current === null && writable) operations.push({ kind: 'setIssueField', field: name, fieldId: config.issueFields[name].id, value });
     else if (current !== value) blockers.push(name + ' already has human value ' + current + '; refusing to overwrite it with ' + value + '.');
   }
-  if (observed.issueType === null) operations.push({ kind: 'setIssueType', value: classification.issueType });
+  if (observed.issueType === null && writable) operations.push({ kind: 'setIssueType', value: classification.issueType });
   else if (observed.issueType !== classification.issueType) blockers.push('Issue Type already has human value ' + observed.issueType + '; refusing to overwrite it with ' + classification.issueType + '.');
   const memberships = projectItemsFor(project, repository, number);
-  if (memberships.length === 0) operations.push({ kind: 'addProjectMembership' });
-  else if (memberships.length > 1) blockers.push('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items); manual reconciliation is required.');
-  else if (!memberships[0].status) operations.push({ kind: 'initializeStatus', itemId: memberships[0].id, value: INITIAL_STATUS });
+  if (memberships.length === 0) {
+    if (writable) operations.push({ kind: 'addProjectMembership' });
+  } else if (memberships.length > 1) blockers.push('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items); manual reconciliation is required.');
+  else if (!memberships[0].status && writable) operations.push({ kind: 'initializeStatus', itemId: memberships[0].id, value: INITIAL_STATUS });
   else blockers.push(...projectStatusConsistencyBlockers(config, snapshot, memberships[0].status));
   return {
     issue: key(repository, number),
@@ -138,6 +163,8 @@ export function buildReconcilePlan({ config, repository, number, classification,
       fields: observed.fields,
       membershipCount: memberships.length,
       status: memberships.length === 1 ? memberships[0].status || null : null,
+      assignees: snapshot?.issue?.assignees?.map(user => user.login) ?? null,
+      requiredAssignee: required,
     },
     operations,
     blockers,
@@ -177,6 +204,13 @@ export async function writeIssueMetadata(client, repository, number, operations)
   if (type) await client.request(root, { method: 'PATCH', body: { type: type.value } });
 }
 
+export async function addRequiredAssignee(client, repository, number, login) {
+  // Additive only; GitHub silently ignores unassignable users, so final read-back is mandatory.
+  return client.request('/repos/' + repository + '/issues/' + number + '/assignees', {
+    method: 'POST', body: { assignees: [login] },
+  });
+}
+
 export async function addProjectMembership(client, project, snapshot) {
   if (!project?.id || !snapshot?.issue?.node_id) throw new Error('Project or issue node id is unreadable.');
   const data = await client.graphql(ADD_ITEM, { projectId: project.id, contentId: snapshot.issue.node_id });
@@ -212,9 +246,12 @@ export async function initializeProjectStatus(client, config, project, itemId) {
   if (data?.updateProjectV2ItemFieldValue?.projectV2Item?.id !== itemId) throw new Error('Status mutation did not return the expected item id.');
 }
 
-export function verifyFinalState({ config, repository, number, classification, snapshot, project }) {
+export function verifyFinalState({ config, repository, number, classification, snapshot, project, selectedOwner = null }) {
   const observed = observedMetadata(config, snapshot);
-  const blockers = [...observed.blockers, ...verifyProjectSnapshot(config, project)];
+  // This is a canonical writer read-back, not permission to execute a closed task.
+  // Only the read-only admission preflight uses the default open-Issue requirement.
+  const admission = verifyAdmission({ config, repository, number, selectedOwner, snapshot, project, allowTerminalReconciliation: true });
+  const blockers = [...admission.blockers];
   if (observed.issueType !== classification.issueType) blockers.push('Read-back Issue Type is ' + (observed.issueType || 'missing') + ', expected ' + classification.issueType + '.');
   const expected = {
     Priority: classification.priority,
@@ -231,10 +268,20 @@ export function verifyFinalState({ config, repository, number, classification, s
   return {
     blockers,
     receipt: {
+      ...admission.receipt,
+      // Terminal reconciliation is observable but never an execution/admission receipt.
+      // Keep a separate contract AND status so bridge/assertFreshReceipt cannot mistake
+      // a closed/completed Done mirror for an open task's INTAKE_COMPLETE.
+      contractVersion: snapshot?.issue?.state === 'closed' && snapshot?.issue?.state_reason === 'completed'
+        ? 'chipin-terminal-reconciliation/v1' : admission.receipt.contractVersion,
+      status: blockers.length ? 'BLOCKED'
+        : snapshot?.issue?.state === 'closed' && snapshot?.issue?.state_reason === 'completed'
+          ? 'TERMINAL_RECONCILED' : 'INTAKE_COMPLETE',
+      blockers: [...blockers],
       issueUrl: snapshot?.issue?.html_url || snapshot?.issue?.url || null,
       issueType: observed.issueType,
       fields: observed.fields,
-      project: { number: config.project.number, membershipCount: memberships.length, status },
+      project: { number: config.project.number, itemId: memberships.length === 1 ? memberships[0].id : null, membershipCount: memberships.length, status },
       milestone: snapshot?.issue?.milestone?.title ?? null,
       relationships: {
         blockedBy: snapshot?.blockedBy || [],
@@ -274,22 +321,23 @@ export async function reserveCreateState(path, value) {
   }
 }
 
-export async function createIssue(client, config, repository, classification, { title, body }) {
+export async function createIssue(client, config, repository, classification, { title, body, selectedOwner = null }) {
   const [owner, repo] = repository.split('/');
+  const assignee = requiredOwner(repository, selectedOwner);
   const values = [
     { field_id: config.issueFields.Priority.id, value: classification.priority },
     ...(classification.severity === null ? [] : [{ field_id: config.issueFields.Severity.id, value: classification.severity }]),
   ];
   return client.request('/repos/' + owner + '/' + repo + '/issues', {
     method: 'POST',
-    body: { title, body, type: classification.issueType, issue_field_values: values },
+    body: { title, body, assignees: [assignee], type: classification.issueType, issue_field_values: values },
   });
 }
 
 function parseArgs(argv) {
   const args = {
     mode: null, operation: null, target: null, issueType: null, priority: null,
-    severity: null, title: null, body: null, bodyFile: null,
+    severity: null, title: null, body: null, bodyFile: null, owner: null,
     state: null, output: null, activate: null, config: 'automation/metadata-migration.config.json',
   };
   const values = [...argv];
@@ -299,7 +347,7 @@ function parseArgs(argv) {
   if (!args.target) throw new Error('Issue identity or repository target is required.');
   const map = {
     '--type': 'issueType', '--priority': 'priority',
-    '--severity': 'severity', '--title': 'title', '--body': 'body', '--body-file': 'bodyFile',
+    '--severity': 'severity', '--title': 'title', '--body': 'body', '--body-file': 'bodyFile', '--owner': 'owner',
     '--state': 'state', '--output': 'output', '--activate': 'activate', '--config': 'config',
   };
   for (let i = 0; i < values.length; i += 1) {
@@ -332,10 +380,13 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
   const client = overrides.client || new GitHubClient(env.GITHUB_TOKEN);
   const checked = validateClassification(config, args);
   const result = {
-    schemaVersion: 1, mode: args.mode, operation: args.operation,
+    schemaVersion: 2, contractVersion: ADMISSION_CONTRACT, mode: args.mode, operation: args.operation,
     generatedAt: new Date().toISOString(), desired: checked.classification,
     issue: null, action: 'incomplete', blockers: [...checked.blockers], applied: [], receipt: null,
   };
+
+  try { requiredOwner(args.operation === 'create' ? args.target : parseIssueRef(args.target).repository, args.owner); }
+  catch (error) { result.blockers.push(error.message); }
 
   let global = null;
   if (!result.blockers.length) {
@@ -351,6 +402,10 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
   if (!result.blockers.length && args.operation === 'create') {
     if (!SUPPORTED.has(args.target)) result.blockers.push('Repository is outside ChipIn intake scope: ' + args.target + '.');
     if (!args.title) result.blockers.push('Create requires --title.');
+    let suppliedBody = args.body || '';
+    try { if (args.bodyFile) suppliedBody = await (overrides.readFile || readFile)(resolve(args.bodyFile), 'utf8'); }
+    catch (error) { result.blockers.push('Issue body read failed: ' + error.message); }
+    result.blockers.push(...validateBody(args.title, suppliedBody));
     if (args.mode === 'plan') {
       result.action = result.blockers.length ? 'incomplete' : 'ready-to-create';
       await emit(result, args.output, persist);
@@ -365,32 +420,34 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
           if (target.repository !== args.target) throw new Error('State issue ' + state.issueRef + ' does not belong to ' + args.target + '.');
           if (state.classification && !sameClassification(state.classification, checked.classification)) throw new Error('State classification differs from this retry.');
           if (state.title && state.title !== args.title) throw new Error('State title differs from this retry.');
+          if (state.owner && state.owner !== requiredOwner(args.target, args.owner)) throw new Error('State owner differs from this retry.');
+          if (state.bodySha256 && state.bodySha256 !== createHash('sha256').update(suppliedBody).digest('hex')) throw new Error('State body differs from this retry.');
           result.applied.push('resume-existing-issue');
         } else if (state) {
           throw new Error('Create checkpoint exists without issue identity; creation outcome is uncertain. Recover the issue manually before retrying to avoid a duplicate.');
         } else {
-          let body = args.body || '';
-          if (args.bodyFile) body = await (overrides.readFile || readFile)(resolve(args.bodyFile), 'utf8');
-
+          const body = suppliedBody;
+          const owner = requiredOwner(args.target, args.owner);
+          const bodySha256 = createHash('sha256').update(body).digest('hex');
           const reserveState = overrides.reserveCreateState || reserveCreateState;
           const writeState = overrides.writeCreateState || atomicWriteJson;
           await reserveState(args.state, {
             schemaVersion: 1,
             repository: args.target,
             classification: checked.classification,
-            title: args.title,
+            title: args.title, owner, bodySha256,
             phase: 'reserved-before-create',
             reservedAt: new Date().toISOString(),
           });
           result.applied.push('create-checkpoint-reserved');
 
-          const created = await (overrides.createIssue || createIssue)(client, config, args.target, checked.classification, { title: args.title, body });
+          const created = await (overrides.createIssue || createIssue)(client, config, args.target, checked.classification, { title: args.title, body, selectedOwner: args.owner });
           if (!Number.isInteger(created?.number)) throw new Error('Create API did not return an issue number.');
           target = { repository: args.target, number: created.number };
           await writeState(args.state, {
             schemaVersion: 1, repository: args.target, issueRef: key(args.target, created.number),
             issueUrl: created.html_url || created.url || null, classification: checked.classification,
-            title: args.title, createdAt: new Date().toISOString(),
+            title: args.title, owner, bodySha256, createdAt: new Date().toISOString(),
           });
           result.applied.push('issue-created-and-identity-persisted');
         }
@@ -405,22 +462,29 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
     try {
       let snapshot = await readIssue(client, target.repository, target.number);
       let project = global.project;
-      const plan = buildReconcilePlan({ config, repository: target.repository, number: target.number, classification: checked.classification, snapshot, project });
+      const plan = buildReconcilePlan({ config, repository: target.repository, number: target.number, classification: checked.classification, snapshot, project, selectedOwner: args.owner });
       result.plan = plan;
       result.blockers.push(...plan.blockers);
       if (!result.blockers.length && args.mode === 'plan') result.action = plan.action;
       if (!result.blockers.length && args.mode === 'apply') {
         const metadata = plan.operations.filter((op) => op.kind === 'setIssueField' || op.kind === 'setIssueType');
+        const assign = plan.operations.find(op => op.kind === 'addAssignee');
         if (metadata.length) {
           try { await (overrides.writeIssueMetadata || writeIssueMetadata)(client, target.repository, target.number, metadata); result.applied.push('issue-metadata'); }
           catch (error) { result.blockers.push('Issue metadata write failed: ' + error.message); }
         }
+        if (!result.blockers.length && assign) {
+          try {
+            await (overrides.addAssignee || addRequiredAssignee)(client, target.repository, target.number, assign.login);
+            result.applied.push('native-assignee:' + assign.login);
+          } catch (error) { result.blockers.push('Native assignee write failed: ' + error.message); }
+        }
         if (!result.blockers.length) {
           try {
             snapshot = await readIssue(client, target.repository, target.number);
-            const check = buildReconcilePlan({ config, repository: target.repository, number: target.number, classification: checked.classification, snapshot, project });
+            const check = buildReconcilePlan({ config, repository: target.repository, number: target.number, classification: checked.classification, snapshot, project, selectedOwner: args.owner });
             const remaining = check.operations.filter((op) => op.kind === 'setIssueField' || op.kind === 'setIssueType');
-            if (remaining.length || check.blockers.some((b) => b.includes('human value'))) result.blockers.push('Issue metadata read-back did not confirm the requested canonical values.');
+            if (remaining.length || check.operations.some(op => op.kind === 'addAssignee') || check.blockers.length) result.blockers.push('Issue metadata/assignee read-back did not confirm canonical state: ' + check.blockers.join(' '));
           } catch (error) { result.blockers.push('Issue metadata read-back failed: ' + error.message); }
         }
         if (!result.blockers.length) {
@@ -473,10 +537,45 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
         if (!result.blockers.length) {
           try {
             snapshot = await readIssue(client, target.repository, target.number);
-            const final = verifyFinalState({ config, repository: target.repository, number: target.number, classification: checked.classification, snapshot, project });
-            result.receipt = final.receipt;
-            result.blockers.push(...final.blockers);
-          } catch (error) { result.blockers.push('Final read-back failed: ' + error.message); }
+            const first = verifyFinalState({
+              config, repository: target.repository, number: target.number,
+              classification: checked.classification, snapshot, project, selectedOwner: args.owner,
+            });
+            result.receipt = first.receipt;
+            result.blockers.push(...first.blockers);
+            if (!result.blockers.length) {
+              // A Project read performed before the final Issue fetch can become stale.
+              // Re-read BOTH authorities and require one unchanged combined revision.
+              // Never expose an INTAKE_COMPLETE writer receipt on divergent read-back.
+              const [latestIssue, latestProject] = await Promise.all([
+                readIssue(client, target.repository, target.number),
+                readProject(client, config),
+              ]);
+              const confirmed = verifyFinalState({
+                config, repository: target.repository, number: target.number,
+                classification: checked.classification, snapshot: latestIssue,
+                project: latestProject, selectedOwner: args.owner,
+              });
+              const blockers = [
+                ...verifyProjectSnapshot(config, latestProject),
+                ...confirmed.blockers,
+              ];
+              if (confirmed.receipt.revision !== first.receipt.revision) {
+                blockers.push('STALE: native Issue/metadata/Project changed during final intake read-back.');
+              }
+              result.blockers.push(...blockers);
+              result.receipt = {
+                ...confirmed.receipt,
+                status: blockers.length ? 'BLOCKED' : confirmed.receipt.status,
+                blockers,
+              };
+            }
+          } catch (error) {
+            result.blockers.push('Final read-back failed: ' + error.message);
+            if (result.receipt) {
+              result.receipt = { ...result.receipt, status: 'BLOCKED', blockers: [...result.blockers] };
+            }
+          }
         }
         result.action = result.blockers.length ? 'incomplete' : 'complete';
       }

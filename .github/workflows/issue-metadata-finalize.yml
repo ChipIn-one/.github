@@ -34,6 +34,11 @@ on:
           - Critical
           - Major
           - Minor
+      owner:
+        description: "Explicit native owner GitHub login (mandatory for KB; FE/BE use fixed policy)"
+        required: false
+        default: ''
+        type: string
       apply:
         description: "Queue canonical metadata/project reconciliation (false = read-only plan)"
         required: true
@@ -54,6 +59,7 @@ jobs:
       ISSUE_TYPE: ${{ inputs.issue_type }}
       PRIORITY: ${{ inputs.priority }}
       SEVERITY: ${{ inputs.severity }}
+      SELECTED_OWNER: ${{ inputs.owner }}
       OUTPUT_PATH: issue-intake-receipt.json
     steps:
       - name: Checkout
@@ -76,7 +82,11 @@ jobs:
         run: |
           set -euo pipefail
           test -n "${GITHUB_TOKEN:-}"
-          node automation/issue-intake.mjs plan reconcile "$ISSUE_REF"             --type "$ISSUE_TYPE"             --priority "$PRIORITY"             --severity "$SEVERITY"             --output "$OUTPUT_PATH"
+          owner_args=()
+          if [[ -n "$SELECTED_OWNER" ]]; then owner_args+=(--owner "$SELECTED_OWNER"); fi
+          node automation/issue-intake.mjs plan reconcile "$ISSUE_REF" \
+            --type "$ISSUE_TYPE" --priority "$PRIORITY" --severity "$SEVERITY" \
+            "${owner_args[@]}" --output "$OUTPUT_PATH"
 
       - name: Upload plan
         if: always()
@@ -96,6 +106,7 @@ jobs:
       ISSUE_TYPE: ${{ inputs.issue_type }}
       PRIORITY: ${{ inputs.priority }}
       SEVERITY: ${{ inputs.severity }}
+      SELECTED_OWNER: ${{ inputs.owner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -117,7 +128,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          REQUEST_JSON="$(jq -cn             --arg target "$ISSUE_REF"             --arg issueType "$ISSUE_TYPE"             --arg priority "$PRIORITY"             --arg severity "$SEVERITY"             '{target:$target,issueType:$issueType,priority:$priority,severity:$severity}')"
+          REQUEST_JSON="$(jq -cn \
+            --arg target "$ISSUE_REF" --arg issueType "$ISSUE_TYPE" \
+            --arg priority "$PRIORITY" --arg severity "$SEVERITY" --arg owner "$SELECTED_OWNER" \
+            '{target:$target,issueType:$issueType,priority:$priority,severity:$severity} + (if ($owner | length) > 0 then {owner:$owner} else {} end)')"
           printf '%s\n%s\n%s\n' '<!-- chipin-issue-intake-request:v1' "$REQUEST_JSON" '-->' > control-body.md
           gh api --method POST repos/ChipIn-one/.github/issues             --raw-field title="[issue-intake] $ISSUE_REF"             --raw-field body="$(cat control-body.md)" > control-issue.json
           jq -r '.html_url' control-issue.json

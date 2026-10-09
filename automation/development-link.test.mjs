@@ -11,6 +11,7 @@ const REPOSITORY = "ChipIn-one/chipin-frontend";
 
 function makeClient({
   issueNumber = 7,
+  repository = REPOSITORY,
   pullRequests = [10],
   bodies = {},
   pullRequestBodySequence = {},
@@ -40,14 +41,14 @@ function makeClient({
         const sequencedBodies = pullRequestBodySequence[number] ?? [];
         return {
           repository: {
-            nameWithOwner: REPOSITORY,
+            nameWithOwner: repository,
             pullRequest: exists ? {
               id: ids.get(number),
               number,
               body: sequencedBodies[readCount]
                 ?? bodies[number]
-                ?? `Task identity: ${REPOSITORY}#${issueNumber}`,
-              repository: { nameWithOwner: REPOSITORY },
+                ?? `Task identity: ${repository}#${issueNumber}`,
+              repository: { nameWithOwner: repository },
             } : null,
           },
         };
@@ -58,17 +59,17 @@ function makeClient({
         const referenceNodes = [...links].map((linkedNumber) => ({
           id: ids.get(linkedNumber) ?? `PR_${linkedNumber}`,
           number: linkedNumber,
-          url: `https://github.com/${REPOSITORY}/pull/${linkedNumber}`,
-          repository: { nameWithOwner: REPOSITORY },
+          url: `https://github.com/${repository}/pull/${linkedNumber}`,
+          repository: { nameWithOwner: repository },
         }));
         return {
           repository: {
-            nameWithOwner: REPOSITORY,
+            nameWithOwner: repository,
             taskIssue: issueUnreadable ? null : {
               id: `ISSUE_${variables.issueNumber}`,
               number: variables.issueNumber,
-              url: `https://github.com/${REPOSITORY}/issues/${variables.issueNumber}`,
-              repository: { nameWithOwner: REPOSITORY },
+              url: `https://github.com/${repository}/issues/${variables.issueNumber}`,
+              repository: { nameWithOwner: repository },
               closedByPullRequestsReferences: relationshipUnreadable ? null : {
                 totalCount: referenceNodes.length,
                 pageInfo: { hasNextPage: false, endCursor: null },
@@ -78,9 +79,9 @@ function makeClient({
             implementationPr: ids.has(number) && !pullRequestUnreadable ? {
               id: ids.get(number),
               number,
-              url: `https://github.com/${REPOSITORY}/pull/${number}`,
-              body: stateBodies[number] ?? bodies[number] ?? `Task identity: ${REPOSITORY}#${issueNumber}`,
-              repository: { nameWithOwner: REPOSITORY },
+              url: `https://github.com/${repository}/pull/${number}`,
+              body: stateBodies[number] ?? bodies[number] ?? `Task identity: ${repository}#${issueNumber}`,
+              repository: { nameWithOwner: repository },
             } : null,
           },
         };
@@ -95,8 +96,8 @@ function makeClient({
             issue: {
               id: `ISSUE_${issueNumber}`,
               number: issueNumber,
-              url: `https://github.com/${REPOSITORY}/issues/${issueNumber}`,
-              repository: { nameWithOwner: REPOSITORY },
+              url: `https://github.com/${repository}/issues/${issueNumber}`,
+              repository: { nameWithOwner: repository },
             },
           },
         };
@@ -161,6 +162,20 @@ test("task identity drift on the final PR reread fails closed", async () => {
     client.calls.filter(({ query }) => query.includes("query DevelopmentLinkPullRequest")).length,
     2,
   );
+});
+
+test('link mutation blocks stale PR head after a positive preflight', async () => {
+  const client = makeClient();
+  client.request = async () => ({
+    number: 10, state: 'open', body: `Task identity: ${REPOSITORY}#7`,
+    head: { sha: 'b'.repeat(40), repo: { full_name: REPOSITORY } },
+    base: { ref: 'dev', repo: { full_name: REPOSITORY } },
+  });
+  await assert.rejects(() => reconcileDevelopmentLink(client, {
+    repository: REPOSITORY, pullRequestNumber: 10,
+    expectedHeadSha: 'a'.repeat(40),
+  }), /STALE: PR head SHA/);
+  assert.equal(mutationCalls(client).length, 0);
 });
 
 test("already linked is an idempotent noop success", async () => {
@@ -291,6 +306,80 @@ test("unreadable Issue, PR, or native relationship fails closed", async () => {
   );
 });
 
+
+const ADMITTED_SHA = 'a'.repeat(40);
+const REVISION = 'f'.repeat(64);
+const acceptedRead = () => ({
+  blockers: [],
+  receipt: {
+    contractVersion: 'chipin-issue-admission/v1',
+    status: 'INTAKE_COMPLETE',
+    issue: REPOSITORY + '#7',
+    revision: REVISION,
+    checkedAt: new Date().toISOString(),
+    blockers: [],
+  },
+});
+function admittedClient(options = {}) {
+  const client = makeClient(options);
+  client.request = async () => ({
+    number: 10, state: 'open', body: 'Task identity: ' + REPOSITORY + '#7',
+    head: { sha: ADMITTED_SHA, repo: { full_name: REPOSITORY } },
+    base: { ref: 'dev', repo: { full_name: REPOSITORY } },
+  });
+  return client;
+}
+const allowedAdmission = read => ({
+  client: {}, config: {}, selectedOwner: 'syllik',
+  expectedRevision: REVISION, read,
+});
+
+test('revalidates current exact Issue revision immediately before native Development mutation', async () => {
+  const client = admittedClient();
+  let count = 0;
+  const result = await reconcileDevelopmentLink(client, {
+    repository: REPOSITORY, pullRequestNumber: 10, expectedHeadSha: ADMITTED_SHA,
+    admission: allowedAdmission(async input => {
+      count += 1;
+      assert.equal(input.repository, REPOSITORY);
+      assert.equal(input.number, 7);
+      assert.equal(input.expectedRevision, REVISION);
+      assert.equal(input.selectedOwner, 'syllik');
+      return acceptedRead();
+    }),
+  });
+  assert.equal(result.result, 'linked');
+  assert.equal(count, 1);
+  assert.equal(mutationCalls(client).length, 1);
+});
+
+test('stale, cancelled, closed and expired Issues block before native Development mutation', async () => {
+  const bad = [
+    { blockers: ['Native Issue must be open (closed/not_planned)'], receipt: acceptedRead().receipt },
+    { blockers: ['STALE: native Issue revision changed'], receipt: acceptedRead().receipt },
+    { blockers: [], receipt: { ...acceptedRead().receipt, revision: 'b'.repeat(64) } },
+    { blockers: [], receipt: { ...acceptedRead().receipt, checkedAt: '2020-01-01T00:00:00Z' } },
+    { blockers: [], receipt: { ...acceptedRead().receipt, status: 'TERMINAL_RECONCILED',
+      contractVersion: 'chipin-terminal-reconciliation/v1' } },
+  ];
+  for (const output of bad) {
+    const client = admittedClient();
+    await assert.rejects(() => reconcileDevelopmentLink(client, {
+      repository: REPOSITORY, pullRequestNumber: 10, expectedHeadSha: ADMITTED_SHA,
+      admission: allowedAdmission(async () => output),
+    }), /STALE|INTAKE_COMPLETE|admission receipt|Admission identity\/revision mismatch/);
+    assert.equal(mutationCalls(client).length, 0);
+  }
+});
+
+test('trusted SHA without live admission input never mutates Development relationship', async () => {
+  const client = admittedClient();
+  await assert.rejects(() => reconcileDevelopmentLink(client, {
+    repository: REPOSITORY, pullRequestNumber: 10, expectedHeadSha: ADMITTED_SHA,
+  }), /Live exact-Issue admission revision/);
+  assert.equal(mutationCalls(client).length, 0);
+});
+
 test("the only write operation is addCloseIssueReferences", async () => {
   const client = makeClient();
   await reconcileDevelopmentLink(client, { repository: REPOSITORY, pullRequestNumber: 10 });
@@ -298,4 +387,113 @@ test("the only write operation is addCloseIssueReferences", async () => {
   assert.equal(writes.length, 1);
   assert.match(writes[0].query, /addCloseIssueReferences/u);
   assert.doesNotMatch(writes[0].query, /closeIssue|reopen|updateIssue|updateProject|ProjectV2/u);
+});
+
+test('head/body drift during live Issue re-read blocks Development mutation', async () => {
+  for (const changed of ['head', 'body', 'state']) {
+    const client = admittedClient();
+    const originalRead = client.request;
+    let reads = 0;
+    client.request = async (...args) => {
+      const pr = await originalRead(...args);
+      if (++reads === 2) {
+        if (changed === 'head') pr.head.sha = 'b'.repeat(40);
+        if (changed === 'body') pr.body += '\\nChanged after admission';
+        if (changed === 'state') pr.state = 'closed';
+      }
+      return pr;
+    };
+    await assert.rejects(() => reconcileDevelopmentLink(client, {
+      repository: REPOSITORY, pullRequestNumber: 10,
+      expectedHeadSha: ADMITTED_SHA,
+      admission: allowedAdmission(async () => acceptedRead()),
+    }), /STALE: PR head, state, branch or body changed during live Issue admission/);
+    assert.equal(mutationCalls(client).length, 0);
+    assert.equal(reads, 2);
+  }
+});
+
+const KB_REPOSITORY = 'ChipIn-one/chipin-knowledge-base';
+function kbAdmittedClient(body) {
+  const client = makeClient({ repository: KB_REPOSITORY, bodies: { 10: body } });
+  client.request = async () => ({
+    number: 10, state: 'open', body,
+    head: { sha: ADMITTED_SHA, repo: { full_name: KB_REPOSITORY } },
+    base: { ref: 'master', repo: { full_name: KB_REPOSITORY } },
+  });
+  return client;
+}
+
+test('KB native link accepts exactly the owner that passed canonical admission', async () => {
+  const client = kbAdmittedClient('Task identity: ' + KB_REPOSITORY + '#7\nTask owner: @syllik');
+  const outcome = await reconcileDevelopmentLink(client, {
+    repository: KB_REPOSITORY, pullRequestNumber: 10, expectedHeadSha: ADMITTED_SHA,
+    admission: {
+      ...allowedAdmission(async ({ selectedOwner }) => {
+        assert.equal(selectedOwner, 'syllik');
+        return { ...acceptedRead(), receipt: { ...acceptedRead().receipt, issue: KB_REPOSITORY + '#7' } };
+      }),
+    },
+  });
+  assert.equal(outcome.result, 'linked');
+  assert.equal(mutationCalls(client).length, 1);
+});
+
+test('KB owner edit, removal and duplicate marker block before native link mutation', async () => {
+  const bodies = [
+    'Task identity: ' + KB_REPOSITORY + '#7\nTask owner: @another-owner',
+    'Task identity: ' + KB_REPOSITORY + '#7',
+    'Task identity: ' + KB_REPOSITORY + '#7\nTask owner: @syllik\nTask owner: @another-owner',
+  ];
+  for (const body of bodies) {
+    const client = kbAdmittedClient(body);
+    let admissionReads = 0;
+    await assert.rejects(() => reconcileDevelopmentLink(client, {
+      repository: KB_REPOSITORY, pullRequestNumber: 10, expectedHeadSha: ADMITTED_SHA,
+      admission: {
+        ...allowedAdmission(async () => {
+          admissionReads++;
+          return { ...acceptedRead(), receipt: { ...acceptedRead().receipt, issue: KB_REPOSITORY + '#7' } };
+        }),
+      },
+    }), /STALE: KB PR Task owner|STALE: KB PR requires one explicit Task owner/);
+    assert.equal(admissionReads, 0);
+    assert.equal(mutationCalls(client).length, 0);
+  }
+});
+
+test('expired admission after slow final PR REST read blocks both linked and unlinked paths', async () => {
+  const originalNow = Date.now;
+  const checkedAt = originalNow();
+  try {
+    for (const alreadyLinked of [false, true]) {
+      Date.now = () => checkedAt;
+      const client = admittedClient({ linkedPullRequests: alreadyLinked ? [10] : [] });
+      const baseRequest = client.request;
+      let requestCount = 0;
+      client.request = async (...args) => {
+        const response = await baseRequest(...args);
+        requestCount += 1;
+        if (requestCount === 2) Date.now = () => checkedAt + 121_000;
+        return response;
+      };
+      let admissionReads = 0;
+      await assert.rejects(() => reconcileDevelopmentLink(client, {
+        repository: REPOSITORY,
+        pullRequestNumber: 10,
+        expectedHeadSha: ADMITTED_SHA,
+        admission: allowedAdmission(async () => {
+          admissionReads += 1;
+          const result = acceptedRead();
+          result.receipt.checkedAt = new Date(checkedAt).toISOString();
+          return result;
+        }),
+      }), /STALE admission receipt/);
+      assert.equal(admissionReads, 1, 'live admission succeeded before the final slow PR read');
+      assert.equal(requestCount, 2);
+      assert.equal(mutationCalls(client).length, 0);
+    }
+  } finally {
+    Date.now = originalNow;
+  }
 });

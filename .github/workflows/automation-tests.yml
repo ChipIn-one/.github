@@ -57,3 +57,35 @@ jobs:
           node-version: '24.21.0'
       - name: Run automation tests
         run: node --test automation/*.test.mjs
+      - name: Verify bounded org #53 bootstrap
+        if: github.event_name == 'pull_request' && github.event.pull_request.number == 57
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CURRENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          node automation/org-governance-bootstrap.mjs --head "$CURRENT_HEAD_SHA"
+      - name: Live versioned FE/BE admission canaries
+        if: github.event_name == 'pull_request' && github.event.pull_request.number == 57 && github.event.pull_request.head.repo.full_name == 'ChipIn-one/.github'
+        env:
+          GITHUB_TOKEN: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${GITHUB_TOKEN:-}"
+          node automation/issue-admission.mjs --issue ChipIn-one/chipin-frontend#400 --output fe-admission.json
+          node automation/issue-admission.mjs --issue ChipIn-one/chipin-backend#167 --output be-admission.json
+          # Follow-up repo action-pin tasks: exact fresh read-back before new PRs.
+          node automation/issue-admission.mjs --issue ChipIn-one/chipin-backend#172 --output be-pin-admission.json
+          node automation/issue-admission.mjs --issue ChipIn-one/chipin-knowledge-base#35 --owner syllik --output kb-pin-admission.json
+      - name: Upload live admission receipts
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.number == 57
+        uses: actions/upload-artifact@v4
+        with:
+          name: org-53-live-admission-${{ github.run_id }}
+          path: |
+            fe-admission.json
+            be-admission.json
+            be-pin-admission.json
+            kb-pin-admission.json
+          if-no-files-found: warn
+          retention-days: 30
