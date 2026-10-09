@@ -8,7 +8,10 @@ inputs:
     description: Event PR SHA
     required: true
   token:
-    description: Token with Issues/PR and organization Projects v2 access
+    description: FE-local GITHUB_TOKEN with issues/PR metadata write
+    required: true
+  admission-token:
+    description: FE canonical admission read token; cannot write Project #5
     required: true
 runs:
   using: composite
@@ -19,4 +22,5 @@ runs:
         CHIPIN_PR_NUMBER: ${{ inputs.pull-request-number }}
         CHIPIN_PR_SHA: ${{ inputs.head-sha }}
         CHIPIN_PR_METADATA_TOKEN: ${{ inputs.token }}
+        CHIPIN_ADMISSION_READ_TOKEN: ${{ inputs.admission-token }}
       run: node "$GITHUB_ACTION_PATH/../pr-metadata.mjs"

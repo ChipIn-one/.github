@@ -96,3 +96,11 @@ For frontend code work, merge to integration branch `dev` is not completion. Clo
 Repository-specific completion triggers other than the frontend rule above are outside this shared change and remain repository-owned.
 
 Knowledge-base and standalone non-code work close when their accepted durable outcome is complete on the canonical source of truth. Ambiguous completion evidence fails closed.
+
+## Admission contract (version 1)
+
+Admission is a live, read-only `chipin-issue-admission/v1` verification using the same native readers as the sole writer `automation/issue-intake.mjs`. An `INTAKE_COMPLETE` receipt includes exact `owner/repo#number`, Issue revision digest/updated time, fresh checked time (maximum 120 seconds), Issue Type, Priority, applicable Bug Severity, native assignees and required owner, one Project #5 item and valid readable Status, plus optional Milestone. `QUEUED` or a raw GitHub URL is not admission. The Issue body must have substantive `## Problem`, `## Outcome`, checkable `## Acceptance` (and relevant Dependencies/References). Do not accept placeholder content.
+
+FE's required native assignee is `syllik`, BE's `olegbal`; KB must supply an explicit owner in request/CLI and match a real GitHub assignee. Add only missing required owners, never remove other human owners. Human Type/Priority/Severity/Status and Milestone are preserved; conflicts block and require review. Project `Done` is a derived mirror of `closed/completed` only. Reader failure, duplicate items and revision change all block. Do not repair historical Issues en masse.
+
+`ChipIn-one/.github#53` is a **one-Issue governance bootstrap**, not a general exception or an `INTAKE_COMPLETE` substitute for FE/BE/KB work. The release-milestone control issue workflow is separately scoped to milestone creation; it does not authorize agent execution, publication or task completion.

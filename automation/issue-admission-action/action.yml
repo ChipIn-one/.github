@@ -1,0 +1,32 @@
+name: Canonical Issue admission preflight
+description: Fail closed when a PR task lacks fresh native ChipIn Issue read-back
+inputs:
+  repository:
+    required: true
+    description: Exact repository of the PR
+  pull-request-number:
+    required: true
+    description: Exact PR number
+  expected-head-sha:
+    required: true
+    description: Exact PR head SHA from the trusted caller event
+  token:
+    required: true
+    description: Read credential for org Issue Fields, native Issues and Project #5
+runs:
+  using: composite
+  steps:
+    - name: Verify exact PR Issue admission
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        TARGET_REPO: ${{ inputs.repository }}
+        TARGET_PR: ${{ inputs.pull-request-number }}
+        EXPECTED_HEAD_SHA: ${{ inputs.expected-head-sha }}
+      run: |
+        set -euo pipefail
+        test -n "${GITHUB_TOKEN:-}"
+        node "$GITHUB_ACTION_PATH/../issue-admission-pr.mjs" \
+          --repository "$TARGET_REPO" --pr "$TARGET_PR" --expected-head-sha "$EXPECTED_HEAD_SHA" \
+          --config "$GITHUB_ACTION_PATH/../metadata-migration.config.json" \
+          --output "$RUNNER_TEMP/chipin-admission-pr.json"

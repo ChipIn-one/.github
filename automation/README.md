@@ -124,3 +124,8 @@ node --test automation/*.test.mjs
 ```
 
 The tests include issue-intake retry and fail-closed coverage, migration safety/idempotency coverage, and a consistency check for all supported shared Issue Forms.
+
+
+## Fail-closed Issue admission
+
+Versioned read-only `issue-admission.mjs` validates a fresh exact Issue revision, durable body, native Type/Priority/Bug Severity, required FE/BE/explicit KB assignee, exactly one Project #5 item and readable Status. Writers remain exclusively in `issue-intake.mjs`. The `issue-admission-pr.mjs` boundary and `issue-admission-action/action.yml` guard PR reconciliation, publication handoff and review where callers opt in with an org read credential. A queued connector bridge is not a positive admission. See [issue-intake.md](./issue-intake.md) for roll-out and explicit governance bootstrap limitations.

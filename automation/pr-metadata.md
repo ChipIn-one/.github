@@ -20,11 +20,11 @@ Requested reviewers use a **separate approved list**, currently empty by design.
 
 Taxonomy: additive pr:implementation / pr:release category label, no duplication of Issue Priority/Severity/Type/Milestone/Project Status. Frontend is implicit in FE-only rollout. Missing category labels are created deterministically. Read-back required.
 
-Project #5: PR content item added only if absent; full paginated check before and after, duplicate PR items block. No PR Project Status changes. The Issue remains authoritative for completed/open; no Issue state write anywhere in this reconciler, and existing Issue Project memberships are not modified.
+Project #5: exclusively written by the trusted .github Project worker using CHIPIN_ISSUE_WRITE_TOKEN; FE cannot read or write org Project membership. The worker performs a fresh canonical admission check, native Development/release verification, SHA/body re-read and idempotent one-item Project read-back. No PR Project Status changes. The Issue remains authoritative for completed/open; no Issue state write anywhere in this reconciler, and existing Issue Project memberships are not modified.
 
 ## Deployment and blocker policy
 
-Trusted FE pull_request metadata events only: opened, edited, reopened, synchronize, ready_for_review; manual workflow_dispatch retry. No PR-head code checkout. Shared composite action pinned to exact commit. Serialized per PR. Requires Issues write and PR write plus **org Projects v2 read/write** for Project #5; GITHUB_TOKEN alone often cannot write org Projects. FE secret CHIPIN_PR_METADATA_TOKEN must have the approved limited permissions. Missing project rights fail closed. Review requests are deferred until current-SHA CI; do not pay for bot review on metadata events. New FE implementation/release PRs need live read-back after token/owner/reviewer approval; human-only merge remains unchanged.
+Trusted FE pull_request metadata events only: opened, edited, reopened, synchronize, ready_for_review; manual workflow_dispatch retry. No PR-head code checkout. Shared composite action pinned to exact commit. Serialized per PR. FE uses its local GITHUB_TOKEN (PR/Issue metadata) and CHIPIN_DEV_READ_TOKEN (read-only canonical admission). No org Project credential is ever copied into FE. The .github scheduled/manual Project reconciler alone uses org CHIPIN_ISSUE_WRITE_TOKEN, performs a fresh positive Issue admission and complete one-item read-back. Missing org permissions block Project writes. Review requests are deferred until current-SHA CI; do not pay for bot review on metadata events. New FE implementation/release PRs need live read-back after token/owner/reviewer approval; human-only merge remains unchanged.
 
 ## Admission dependency — org #53
 
@@ -33,3 +33,8 @@ This #381 reconciler is not a replacement for canonical issue intake. The shared
 ## Audit reproduction
 
 `node --test evidence/pr54-ci-gate-reproduction.test.mjs` reproduces and guards the former `frontend-ci=success` / required `main-ci=failure/pending` release reviewer bypass. The same cases run via `automation/pr-metadata.test.mjs`. Review cycle is bounded to one independent current-SHA review and no more than two correction batches; requested human reviewers and prior same-SHA reviews are never deleted or multiplied.
+
+
+## Trusted Project writer (#381 variant B)
+
+The .github workflow `.github/workflows/pr-metadata-project-reconcile.yml` polls current open FE PRs every 15 minutes and may be manually dispatched. It never checks out untrusted FE PR code. A FE-side category label is only a request to inspect: it is not admission. The org reader verifies current SHA, exact native Issue linkage or release references, and fresh canonical Issue/Project revision immediately before the org-only Project membership write. Retries are idempotent. Project #5 write secrets remain in `.github`.

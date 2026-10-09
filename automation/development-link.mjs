@@ -1,8 +1,10 @@
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import { readFile } from "node:fs/promises";
 
 import { GitHubClient } from "./github-metadata.mjs";
+import { readAdmission, assertFreshReceipt } from "./issue-admission.mjs";
 
 export const SUPPORTED_REPOSITORIES = new Set([
   "ChipIn-one/chipin-frontend",
@@ -97,6 +99,14 @@ export function readTaskIdentityMarker(body) {
     );
   }
   return parseTaskIdentity(line.slice(`${TASK_IDENTITY_MARKER} `.length));
+}
+
+// Reuse the same explicit KB owner marker at both PR admission and the
+// immediate native Development mutation boundary; never infer a KB default.
+export function readKBTaskOwnerMarker(body) {
+  const matches = String(body ?? '').match(/^Task owner:\s*@?([a-z\d-]+)\s*$/gim) ?? [];
+  if (matches.length !== 1) throw new Error('KB PR requires one explicit Task owner: @login line.');
+  return matches[0].split(':')[1].trim().replace(/^@/, '');
 }
 
 function resolveTaskIdentity({ explicitTaskIdentity, pullRequestBody }) {
@@ -272,6 +282,8 @@ export async function reconcileDevelopmentLink(client, {
   repository,
   pullRequestNumber,
   explicitTaskIdentity = null,
+  expectedHeadSha = null,
+  admission = null,
 }) {
   assertSupportedRepository(repository);
   const prNumber = parsePositiveInteger(pullRequestNumber, "Pull request number");
@@ -310,6 +322,85 @@ export async function reconcileDevelopmentLink(client, {
     throw new Error(
       `Task identity changed while reconciling ${repository}#${prNumber}: ${task.canonical} -> ${revalidatedTask.canonical}.`,
     );
+  }
+
+  let admittedPRBody = null;
+  if (expectedHeadSha !== null) {
+    if (!/^[a-f0-9]{40}$/.test(expectedHeadSha)) throw new Error('Trusted PR head SHA must be exactly 40 lowercase hex characters.');
+    // Before any Development mutation, re-read the trusted head/branches/body;
+    // the PR node ID alone survives pushes and cannot prove current admission.
+    let current;
+    try { current = await client.request('/repos/' + repository + '/pulls/' + prNumber); }
+    catch (error) { throw new Error('Current PR head before Development mutation is unreadable: ' + error.message); }
+    if (current?.number !== prNumber || current?.state !== 'open' ||
+        current?.head?.sha !== expectedHeadSha || current?.head?.repo?.full_name !== repository ||
+        current?.base?.repo?.full_name !== repository ||
+        current?.base?.ref !== ({
+          'ChipIn-one/chipin-frontend': 'dev',
+          'ChipIn-one/chipin-backend': 'develop',
+          'ChipIn-one/chipin-knowledge-base': 'master',
+        })[repository]) {
+      throw new Error('STALE: PR head SHA/state/branch changed after canonical admission.');
+    }
+    const admittedMarker = readTaskIdentityMarker(current.body);
+    if (!admittedMarker || admittedMarker.canonical !== task.canonical) {
+      throw new Error('STALE: PR Task identity changed or disappeared after canonical admission.');
+    }
+    if (repository === 'ChipIn-one/chipin-knowledge-base') {
+      let currentOwner;
+      try { currentOwner = readKBTaskOwnerMarker(current.body); }
+      catch (error) { throw new Error('STALE: ' + error.message); }
+      if (currentOwner !== admission?.selectedOwner) {
+        throw new Error('STALE: KB PR Task owner differs from the admitted native assignee.');
+      }
+    }
+    admittedPRBody = current.body;
+  }
+
+  if (expectedHeadSha !== null) {
+    // A PR-SHA reread alone cannot prove the Issue is still admitted:
+    // native closure/ownership/fields/Project may drift after the earlier action step.
+    // The read-only canonical reader must confirm the SAME revision at this boundary.
+    if (!admission?.client || !admission?.config ||
+        !/^[a-f0-9]{64}$/.test(admission.expectedRevision ?? '') ||
+        !admission.selectedOwner) {
+      throw new Error('Live exact-Issue admission revision and org read credential are required before Development mutation.');
+    }
+    const latest = await (admission.read ?? readAdmission)({
+      client: admission.client, config: admission.config,
+      repository: task.repository, number: task.issueNumber,
+      selectedOwner: admission.selectedOwner,
+      expectedRevision: admission.expectedRevision,
+    });
+    if (latest?.blockers?.length) {
+      throw new Error('STALE: Issue admission changed before Development mutation: ' + latest.blockers.join('; '));
+    }
+    assertFreshReceipt(latest?.receipt, {
+      issue: task.canonical, revision: admission.expectedRevision,
+    });
+    // Issue/Project read-back is multi-request. A push or PR-body edit during it
+    // must not authorize a different PR revision to receive a native link.
+    let afterAdmission;
+    try { afterAdmission = await client.request('/repos/' + repository + '/pulls/' + prNumber); }
+    catch (error) { throw new Error('Current PR head after Issue admission is unreadable: ' + error.message); }
+    if (afterAdmission?.number !== prNumber || afterAdmission?.state !== 'open' ||
+        afterAdmission?.head?.sha !== expectedHeadSha ||
+        afterAdmission?.head?.repo?.full_name !== repository ||
+        afterAdmission?.base?.repo?.full_name !== repository ||
+        afterAdmission?.base?.ref !== ({
+          'ChipIn-one/chipin-frontend': 'dev',
+          'ChipIn-one/chipin-backend': 'develop',
+          'ChipIn-one/chipin-knowledge-base': 'master',
+        })[repository] ||
+        afterAdmission?.body !== admittedPRBody) {
+      throw new Error('STALE: PR head, state, branch or body changed during live Issue admission.');
+    }
+    // The awaited PR read may exceed the receipt's 120-second lifetime.
+    // Recheck freshness at the final authorized boundary, for both the
+    // already-linked return and the first Development write.
+    assertFreshReceipt(latest.receipt, {
+      issue: task.canonical, revision: admission.expectedRevision,
+    });
   }
 
   if (before.linked) {
@@ -384,14 +475,30 @@ async function main() {
   const repository = args.get("--repository") || process.env.CHIPIN_PR_REPOSITORY;
   const pullRequestNumber = args.get("--pull-request") || process.env.CHIPIN_PR_NUMBER;
   const explicitTaskIdentity = args.get("--task") || process.env.CHIPIN_TASK_IDENTITY || null;
+  const expectedHeadSha = args.get("--expected-head-sha") || process.env.CHIPIN_EXPECTED_HEAD_SHA || null;
   if (!repository) throw new Error("PR repository is required.");
   if (!pullRequestNumber) throw new Error("Pull request number is required.");
-
+  if (!expectedHeadSha || !process.env.CHIPIN_ADMISSION_TOKEN ||
+      !/^[a-f0-9]{64}$/.test(process.env.CHIPIN_EXPECTED_ADMISSION_REVISION ?? '') ||
+      !process.env.CHIPIN_SELECTED_OWNER) {
+    throw new Error('Trusted PR SHA, live admission token, exact revision and native required owner are mandatory.');
+  }
+  const configPath = process.env.GITHUB_ACTION_PATH
+    ? resolve(process.env.GITHUB_ACTION_PATH, '../metadata-migration.config.json')
+    : resolve('automation/metadata-migration.config.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  const admission = {
+    client: new GitHubClient(process.env.CHIPIN_ADMISSION_TOKEN),
+    config, expectedRevision: process.env.CHIPIN_EXPECTED_ADMISSION_REVISION,
+    selectedOwner: process.env.CHIPIN_SELECTED_OWNER,
+  };
   const client = new GitHubClient(process.env.GITHUB_TOKEN);
   const receipt = await reconcileDevelopmentLink(client, {
     repository,
     pullRequestNumber,
     explicitTaskIdentity,
+    expectedHeadSha,
+    admission,
   });
   process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
 }

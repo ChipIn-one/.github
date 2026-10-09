@@ -1,0 +1,98 @@
+#!/usr/bin/env node
+// Read-only, exact-identity admission before PR reconciliation/review/handoff.
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import process from 'node:process';
+import { pathToFileURL } from 'node:url';
+import { GitHubClient } from './github-metadata.mjs';
+import { readAdmission, assertFreshReceipt } from './issue-admission.mjs';
+import { readTaskIdentityMarker, readKBTaskOwnerMarker } from './development-link.mjs';
+
+const BRANCHES = new Map([
+  ['ChipIn-one/chipin-frontend', 'dev'],
+  ['ChipIn-one/chipin-backend', 'develop'],
+  ['ChipIn-one/chipin-knowledge-base', 'master'],
+]);
+export function taskIdentitiesForPr(repository, pr) {
+  const integration = BRANCHES.get(repository);
+  if (!integration) throw new Error('Unsupported PR admission repository ' + repository);
+  if (pr?.head?.repo?.full_name !== repository || pr?.base?.repo?.full_name !== repository) throw new Error('Untrusted fork/cross-repository PR.');
+  const head = pr.head.ref, base = pr.base.ref;
+  if (base === integration && head !== integration) {
+    const marker = readTaskIdentityMarker(pr.body);
+    if (!marker || marker.repository !== repository) throw new Error('Missing or mismatched single Task identity in implementation PR.');
+    return [marker];
+  }
+  if (repository === 'ChipIn-one/chipin-frontend' && base === 'main' && head === 'dev') {
+    const matches = String(pr.body ?? '').match(/^Included Issues:\s*(.*)$/gm);
+    if (matches?.length !== 1) throw new Error('Release PR must have one exact Included Issues line.');
+    const ids = matches[0].slice('Included Issues:'.length).split(',').map(s => s.trim());
+    if (!ids.length || ids.length > 30 || ids.some(x => !/^ChipIn-one\/chipin-frontend#[1-9]\d*$/.test(x)) || new Set(ids).size !== ids.length) {
+      throw new Error('Invalid or duplicate release Included Issues identity.');
+    }
+    return ids.map(id => ({ canonical: id, repository, issueNumber: Number(id.split('#')[1]) }));
+  }
+  throw new Error('Unsupported PR branch transition; no admission bypass.');
+}
+
+export function selectedOwnerForPr(repository, body) {
+  if (repository !== 'ChipIn-one/chipin-knowledge-base') return null;
+  return readKBTaskOwnerMarker(body);
+}
+
+export async function preflightPr({ client, config, repository, number, expectedHeadSha, read = readAdmission }) {
+  if (!/^[a-f0-9]{40}$/.test(expectedHeadSha ?? '')) throw new Error('Exact expected current PR head SHA required.');
+  const pr = await client.request('/repos/' + repository + '/pulls/' + number);
+  if (pr?.number !== number || pr?.state !== 'open') throw new Error('PR identity/state mismatch or unreadable.');
+  if (pr.head?.sha !== expectedHeadSha) throw new Error('STALE: PR head SHA changed since the invoking workflow event.');
+  const ids = taskIdentitiesForPr(repository, pr);
+  const owner = selectedOwnerForPr(repository, pr.body);
+  const receipts = [];
+  for (const id of ids) {
+    const result = await read({ client, config, repository: id.repository, number: id.issueNumber, selectedOwner: owner });
+    if (result.blockers.length) throw new Error(id.canonical + ' BLOCKED: ' + result.blockers.join('; '));
+    assertFreshReceipt(result.receipt, { issue: id.canonical });
+    receipts.push(result.receipt);
+  }
+  // PR-body edits do not change the head SHA. Re-read trusted PR identity after
+  // every Issue read to detect swaps of Task identity, owner, or Included Issues.
+  const latest = await client.request('/repos/' + repository + '/pulls/' + number);
+  const identity = value => JSON.stringify({
+    number: value?.number, state: value?.state, body: value?.body,
+    head: { sha: value?.head?.sha, ref: value?.head?.ref, repo: value?.head?.repo?.full_name },
+    base: { ref: value?.base?.ref, repo: value?.base?.repo?.full_name },
+  });
+  if (identity(latest) !== identity(pr)) throw new Error('STALE: PR identity/body/owner or branch changed during admission.');
+  // A slow FE release can read up to 30 Issues: early receipts may have
+  // expired while later Issues were being checked even if each passed alone.
+  for (const receipt of receipts) assertFreshReceipt(receipt, { issue: receipt.issue });
+  return { contractVersion: 'chipin-pr-admission/v1', pr: repository + '#' + number,
+    prHeadSha: pr.head.sha, verifiedAt: new Date().toISOString(), status: 'INTAKE_COMPLETE', receipts };
+}
+
+function args(argv) {
+  const options = {};
+  for (let i = 0; i < argv.length; i += 2) {
+    if (!argv[i]?.startsWith('--') || !argv[i + 1]) throw new Error('Expected --repository --pr --expected-head-sha --output (optional).');
+    options[argv[i].slice(2)] = argv[i + 1];
+  }
+  return options;
+}
+export async function main(argv = process.argv.slice(2), env = process.env) {
+  const opts = args(argv);
+  const number = Number(opts.pr);
+  if (!Number.isInteger(number) || number < 1) throw new Error('Positive --pr required.');
+  const config = JSON.parse(await readFile(resolve(opts.config ?? 'automation/metadata-migration.config.json'), 'utf8'));
+  const result = await preflightPr({
+    client: new GitHubClient(env.GITHUB_TOKEN), config, repository: opts.repository,
+    number, expectedHeadSha: opts['expected-head-sha'],
+  });
+  if (opts.output) {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(resolve(opts.output), JSON.stringify(result, null, 2) + '\n');
+  } else process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+  return result;
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(error => { console.error('PUBLICATION/PR ADMISSION BLOCKED: ' + error.message); process.exitCode = 2; });
+}

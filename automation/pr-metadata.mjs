@@ -2,6 +2,8 @@ import process from "node:process";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { GitHubClient } from "./github-metadata.mjs";
+import { preflightPr } from "./issue-admission-pr.mjs";
+import { readAdmission, assertFreshReceipt } from "./issue-admission.mjs";
 import { reconcileDevelopmentLink, readTaskIdentityMarker } from "./development-link.mjs";
 
 const REPO = "ChipIn-one/chipin-frontend";
@@ -55,7 +57,10 @@ export function chooseOwner({manual=[],issue=[],approved=null,author=null,allowA
 }
 export function chooseReviewer({manual=[],approved=[],author}) {
   if (manual.length) return null;
-  if (approved.length!==1) throw new Error("REVIEWER_POLICY: configure exactly one approved reviewer; no inference");
+  // Single-maintainer policy: no fabricated reviewer or self-review. Human merges and
+  // independent external code reviews remain separate from native GitHub approvals.
+  if (approved.length===0) return null;
+  if (approved.length!==1) throw new Error("REVIEWER_POLICY: configure at most one approved reviewer; no inference");
   if (approved[0]===author || !approved[0]) throw new Error("REVIEWER_POLICY: no self-review");
   return approved[0];
 }
@@ -132,7 +137,7 @@ export async function ensureProjectPR(client,prId) {
   if (!found) throw new Error("PROJECT: missing PR item on read-back");
   return {id:found.id,created:!existing,readBack:true};
 }
-async function verifyRelease(client,refs) {
+export async function verifyRelease(client,refs) {
   const issues=[];
   for (const num of refs.prs) {
     const impl=await client.request(ROOT+"/pulls/"+num);
@@ -241,7 +246,7 @@ export async function requiredShaCIGreen(client, pr) {
   return {ok: blockers.length === 0, blockers, branch, headSha: sha,
     required: checks.map(x => x.context)};
 }
-export async function reconcilePR(client,policy,number,expectedSha) {
+export async function reconcilePR(client,policy,number,expectedSha,{admissionClient,admissionConfig}={}) {
   if (policy?.repository!==REPO || policy.project!==PROJECT || policy.ownerPolicy?.allowIssueOwner!==true
       || !Array.isArray(policy.reviewerPolicy?.implementation) || !Array.isArray(policy.reviewerPolicy?.release))
     throw new Error("CONFIG: explicit FE Project #5, owner and reviewer policy required");
@@ -252,12 +257,24 @@ export async function reconcilePR(client,policy,number,expectedSha) {
   if (pr?.number!==n || pr.state!=="open" || !pr.node_id || !pr.head?.sha) throw new Error("PR: unreadable or not open");
   if (!expectedSha || pr.head.sha!==expectedSha) throw new Error("SHA: event head no longer matches PR");
   const kind=classifyPR(pr);
+  // Org #53 is the canonical authority; PR metadata is never an alternative
+  // intake writer, and must not mutate Development/PR metadata without admission.
+  if (!admissionClient || !admissionConfig) throw new Error("ADMISSION: read-only org credential and canonical config required");
+  const admitted=await preflightPr({
+    client:admissionClient,config:admissionConfig,repository:REPO,
+    number:n,expectedHeadSha:expectedSha
+  });
   const blockers=bodyGaps(pr.body);
   let issue=null,taskIdentity=null;
   if (kind==="implementation") {
     const identity=implementationIdentity(pr.body);
     await assertSingleNativeIssue(client,n,identity.issueNumber);
-    const native=await reconcileDevelopmentLink(client,{repository:REPO,pullRequestNumber:n});
+    const receipt=admitted.receipts[0];
+    const native=await reconcileDevelopmentLink(client,{
+      repository:REPO,pullRequestNumber:n,expectedHeadSha:expectedSha,
+      admission:{client:admissionClient,config:admissionConfig,
+        expectedRevision:receipt.revision,selectedOwner:"syllik"}
+    });
     await assertSingleNativeIssue(client,n,identity.issueNumber,true);
     if (!native.readBackConfirmed || native.issueNumber!==identity.issueNumber) throw new Error("NATIVE_LINK: missing exact userLinkedOnly read-back");
     issue=await client.request(ROOT+"/issues/"+identity.issueNumber);
@@ -271,7 +288,9 @@ export async function reconcilePR(client,policy,number,expectedSha) {
       fresh.base?.sha!==pr.base?.sha || fresh.base?.ref!==pr.base.ref ||
       fresh.body!==pr.body || fresh.state!=="open") throw new Error("PR_DRIFT: metadata changed mid-run");
   await ensureCategory(client,n,kind);
-  const project=await ensureProjectPR(client,pr.node_id);
+  // Project #5 is exclusively written/read back by the .github trusted worker.
+  // FE GITHUB_TOKEN never receives the org Project credential.
+  const project={status:"pending-org-writer",number:5};
   const prIssue=await client.request(ROOT+"/issues/"+n);
   const currentOwners=(prIssue.assignees??[]).map(x=>x.login);
   const issueOwners=issue?(issue.assignees??[]).map(x=>x.login):[];
@@ -310,7 +329,7 @@ export async function reconcilePR(client,policy,number,expectedSha) {
   } catch(e) {blockers.push(e.message);}
   const last=await client.request(url);
   if (last.head?.sha!==pr.head.sha) throw new Error("SHA: PR changed before receipt");
-  if (!uniqueProjectItem((await readProject(client)).items,pr.node_id)) throw new Error("PROJECT: membership disappeared");
+  // No Project GraphQL calls from FE; org worker verifies membership after write.
   if (issue) {
     const afterIssue=await client.request(ROOT+"/issues/"+issue.number);
     if (afterIssue.state!==issue.state || afterIssue.state_reason!==issue.state_reason)
@@ -321,8 +340,10 @@ export async function reconcilePR(client,policy,number,expectedSha) {
 async function main(){
   const {readFile}=await import("node:fs/promises");
   const policy=JSON.parse(await readFile(new URL("./pr-metadata.config.json",import.meta.url),"utf8"));
-  const client=new GitHubClient(process.env.CHIPIN_PR_METADATA_TOKEN || process.env.GITHUB_TOKEN);
-  const receipt=await reconcilePR(client,policy,process.env.CHIPIN_PR_NUMBER,process.env.CHIPIN_PR_SHA);
+  const admissionConfig=JSON.parse(await readFile(new URL("./metadata-migration.config.json",import.meta.url),"utf8"));
+  const client=new GitHubClient(process.env.CHIPIN_PR_METADATA_TOKEN);
+  const admissionClient=new GitHubClient(process.env.CHIPIN_ADMISSION_READ_TOKEN);
+  const receipt=await reconcilePR(client,policy,process.env.CHIPIN_PR_NUMBER,process.env.CHIPIN_PR_SHA,{admissionClient,admissionConfig});
   console.log(JSON.stringify(receipt,null,2));
   if (receipt.blockers.length) process.exitCode=1;
 }

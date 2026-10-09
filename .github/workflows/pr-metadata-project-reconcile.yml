@@ -1,0 +1,33 @@
+name: Org PR Project metadata reconciliation
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chipin-pr-project-metadata
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted org workflow
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Verify FE PR admission and reconcile org-only Project membership
+        env:
+          CHIPIN_DEV_READ_TOKEN: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
+          CHIPIN_ISSUE_WRITE_TOKEN: ${{ secrets.CHIPIN_ISSUE_WRITE_TOKEN }}
+        run: node automation/pr-project-writer.mjs

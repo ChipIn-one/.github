@@ -39,7 +39,7 @@ test("owner policy preserves manual and blocks ambiguity",()=>{
 test("reviewer policy differs from assignment and forbids self-review",()=>{
   assert.equal(chooseReviewer({manual:["human"],approved:[],author:"owner"}),null);
   assert.equal(chooseReviewer({manual:["approved-review-team"],approved:[],author:"owner"}),null);
-  assert.throws(()=>chooseReviewer({approved:[],author:"owner"}),/REVIEWER_POLICY/);
+  assert.equal(chooseReviewer({approved:[],author:"owner"}),null);
   assert.throws(()=>chooseReviewer({approved:["owner"],author:"owner"}),/REVIEWER_POLICY/);
   assert.throws(()=>chooseReviewer({approved:["a","b"],author:"owner"}),/REVIEWER_POLICY/);
   assert.equal(chooseReviewer({approved:["reviewer"],author:"owner"}),"reviewer");
@@ -164,3 +164,8 @@ test("native single-Issue contract detects stale identity and missing read-back"
 
 // Keep the audited failure reproduction in the default org test suite.
 import "../evidence/pr54-ci-gate-reproduction.test.mjs";
+
+test("single-maintainer reviewer policy does not invent a second person",()=>{
+  assert.equal(chooseReviewer({approved:[],author:"syllik"}),null);
+  assert.throws(()=>chooseReviewer({approved:["syllik"],author:"syllik"}),/self-review/);
+});
