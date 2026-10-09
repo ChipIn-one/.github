@@ -209,7 +209,15 @@ const isMilestoneControlIssue = issue => !issue?.pull_request
     && typeof issue?.title === 'string'
     && /^\[create-milestone\]/i.test(issue.title);
 
-export const runMilestoneControl = async (issueNumber, api, triggeringActor) => {
+const matchesIssueEvent = (issue, eventIssue) =>
+    eventIssue && typeof eventIssue.title === 'string'
+    && (typeof eventIssue.body === 'string' || eventIssue.body === null)
+    && typeof eventIssue.user?.login === 'string'
+    && issue.title === eventIssue.title
+    && issue.body === eventIssue.body
+    && issue.user?.login === eventIssue.user.login;
+
+export const runMilestoneControl = async (issueNumber, api, triggeringActor, eventIssue = null) => {
     let recognizedControl = false;
     let pendingState = null;
     let result;
@@ -217,6 +225,12 @@ export const runMilestoneControl = async (issueNumber, api, triggeringActor) => 
     try {
         const issue = await api.getIssue(issueNumber);
         if (issue.pull_request || issue.state !== 'open') return { status: 'ignored' };
+        // Never authorize the current Issue text with the actor of a stale
+        // issues:edited/opened/reopened event. Only workflow_dispatch is
+        // intentionally allowed to operate on the latest Issue contents.
+        if (eventIssue !== null && !matchesIssueEvent(issue, eventIssue)) {
+            return { status: 'ignored' };
+        }
         recognizedControl = isMilestoneControlIssue(issue);
         const request = parseMilestoneRequest(issue);
         if (!request) return { status: 'ignored' };
@@ -432,13 +446,17 @@ if (isMainModule) {
         // GITHUB_ACTOR is runner-provided for both Issue events and manual
         // dispatch. Cross-check the signed Issue event's sender when present.
         const actor = process.env.GITHUB_ACTOR;
-        if (process.env.GITHUB_EVENT_NAME === 'issues' && event.sender?.login !== actor) {
-            throw new Error('Issue event sender does not match the trusted GitHub actor.');
+        const isIssueEvent = process.env.GITHUB_EVENT_NAME === 'issues';
+        if (isIssueEvent && (event.sender?.login !== actor || event.issue?.number !== number
+            || typeof event.issue?.title !== 'string'
+            || (typeof event.issue?.body !== 'string' && event.issue?.body !== null)
+            || typeof event.issue?.user?.login !== 'string')) {
+            throw new Error('Issue event snapshot or sender is missing or mismatched.');
         }
         runMilestoneControl(number, makeGitHubApi({
             token: process.env.GITHUB_TOKEN,
             repository: process.env.GITHUB_REPOSITORY,
-        }), actor).then(result => {
+        }), actor, isIssueEvent ? event.issue : null).then(result => {
             console.log(`Create milestone control: ${result.status}`);
         }).catch(error => {
             console.error(displayError(error));

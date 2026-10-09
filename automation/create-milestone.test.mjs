@@ -184,6 +184,64 @@ describe('control Issue state transition', () => {
             assert.equal(test.stats.creates, 0);
         });
     });
+    it('ignores a stale authorized event when a triage editor replaces an ordinary Issue with a command', async () => {
+        const fromEvent = issue('Ordinary bug', 'Original details');
+        const fromApi = issue('[create-milestone] FE 1.2', 'Description: Unauthorized edit');
+        const test = adapter(fromApi);
+        const calls = [];
+        test.api.getPermission = async login => { calls.push(login); return { permission: 'write' }; };
+        const result = await runMilestoneControl(15, test.api, 'authorized-editor', fromEvent);
+        assert.equal(result.status, 'ignored');
+        assert.deepEqual(calls, []);
+        assert.equal(test.stats.creates, 0);
+        assert.equal(test.stats.closes, 0);
+        assert.equal(test.comments.length, 0);
+    });
+    it('ignores an old authorized event after title or description changes', async () => {
+        for (const changed of [
+            issue('[create-milestone] FE 1.3'),
+            issue('[create-milestone] FE 1.2', 'Description: Replaced by another editor'),
+        ]) {
+            const test = adapter(changed);
+            test.api.getPermission = failWrite;
+            const result = await runMilestoneControl(15, test.api, 'authorized-editor', issue());
+            assert.equal(result.status, 'ignored');
+            assert.equal(test.stats.creates, 0);
+            assert.equal(test.comments.length, 0);
+        }
+    });
+    it('ignores a mismatched Issue event author or malformed snapshot', async () => {
+        for (const snapshot of [
+            { ...issue(), user: { login: 'different-author' } },
+            { ...issue(), body: undefined },
+            { ...issue(), title: undefined },
+        ]) {
+            const test = adapter();
+            test.api.getPermission = failWrite;
+            const result = await runMilestoneControl(15, test.api, 'authorized-editor', snapshot);
+            assert.equal(result.status, 'ignored');
+            assert.equal(test.stats.creates, 0);
+        }
+    });
+    it('runs a matching Issue event through both actor and author permission checks', async () => {
+        const control = issue();
+        const test = adapter(control);
+        const checked = [];
+        test.api.getPermission = async login => {
+            checked.push(login);
+            return { permission: 'write' };
+        };
+        assert.equal((await runMilestoneControl(15, test.api, 'authorized-editor', { ...control })).status, 'completed');
+        assert.ok(checked.includes('authorized-editor'));
+        assert.ok(checked.includes('author'));
+        assert.equal(test.stats.creates, 1);
+    });
+    it('keeps manual workflow dispatch tied to live request and dispatch actor permissions', async () => {
+        const test = adapter();
+        const done = await runMilestoneControl(15, test.api, 'author');
+        assert.equal(done.status, 'completed');
+        assert.equal(test.stats.creates, 1);
+    });
     it('rejects a triage editor even if the original author is a writer', async () => {
         const test = adapter();
         const actors = [];
