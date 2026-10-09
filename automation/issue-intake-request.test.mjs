@@ -282,3 +282,32 @@ test('rendered success comment contains canonical read-back', () => {
   assert.match(comment, /Project #5: membership `1`, Status `Backlog`/);
   assert.match(comment, /issue-metadata/);
 });
+
+test('KB owner travels through validated bridge queue into canonical writer', () => {
+  const request = {
+    target: 'ChipIn-one/chipin-knowledge-base#33',
+    issueType: 'Task',
+    priority: 'P2',
+    severity: 'none',
+    owner: 'syllik',
+  };
+  const parsed = parseRequestBody(body(request));
+  assert.equal(parsed.owner, 'syllik');
+  const validated = validateQueuedRequest(config, {
+    ...request,
+    schemaVersion: 1,
+    requestIssue: 100,
+    requestIssueUrl: 'https://github.com/ChipIn-one/.github/issues/100',
+    actor: 'syllik',
+    triggerActor: 'syllik',
+  });
+  assert.equal(validated.valid, true);
+  assert.equal(validated.request.owner, 'syllik');
+  const args = buildIntakeArgs(validated.request, 'receipt.json');
+  assert.equal(args[args.indexOf('--owner') + 1], 'syllik');
+  const noOwner = validateQueuedRequest(config, { ...request, owner: undefined });
+  assert.equal(noOwner.valid, false);
+  assert.match(noOwner.blockers.join('\n'), /explicitly selected/);
+  const wrongFixedOwner = validateQueuedRequest(config, { ...request, target: 'ChipIn-one/chipin-backend#168' });
+  assert.match(wrongFixedOwner.blockers.join('\n'), /Owner policy conflict/);
+});
