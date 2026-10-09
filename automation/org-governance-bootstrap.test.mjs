@@ -31,6 +31,8 @@ test('other org issue, writer, branch, actor, stale SHA are denied', () => {
 });
 test('bootstrap allowlist rejects arbitrary FE work and destructive infra changes', () => {
   assert.equal(bootstrapAllowsPath('automation/issue-admission.test.mjs'), true);
+  assert.equal(bootstrapAllowsPath('.github/workflows/issue-metadata-finalize.yml'), true);
+  assert.equal(bootstrapAllowsPath('.github/workflows/create-milestone.yml'), false);
   assert.equal(bootstrapAllowsPath('automation/create-milestone.mjs'), false);
   assert.equal(bootstrapAllowsPath('src/routes/payments.ts'), false);
   assert.equal(check(ISSUE, PR, [{ filename: 'automation/create-milestone.mjs', status: 'modified' }]).status, 'BLOCKED');

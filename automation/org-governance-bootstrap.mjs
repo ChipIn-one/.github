@@ -15,6 +15,8 @@ const ALLOWED = new Set([
   'automation/issue-intake-request.test.mjs',
   'automation/development-link-action/action.yml',
   '.github/workflows/automation-tests.yml',
+  // Existing KB manual finalizer is an approved intake adapter, not another writer.
+  '.github/workflows/issue-metadata-finalize.yml',
 ]);
 export function bootstrapAllowsPath(path) {
   return ALLOWED.has(path) || /^automation\/issue-admission(?:-pr)?(?:\.test)?\.mjs$/.test(path) ||
