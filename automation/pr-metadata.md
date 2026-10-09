@@ -16,7 +16,7 @@ The referenced implementation PRs must be merged into dev; their Task identities
 
 Existing PR assignees and requested reviewers are retained. For an otherwise unassigned implementation PR, precisely one Issue assignee is an acceptable owner; otherwise configure explicit implementationOwner. Release PRs need an approved releaseOwner. Both are null by default: OWNER_POLICY diagnostic is intentional, not permission to guess the PR author. Author fallback is opt-in and disabled. GitHub assignability is checked before adding an assignee.
 
-Requested reviewers use a **separate approved list**, currently empty by design. Choose exactly one eligible configured reviewer, validate collaborator write-or-higher permission, never self-request; only request after frontend-ci success on exact PR head SHA. Existing reviewer requests remain untouched. This does not approve review or invoke paid review bots.
+Requested reviewers use a **separate approved list**, currently empty by design. Choose exactly one eligible configured reviewer, validate collaborator write-or-higher permission, never self-request. A review request is permitted only after **all** branch-protection required checks are successful on the exact PR head SHA and current base revision. The trusted GitHub Actions producer must match the configured required-check app and the real `.github/workflows/frontend-ci.yml` (target `dev`) or `.github/workflows/main-ci.yml` (target `main`) workflow run linked to this PR. Missing/pending/failing/stale results, a changed required-check policy, an unexpected workflow or unreadable run fail closed. `frontend-ci=success` does not authorize release review while required `main-ci` fails or is pending. Existing reviewer requests remain untouched. This does not approve review or invoke paid review bots.
 
 Taxonomy: additive pr:implementation / pr:release category label, no duplication of Issue Priority/Severity/Type/Milestone/Project Status. Frontend is implicit in FE-only rollout. Missing category labels are created deterministically. Read-back required.
 
@@ -25,3 +25,11 @@ Project #5: PR content item added only if absent; full paginated check before an
 ## Deployment and blocker policy
 
 Trusted FE pull_request metadata events only: opened, edited, reopened, synchronize, ready_for_review; manual workflow_dispatch retry. No PR-head code checkout. Shared composite action pinned to exact commit. Serialized per PR. Requires Issues write and PR write plus **org Projects v2 read/write** for Project #5; GITHUB_TOKEN alone often cannot write org Projects. FE secret CHIPIN_PR_METADATA_TOKEN must have the approved limited permissions. Missing project rights fail closed. Review requests are deferred until current-SHA CI; do not pay for bot review on metadata events. New FE implementation/release PRs need live read-back after token/owner/reviewer approval; human-only merge remains unchanged.
+
+## Admission dependency — org #53
+
+This #381 reconciler is not a replacement for canonical issue intake. The shared `automation/issue-intake.mjs` and its versioned fresh `INTAKE_COMPLETE` read-back remain sole admission authority. All future task publication/handoff and release acceptance must fail closed until org #53 has deployed its read-only gate to active entrypoints; an Issue URL or a queued connector bridge event is not a valid receipt. The existing #381 Issue is a scoped pre-#53 bootstrap; do not bulk-fix historic tasks or silently manufacture receipts. The PR metadata adapter never writes Issue Type/Priority/Severity/Status.
+
+## Audit reproduction
+
+`node --test evidence/pr54-ci-gate-reproduction.test.mjs` reproduces and guards the former `frontend-ci=success` / required `main-ci=failure/pending` release reviewer bypass. The same cases run via `automation/pr-metadata.test.mjs`. Review cycle is bounded to one independent current-SHA review and no more than two correction batches; requested human reviewers and prior same-SHA reviews are never deleted or multiplied.
