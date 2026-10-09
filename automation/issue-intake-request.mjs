@@ -402,7 +402,7 @@ export function renderReceiptComment(receipt, queueCommentId = null) {
       `- Read-back: Type \`${receipt.intake.receipt.issueType ?? 'missing'}\`, Priority \`${field(receipt, 'Priority') ?? 'missing'}\`, Severity \`${field(receipt, 'Severity') ?? 'none'}\`, Milestone \`${receipt.intake.receipt.milestone ?? 'none'}\``,
       `- Project #5: membership \`${receipt.intake.receipt.project?.membershipCount ?? 'unreadable'}\`, Status \`${receipt.intake.receipt.project?.status ?? 'unreadable'}\``,
       `- Native assignees: \`${(receipt.intake.receipt.assignees ?? []).join(', ') || 'unreadable'}\`, required \`${receipt.intake.receipt.requiredAssignee ?? 'unreadable'}\``,
-      `- Admission: \`${receipt.intake.receipt.status ?? 'BLOCKED'}\`, revision \`${receipt.intake.receipt.revision ?? 'unreadable'}\`, read-back \`${receipt.intake.receipt.checkedAt ?? 'unreadable'}\``, 
+      `- Admission: \`${receipt.intake.receipt.status ?? 'BLOCKED'}\`, revision \`${receipt.intake.receipt.revision ?? 'unreadable'}\`, read-back \`${receipt.intake.receipt.checkedAt ?? 'unreadable'}\``,
     );
   }
   if (receipt?.intake?.applied?.length) {
