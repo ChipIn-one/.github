@@ -104,7 +104,7 @@ export function readTaskIdentityMarker(body) {
 // Reuse the same explicit KB owner marker at both PR admission and the
 // immediate native Development mutation boundary; never infer a KB default.
 export function readKBTaskOwnerMarker(body) {
-  const matches = String(body ?? '').match(/^Task owner:\\s*@?([a-z\\d-]+)\\s*$/gim) ?? [];
+  const matches = String(body ?? '').match(/^Task owner:\s*@?([a-z\d-]+)\s*$/gim) ?? [];
   if (matches.length !== 1) throw new Error('KB PR requires one explicit Task owner: @login line.');
   return matches[0].split(':')[1].trim().replace(/^@/, '');
 }
