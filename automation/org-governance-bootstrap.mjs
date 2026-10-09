@@ -14,6 +14,8 @@ const ALLOWED = new Set([
   'automation/issue-intake.test.mjs', 'automation/issue-intake-request.mjs',
   'automation/issue-intake-request.test.mjs',
   'automation/development-link-action/action.yml',
+  // Protect the admitted SHA directly before the single native Development mutation.
+  'automation/development-link.mjs', 'automation/development-link.test.mjs',
   '.github/workflows/automation-tests.yml',
   // Existing KB manual finalizer is an approved intake adapter, not another writer.
   '.github/workflows/issue-metadata-finalize.yml',
