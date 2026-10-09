@@ -254,7 +254,14 @@ export function verifyFinalState({ config, repository, number, classification, s
     blockers,
     receipt: {
       ...admission.receipt,
-      status: blockers.length ? 'BLOCKED' : 'INTAKE_COMPLETE',
+      // Terminal reconciliation is observable but never an execution/admission receipt.
+      // Keep a separate contract AND status so bridge/assertFreshReceipt cannot mistake
+      // a closed/completed Done mirror for an open task's INTAKE_COMPLETE.
+      contractVersion: snapshot?.issue?.state === 'closed' && snapshot?.issue?.state_reason === 'completed'
+        ? 'chipin-terminal-reconciliation/v1' : admission.receipt.contractVersion,
+      status: blockers.length ? 'BLOCKED'
+        : snapshot?.issue?.state === 'closed' && snapshot?.issue?.state_reason === 'completed'
+          ? 'TERMINAL_RECONCILED' : 'INTAKE_COMPLETE',
       blockers: [...blockers],
       issueUrl: snapshot?.issue?.html_url || snapshot?.issue?.url || null,
       issueType: observed.issueType,
