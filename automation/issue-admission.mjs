@@ -56,15 +56,18 @@ function observedFields(config, snapshot) {
   return { fields, blockers };
 }
 
-export function verifyAdmission({ config, repository, number, selectedOwner = null, snapshot, project, checkedAt = new Date().toISOString(), expectedRevision = null }) {
+export function verifyAdmission({ config, repository, number, selectedOwner = null, snapshot, project, checkedAt = new Date().toISOString(), expectedRevision = null, allowTerminalReconciliation = false }) {
   const blockers = [];
   let owner = null;
   try { owner = requiredOwner(repository, selectedOwner); } catch (error) { blockers.push(error.message); }
   const issue = snapshot?.issue;
   if (!issue || issue.number !== number || issue.pull_request) blockers.push('Unreadable or mismatched native Issue identity.');
-  // Native closure is terminal authority: no cancelled or already-completed task
-  // may authorize new execution or PR publication, regardless of Project Status.
-  if (issue && issue.state !== 'open') blockers.push('Native Issue must be open for task admission (state ' + (issue.state ?? 'unreadable') + '/' + (issue.state_reason ?? 'unknown') + ').');
+  // Native closure is terminal authority for admission. The canonical writer may
+  // separately audit an already-completed Done mirror, never authorize new work.
+  if (issue && issue.state !== 'open' &&
+      !(allowTerminalReconciliation && issue.state === 'closed' && issue.state_reason === 'completed')) {
+    blockers.push('Native Issue must be open for task admission (state ' + (issue.state ?? 'unreadable') + '/' + (issue.state_reason ?? 'unknown') + ').');
+  }
   if (issue?.repository_url && !issue.repository_url.endsWith('/' + repository)) blockers.push('Native Issue repository identity mismatch.');
   if (!issue?.node_id || !issue?.updated_at) blockers.push('Issue node_id/updated_at unavailable for revision-bound admission.');
   blockers.push(...validateBody(issue?.title, issue?.body));
