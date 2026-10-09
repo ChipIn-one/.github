@@ -331,6 +331,9 @@ describe('pending created milestone verification across retries', () => {
         let closes = 0;
         let readbackFails = false;
         let permissionFails = false;
+        let losePostResponse = false;
+        let rejectPostBeforeCommit = false;
+        let rejectIntentWrite = false;
         const api = {
             getIssue: async () => ({ ...currentIssue }),
             getPermission: async () => {
@@ -340,8 +343,10 @@ describe('pending created milestone verification across retries', () => {
             listMilestones: async () => milestones.map(x => ({ ...x })),
             createMilestone: async () => {
                 creates++;
+                if (rejectPostBeforeCommit) throw new Error('POST rejected before commit');
                 const created = { ...milestone(), description: 'Wrong metadata' };
                 milestones.push(created);
+                if (losePostResponse) throw new Error('POST response lost');
                 return { ...created };
             },
             getMilestone: async () => {
@@ -350,9 +355,16 @@ describe('pending created milestone verification across retries', () => {
             },
             getPendingCreated: async () => {
                 const match = /chipin:create-milestone:pending-verification:v1:(\d+)/.exec(botReceipt ?? '');
-                return match ? Number(match[1]) : null;
+                if (match) return Number(match[1]);
+                const intent = /chipin:create-milestone:pending-intent:v1:([a-f0-9]{64})/.exec(botReceipt ?? '');
+                return intent ? { intentHash: intent[1] } : null;
             },
-            upsertReceipt: async (_number, value) => { botReceipt = value; },
+            upsertReceipt: async (_number, value) => {
+                if (rejectIntentWrite && value.includes('pending-intent:')) {
+                    throw new Error('Receipt write failed');
+                }
+                botReceipt = value;
+            },
             closeIssue: async () => {
                 closes++;
                 currentIssue = { ...currentIssue, state: 'closed', state_reason: 'completed' };
@@ -364,10 +376,64 @@ describe('pending created milestone verification across retries', () => {
             setIssue: value => { currentIssue = value; },
             setPermissionFails: value => { permissionFails = value; },
             setReadbackFails: value => { readbackFails = value; },
+            setLosePostResponse: value => { losePostResponse = value; },
+            setRejectPostBeforeCommit: value => { rejectPostBeforeCommit = value; },
+            setRejectIntentWrite: value => { rejectIntentWrite = value; },
             getReceipt: () => botReceipt,
             counts: () => ({ creates, closes }),
         };
     };
+    it('persists intent before POST and verifies persisted metadata after a lost response', async () => {
+        const scenario = makeCase();
+        scenario.setLosePostResponse(true);
+        await assert.rejects(runMilestoneControl(15, scenario.api, 'author'), /POST response lost/);
+        assert.deepEqual(scenario.counts(), { creates: 1, closes: 0 });
+        assert.match(scenario.getReceipt(), /pending-intent:v1:[a-f0-9]{64}/);
+        scenario.setLosePostResponse(false);
+        await assert.rejects(runMilestoneControl(15, scenario.api, 'author'), /metadata read-back/);
+        assert.deepEqual(scenario.counts(), { creates: 1, closes: 0 });
+        assert.match(scenario.getReceipt(), /pending-verification:v1:8/);
+        scenario.milestones[0].description = 'Frontend iteration';
+        assert.equal((await runMilestoneControl(15, scenario.api, 'author')).status, 'completed');
+        assert.deepEqual(scenario.counts(), { creates: 1, closes: 1 });
+    });
+    it('accepts a previously lost POST only after matching metadata is verified', async () => {
+        const scenario = makeCase();
+        scenario.setLosePostResponse(true);
+        await assert.rejects(runMilestoneControl(15, scenario.api, 'author'), /POST response lost/);
+        scenario.milestones[0].description = 'Frontend iteration';
+        scenario.setLosePostResponse(false);
+        assert.equal((await runMilestoneControl(15, scenario.api, 'author')).status, 'completed');
+        assert.deepEqual(scenario.counts(), { creates: 1, closes: 1 });
+    });
+    it('can retry an intent after a POST rejected before any milestone was stored', async () => {
+        const scenario = makeCase();
+        scenario.setRejectPostBeforeCommit(true);
+        await assert.rejects(runMilestoneControl(15, scenario.api, 'author'), /POST rejected before commit/);
+        assert.match(scenario.getReceipt(), /pending-intent:v1:/);
+        scenario.setRejectPostBeforeCommit(false);
+        await assert.rejects(runMilestoneControl(15, scenario.api, 'author'), /metadata read-back/);
+        assert.deepEqual(scenario.counts(), { creates: 2, closes: 0 });
+        assert.match(scenario.getReceipt(), /pending-verification:v1:8/);
+    });
+    it('refuses creation when the verification-intent receipt fails to persist', async () => {
+        const scenario = makeCase();
+        scenario.setRejectIntentWrite(true);
+        await assert.rejects(runMilestoneControl(15, scenario.api, 'author'), /Receipt write failed/);
+        assert.deepEqual(scenario.counts(), { creates: 0, closes: 0 });
+        scenario.setRejectIntentWrite(false);
+        await assert.rejects(runMilestoneControl(15, scenario.api, 'author'), /metadata read-back/);
+        assert.deepEqual(scenario.counts(), { creates: 1, closes: 0 });
+    });
+    it('fails closed when a control request changes while an unknown POST is pending', async () => {
+        const scenario = makeCase();
+        scenario.setLosePostResponse(true);
+        await assert.rejects(runMilestoneControl(15, scenario.api, 'author'), /POST response lost/);
+        scenario.setIssue(issue('[create-milestone] Other release', 'Description: Different'));
+        await assert.rejects(runMilestoneControl(15, scenario.api, 'author'), /Pending milestone request changed/);
+        assert.deepEqual(scenario.counts(), { creates: 1, closes: 0 });
+        assert.match(scenario.getReceipt(), /pending-intent:v1:/);
+    });
     it('does not close a control Issue by reusing an unverified POST on retry', async () => {
         const t = makeCase();
         await assert.rejects(runMilestoneControl(15, t.api, 'author'), /metadata read-back/);
