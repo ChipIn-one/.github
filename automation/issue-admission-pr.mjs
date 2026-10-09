@@ -42,9 +42,11 @@ export function selectedOwnerForPr(repository, body) {
   return owners[0].split(':')[1].trim().replace(/^@/, '');
 }
 
-export async function preflightPr({ client, config, repository, number, read = readAdmission }) {
+export async function preflightPr({ client, config, repository, number, expectedHeadSha, read = readAdmission }) {
+  if (!/^[a-f0-9]{40}$/.test(expectedHeadSha ?? '')) throw new Error('Exact expected current PR head SHA required.');
   const pr = await client.request('/repos/' + repository + '/pulls/' + number);
   if (pr?.number !== number || pr?.state !== 'open') throw new Error('PR identity/state mismatch or unreadable.');
+  if (pr.head?.sha !== expectedHeadSha) throw new Error('STALE: PR head SHA changed since the invoking workflow event.');
   const ids = taskIdentitiesForPr(repository, pr);
   const owner = selectedOwnerForPr(repository, pr.body);
   const receipts = [];
@@ -61,7 +63,7 @@ export async function preflightPr({ client, config, repository, number, read = r
 function args(argv) {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) {
-    if (!argv[i]?.startsWith('--') || !argv[i + 1]) throw new Error('Expected --repository --pr --output (optional).');
+    if (!argv[i]?.startsWith('--') || !argv[i + 1]) throw new Error('Expected --repository --pr --expected-head-sha --output (optional).');
     options[argv[i].slice(2)] = argv[i + 1];
   }
   return options;
@@ -71,7 +73,10 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const number = Number(opts.pr);
   if (!Number.isInteger(number) || number < 1) throw new Error('Positive --pr required.');
   const config = JSON.parse(await readFile(resolve(opts.config ?? 'automation/metadata-migration.config.json'), 'utf8'));
-  const result = await preflightPr({ client: new GitHubClient(env.GITHUB_TOKEN), config, repository: opts.repository, number });
+  const result = await preflightPr({
+    client: new GitHubClient(env.GITHUB_TOKEN), config, repository: opts.repository,
+    number, expectedHeadSha: opts['expected-head-sha'],
+  });
   if (opts.output) {
     const { writeFile } = await import('node:fs/promises');
     await writeFile(resolve(opts.output), JSON.stringify(result, null, 2) + '\n');
