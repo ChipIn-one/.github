@@ -395,6 +395,12 @@ export async function reconcileDevelopmentLink(client, {
         afterAdmission?.body !== admittedPRBody) {
       throw new Error('STALE: PR head, state, branch or body changed during live Issue admission.');
     }
+    // The awaited PR read may exceed the receipt's 120-second lifetime.
+    // Recheck freshness at the final authorized boundary, for both the
+    // already-linked return and the first Development write.
+    assertFreshReceipt(latest.receipt, {
+      issue: task.canonical, revision: admission.expectedRevision,
+    });
   }
 
   if (before.linked) {
