@@ -20,7 +20,8 @@ function prIdentity(pr) {
     base:{sha:pr?.base?.sha,ref:pr?.base?.ref,repo:pr?.base?.repo?.full_name}});
 }
 
-export async function reconcileProjectPR({reader,writer,config,number,expectedSha}) {
+export async function reconcileProjectPR({reader,writer,config,number,expectedSha,
+  admit=preflightPr,reread=readAdmission,verifyNative=assertSingleNativeIssue,verifyIncluded=verifyRelease}) {
   if (!Number.isInteger(number)||number<=0 || !/^[a-f0-9]{40}$/.test(expectedSha||""))
     throw new Error("PROJECT_REQUEST: exact PR identity and SHA required");
   const pr=await reader.request(ROOT+"/pulls/"+number);
@@ -33,12 +34,12 @@ export async function reconcileProjectPR({reader,writer,config,number,expectedSh
   if (names.includes(VALID.get(kind==="implementation"?"release":"implementation")))
     throw new Error("PROJECT_REQUEST: contradictory PR category labels");
 
-  const admitted=await preflightPr({client:reader,config,repository:REPO,number,expectedHeadSha:expectedSha});
+  const admitted=await admit({client:reader,config,repository:REPO,number,expectedHeadSha:expectedSha});
   if (kind==="implementation") {
     const identity=implementationIdentity(pr.body);
-    await assertSingleNativeIssue(reader,number,identity.issueNumber,true);
+    await verifyNative(reader,number,identity.issueNumber,true);
   } else {
-    await verifyRelease(reader,releaseReferences(pr.body));
+    await verifyIncluded(reader,releaseReferences(pr.body));
   }
   let latest=await reader.request(ROOT+"/pulls/"+number);
   if(prIdentity(latest)!==prIdentity(pr)) throw new Error("PROJECT_REQUEST: PR drifted during validation");
@@ -47,7 +48,7 @@ export async function reconcileProjectPR({reader,writer,config,number,expectedSh
   // Do not use an old bridge comment or an event payload as admission.
   for(const receipt of admitted.receipts) {
     const number=Number(receipt.issue.split("#")[1]);
-    const result=await readAdmission({
+    const result=await reread({
       client:reader,config,repository:REPO,number,
       selectedOwner:"syllik",expectedRevision:receipt.revision
     });
