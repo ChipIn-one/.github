@@ -609,3 +609,33 @@ test('agent entrypoint requires completed ChipIn intake after gh issue create', 
   assert.match(agents, /automation\/issue-intake\.md/);
   assert.match(agents, /exactly one Project #5 membership with readable Status and read-back receipt/);
 });
+
+test('cancelled or unreadable Issues never plan canonical metadata or Project writes', () => {
+  for (const [state, reason] of [['closed', 'not_planned'], ['closed', null], [null, null]]) {
+    const snapshot = issueSnapshot({ state, stateReason: reason });
+    snapshot.issue.assignees = [];
+    const plan = buildReconcilePlan({
+      config, repository: 'ChipIn-one/chipin-frontend', number: 999,
+      classification, snapshot, project: project(),
+    });
+    assert.equal(plan.action, 'incomplete');
+    assert.deepEqual(plan.operations, []);
+    assert.match(plan.blockers.join(' '), /refusing all intake mutations/);
+  }
+});
+
+test('closed/completed keeps its separate terminal Project Done reconciliation path', () => {
+  const snapshot = issueSnapshot({
+    type: 'Bug', priority: 'P1', severity: 'Major',
+    state: 'closed', stateReason: 'completed',
+  });
+  const plan = buildReconcilePlan({
+    config, repository: 'ChipIn-one/chipin-frontend', number: 999,
+    classification, snapshot,
+    project: project({ items: [{
+      id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Done',
+    }] }),
+  });
+  assert.deepEqual(plan.operations, []);
+  assert.equal(plan.action, 'noop');
+});
