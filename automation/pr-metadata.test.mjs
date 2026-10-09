@@ -135,14 +135,16 @@ test("release retries preserve manual values, avoid duplicate Project item and n
   const policy={repository:repo,project:5,ownerPolicy:{allowIssueOwner:true,allowAuthorFallback:false,
     implementationOwner:null,releaseOwner:null},reviewerPolicy:{implementation:[],release:[]}};
   await assert.rejects(reconcilePR(client,policy,20,"b".repeat(40)),/SHA/u);
-  const one=await reconcilePR(client,policy,20,SHA);
-  const two=await reconcilePR(client,policy,20,SHA);
-  assert.equal(one.kind,"release");assert.equal(one.project.created,true);
-  assert.equal(two.project.created,false);
-  assert.equal(projectAdds,1);assert.equal(labelAdds,1);assert.equal(issueWrites,1); // additive PR label only
+  const options={admissionClient:client,admissionConfig:{},
+    admit:async()=>({status:"INTAKE_COMPLETE",receipts:[]})};
+  const one=await reconcilePR(client,policy,20,SHA,options);
+  const two=await reconcilePR(client,policy,20,SHA,options);
+  assert.equal(one.kind,"release");assert.equal(one.project.status,"pending-org-writer");
+  assert.equal(two.project.status,"pending-org-writer");
+  assert.equal(projectAdds,0);assert.equal(labelAdds,1);assert.equal(issueWrites,1); // no FE Project write
   assert.ok(nativeReads>=4); // native userLinkedOnly read-back on both retries
-  assert.ok(two.blockers.some(x=>x.includes("REVIEWER_POLICY")));
-  assert.equal(items.length,1);
+  assert.ok(!two.blockers.some(x=>x.includes("REVIEWER_POLICY")));
+  assert.equal(items.length,0);
   assert.deepEqual(labels.map(x=>x.name),["manual-label","pr:release"]);
 });
 
