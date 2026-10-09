@@ -57,3 +57,11 @@ jobs:
           node-version: '24.21.0'
       - name: Run automation tests
         run: node --test automation/*.test.mjs
+      - name: Verify bounded org #53 bootstrap
+        if: github.event_name == 'pull_request' && github.event.pull_request.number == 57
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CURRENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          node automation/org-governance-bootstrap.mjs --head "$CURRENT_HEAD_SHA"
