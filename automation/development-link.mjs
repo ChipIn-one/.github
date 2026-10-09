@@ -360,6 +360,23 @@ export async function reconcileDevelopmentLink(client, {
     assertFreshReceipt(latest?.receipt, {
       issue: task.canonical, revision: admission.expectedRevision,
     });
+    // Issue/Project read-back is multi-request. A push or PR-body edit during it
+    // must not authorize a different PR revision to receive a native link.
+    let afterAdmission;
+    try { afterAdmission = await client.request('/repos/' + repository + '/pulls/' + prNumber); }
+    catch (error) { throw new Error('Current PR head after Issue admission is unreadable: ' + error.message); }
+    if (afterAdmission?.number !== prNumber || afterAdmission?.state !== 'open' ||
+        afterAdmission?.head?.sha !== expectedHeadSha ||
+        afterAdmission?.head?.repo?.full_name !== repository ||
+        afterAdmission?.base?.repo?.full_name !== repository ||
+        afterAdmission?.base?.ref !== ({
+          'ChipIn-one/chipin-frontend': 'dev',
+          'ChipIn-one/chipin-backend': 'develop',
+          'ChipIn-one/chipin-knowledge-base': 'master',
+        })[repository] ||
+        afterAdmission?.body !== current.body) {
+      throw new Error('STALE: PR head, state, branch or body changed during live Issue admission.');
+    }
   }
 
   if (before.linked) {
