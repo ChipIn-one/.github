@@ -44,8 +44,12 @@ export function bodyGaps(body) {
 }
 export function chooseOwner({manual=[],issue=[],approved=null,author=null,allowAuthor=false}) {
   if (manual.length) return null;
-  if (issue.length>1) throw new Error("OWNER_POLICY: multiple Issue assignees, manual decision required");
-  const owner = issue[0] ?? approved ?? (allowAuthor ? author : null);
+  // Multiple native Issue assignees are valid under #53. Use the explicitly
+  // approved owner only if they really are among those assignees; never drop
+  // or silently choose among other human owners.
+  if (issue.length>1 && !(approved && issue.includes(approved)))
+    throw new Error("OWNER_POLICY: multiple Issue assignees without a matching approved owner");
+  const owner = issue.length>1 ? approved : (issue[0] ?? approved ?? (allowAuthor ? author : null));
   if (!owner) throw new Error("OWNER_POLICY: no Issue owner or approved repository/release owner; assign Issue or configure explicit owner");
   return owner;
 }
@@ -283,7 +287,8 @@ export async function reconcilePR(client,policy,number,expectedSha) {
   } catch (e) {blockers.push(e.message);}
   const reviewers=(await client.request(url)).requested_reviewers??[];
   try {
-    const selected=chooseReviewer({manual:reviewers.map(x=>x.login),
+    const teams=(await client.request(url)).requested_teams??[];
+    const selected=chooseReviewer({manual:[...reviewers.map(x=>x.login),...teams.map(x=>x.slug)],
       approved:policy.reviewerPolicy[kind],author:pr.user?.login});
     if (selected) {
       const ci=await requiredShaCIGreen(client,pr);
