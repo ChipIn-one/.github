@@ -80,6 +80,21 @@ test('missing Type/Priority/Bug Severity or invalid body fails read-back', () =>
   const noAcceptance = snapshot(); noAcceptance.issue.body = '## Problem\nThere is a specific failure described here.\n## Outcome\nThe desired result is specifically described.';
   assert.match(check(FE, noAcceptance).blockers.join('\n'), /acceptance/);
 });
+test('closed cancelled/completed native Issues never authorize fresh work', () => {
+  for (const [reason, status] of [['not_planned', 'Todo'], ['completed', 'Done']]) {
+    const snap = snapshot();
+    snap.issue.state = 'closed';
+    snap.issue.state_reason = reason;
+    const result = check(FE, snap, project(FE, status));
+    assert.equal(result.receipt.status, 'BLOCKED');
+    assert.match(result.blockers.join('\\n'), /Native Issue must be open/);
+    assert.throws(() => assertFreshReceipt(result.receipt, { issue: FE + '#71' }), /INTAKE_COMPLETE/);
+  }
+  const unreadable = snapshot();
+  unreadable.issue.state = undefined;
+  assert.match(check(FE, unreadable).blockers.join('\\n'), /Native Issue must be open/);
+});
+
 test('duplicate Project items, invalid Status, stale/conflicting revision block', () => {
   assert.match(check(FE, snapshot(), project(FE, 'Backlog', 2)).blockers.join('\n'), /membership count 2/);
   assert.match(check(FE, snapshot(), project(FE, null)).blockers.join('\n'), /Status/);
