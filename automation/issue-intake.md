@@ -114,3 +114,20 @@ node --test automation/*.test.mjs
 ```
 
 Coverage includes explicit intake, optional Milestone behavior, rejection of retired Release-scope bridge payloads, preservation of human values, Bug Severity requirements, missing/duplicate Project membership, retry safety, permission failure, and read-back failure.
+
+## Admission v1 and agent entrypoints
+
+The sole canonical create/reconcile writer remains `issue-intake.mjs`. It now validates a substantive title/body, actual assignees (FE `syllik`, BE `olegbal`, KB explicitly supplied `--owner <login>`), Type/Priority/applicable Severity, Project #5 membership/Status and full native read-back before an `INTAKE_COMPLETE` receipt. Other native human assignees and Milestones are never cleared. Reads fail closed, and a writer checkpoint with unknown issue identity cannot be retried as a new create.
+
+Read-only preflight (run again immediately before each execution/publication/handoff, not from a stored cache):
+
+```sh
+GITHUB_TOKEN=... node automation/issue-admission.mjs --issue ChipIn-one/chipin-frontend#123 --output /tmp/intake-readback.json
+# KB additionally requires --owner <explicitly-selected-login>
+```
+
+On positive read-back the JSON has `contractVersion: chipin-issue-admission/v1`, `status: INTAKE_COMPLETE`, exact `issue`, `revision`, `checkedAt`, `issueUpdatedAt`, native `assignees`, `requiredAssignee`, Issue Type/fields and Project item/Status. A receipt is valid for no more than 120 seconds; after a revision change it is stale even inside the window. Use `--expected-revision` to ensure a pinned task revision remains current. For implementation PR and FE release PR use `issue-admission-pr.mjs` or the shared composite action: it resolves the single exact Task identity (or a release's explicit Included Issues list) before verifying each Issue. Native Development relationship is separate evidence. Never treat a completed intake as human execution approval.
+
+The connector uses the existing `[issue-intake]` control issue; the request accepts optional `owner` (mandatory for KB), e.g. `{"target":"ChipIn-one/chipin-knowledge-base#32","issueType":"Task","priority":"P2","severity":"none","owner":"approved-login"}`. FE/BE owner is repository policy. `QUEUED` is **not** a completed receipt: only a subsequent canonical result comment with an `INTAKE_COMPLETE` admission payload can unblock work. The GitHub connector can still create an ordinary raw Issue directly; its tool cannot be intercepted by an org repository workflow. Agents must enforce the stop before continuing and must not report successful canonical creation until read-back. Permissions are required for organization Issue Fields and Project #5; missing credential/visibility blocks, without fallback. Manual Issue Forms require finalizer and the same read-back before execution.
+
+The org-governance bootstrapping allowance is **only** existing `ChipIn-one/.github#53`, human-approved scope with required owner `syllik`; it is not a generic bypass and never admits FE/BE/KB work. A new org infrastructure Issue needs a separately approved scoped governance path. Milestone control issue commands in `create-milestone.mjs` remain narrow to FE/BE releases; they cannot authorize any LLM execution.
