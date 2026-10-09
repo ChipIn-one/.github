@@ -35,16 +35,17 @@ test('KB owner requires explicit single PR marker', () => {
 test('negative publication: queued-only and missing admission stop before handoff', async () => {
   const client = { request: async () => pr() };
   const config = {};
-  await assert.rejects(() => preflightPr({ client, config, repository: FE, number: 10,
+  await assert.rejects(() => preflightPr({ client, config, repository: FE, number: 10, expectedHeadSha: 'a'.repeat(40),
     read: async () => ({ blockers: ['Native Priority missing'], receipt: { status: 'BLOCKED' } }),
   }), /Priority missing/);
-  await assert.rejects(() => preflightPr({ client, config, repository: FE, number: 10,
+  await assert.rejects(() => preflightPr({ client, config, repository: FE, number: 10, expectedHeadSha: 'a'.repeat(40),
     read: async () => ({ blockers: [], receipt: { status: 'QUEUED' } }),
   }), /INTAKE_COMPLETE/);
 });
 test('PR head SHA and exact identities are included in a successful current readback', async () => {
   const output = await preflightPr({
     client: { request: async () => pr() }, config: {}, repository: FE, number: 10,
+    expectedHeadSha: 'a'.repeat(40),
     read: async () => ({ blockers: [], receipt: {
       contractVersion: 'chipin-issue-admission/v1', status: 'INTAKE_COMPLETE',
       issue: FE + '#71', revision: 'rev', checkedAt: new Date().toISOString(), blockers: [],
@@ -53,4 +54,15 @@ test('PR head SHA and exact identities are included in a successful current read
   assert.equal(output.prHeadSha, 'a'.repeat(40));
   assert.equal(output.receipts.length, 1);
   assert.equal(output.status, 'INTAKE_COMPLETE');
+});
+
+test('current PR SHA is mandatory and a stale event blocks before metadata read', async () => {
+  let reads = 0;
+  const input = {
+    client: { request: async () => pr() }, config: {}, repository: FE, number: 10,
+    read: async () => { reads++; throw new Error('must not read Issue after SHA mismatch'); },
+  };
+  await assert.rejects(() => preflightPr({ ...input }), /expected current PR head SHA/);
+  await assert.rejects(() => preflightPr({ ...input, expectedHeadSha: 'b'.repeat(40) }), /STALE.*PR head SHA/);
+  assert.equal(reads, 0);
 });
