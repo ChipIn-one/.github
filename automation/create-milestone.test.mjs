@@ -216,7 +216,11 @@ describe('control Issue state transition', () => {
             return { permission: 'write' };
         };
         assert.equal((await runMilestoneControl(15, test.api, 'authorized-editor')).status, 'completed');
-        assert.deepEqual(checked, ['authorized-editor', 'author', 'authorized-editor', 'author']);
+        assert.deepEqual(checked, [
+            'authorized-editor', 'author',
+            'authorized-editor', 'author',
+            'authorized-editor', 'author',
+        ]);
     });
     it('rejects creation if the triggering actor loses write access during pagination', async () => {
         const test = adapter();
@@ -565,7 +569,7 @@ describe('concurrent cancellation and ambiguous closure', () => {
     });
     it('does not close when request was cancelled after success receipt', async () => {
         const t = mkApi();
-        t.snapshots.push(original(), original(), original(), { ...original(), state: 'closed', state_reason: 'not_planned' });
+        t.snapshots.push(original(), original(), original(), original(), { ...original(), state: 'closed', state_reason: 'not_planned' });
         await assert.rejects(runMilestoneControl(15, t.api, 'author'), /cancelled/);
         assert.equal(t.counts().closes, 0);
         assert.match(t.comments[0], /Milestone created/);
@@ -574,7 +578,7 @@ describe('concurrent cancellation and ambiguous closure', () => {
     it('keeps milestone success truthful when the Issue is edited after the receipt', async () => {
         const test = mkApi();
         const changed = { ...original(), body: 'Description: Edited after creation' };
-        test.snapshots.push(original(), original(), original(), changed);
+        test.snapshots.push(original(), original(), original(), original(), changed);
         await assert.rejects(runMilestoneControl(15, test.api, 'author'), /request changed/);
         assert.equal(test.counts().creates, 1);
         assert.equal(test.counts().closes, 0);
@@ -586,7 +590,7 @@ describe('concurrent cancellation and ambiguous closure', () => {
     it('reports confirmed milestone even when request edits before initial receipt', async () => {
         const test = mkApi();
         const changed = { ...original(), title: '[create-milestone] Different release' };
-        test.snapshots.push(original(), original(), changed);
+        test.snapshots.push(original(), original(), original(), original(), changed);
         await assert.rejects(runMilestoneControl(15, test.api, 'author'), /request changed/);
         assert.equal(test.counts().creates, 1);
         assert.equal(test.counts().closes, 0);
