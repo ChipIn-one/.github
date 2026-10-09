@@ -285,6 +285,10 @@ export async function reconcilePR(client,policy,number,expectedSha,{admissionCli
   if (fresh.head?.sha!==pr.head.sha || fresh.head?.ref!==pr.head.ref ||
       fresh.base?.sha!==pr.base?.sha || fresh.base?.ref!==pr.base.ref ||
       fresh.body!==pr.body || fresh.state!=="open") throw new Error("PR_DRIFT: metadata changed mid-run");
+  // Native linking may update the Issue revision. Before PR metadata mutation,
+  // require a NEW current Issue/Project admission and PR identity read-back.
+  await preflightPr({client:admissionClient,config:admissionConfig,
+    repository:REPO,number:n,expectedHeadSha:expectedSha});
   await ensureCategory(client,n,kind);
   // Project #5 is exclusively written/read back by the .github trusted worker.
   // FE GITHUB_TOKEN never receives the org Project credential.
