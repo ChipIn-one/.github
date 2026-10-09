@@ -91,6 +91,12 @@ export function verifyAdmission({ config, repository, number, selectedOwner = nu
     updatedAt: issue?.updated_at, type, priority: observed.fields.Priority,
     severity: observed.fields.Severity, actualOwners: [...actualOwners].sort(),
     projectId: project?.id, itemId: items[0]?.id, status, milestone: issue?.milestone?.number ?? null,
+    // Native relationships are part of the Issue revision even when updated_at is unchanged.
+    relationsReadable: snapshot?.relationsReadable === true,
+    blockedBy: [...(snapshot?.blockedBy ?? [])].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+    blocking: [...(snapshot?.blocking ?? [])].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+    parent: snapshot?.parent ?? null,
+    subIssues: [...(snapshot?.subIssues ?? [])].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
   })).digest('hex');
   if (expectedRevision && revision !== expectedRevision) blockers.push('STALE: Issue/metadata/ownership/Project revision changed.');
   if (!Number.isFinite(Date.parse(checkedAt)) || Math.abs(Date.now() - Date.parse(checkedAt)) > ADMISSION_MAX_AGE_MS) blockers.push('STALE: admission read-back outside freshness window.');
@@ -129,13 +135,21 @@ export async function readAdmission({ client, config, repository, number, select
   blockers.push(...result.blockers);
   if (!blockers.length) {
     try {
-      const latest = await (overrides.readIssueSnapshot ?? readIssueSnapshot)(client, repository, number);
-      if (latest.issue?.updated_at !== snapshot.issue?.updated_at ||
-          latest.issue?.title !== snapshot.issue?.title || latest.issue?.body !== snapshot.issue?.body ||
-          JSON.stringify(latest.issue?.assignees) !== JSON.stringify(snapshot.issue?.assignees)) {
-        blockers.push('STALE: Issue changed during admission read-back.');
+      // A second native Issue GET alone misses field, relationship and Project Status drift.
+      // Re-read both authorities and compare the full exact-Issue revision before admission.
+      const [latest, latestProject] = await Promise.all([
+        (overrides.readIssueSnapshot ?? readIssueSnapshot)(client, repository, number),
+        (overrides.readProjectSnapshot ?? readProjectSnapshot)(client, config),
+      ]);
+      const confirmed = verifyAdmission({
+        config, repository, number, selectedOwner,
+        snapshot: latest, project: latestProject, checkedAt: result.receipt.checkedAt,
+        expectedRevision: result.receipt.revision,
+      });
+      if (confirmed.blockers.length) {
+        blockers.push('STALE: canonical state changed during admission read-back: ' + confirmed.blockers.join('; '));
       }
-    } catch (error) { blockers.push('Second Issue read-back failed: ' + error.message); }
+    } catch (error) { blockers.push('Second canonical read-back failed: ' + error.message); }
   }
   return { ...result, blockers, receipt: { ...result.receipt, status: blockers.length ? 'BLOCKED' : 'INTAKE_COMPLETE', blockers } };
 }
