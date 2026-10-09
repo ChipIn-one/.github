@@ -184,11 +184,12 @@ export const runMilestoneControl = async (issueNumber, api, triggeringActor) => 
             }
         };
         await checkPermissions();
-        const recheck = async () => {
-            await confirmUnchangedControl(issueNumber, issue, request, api);
+        const recheck = () => confirmUnchangedControl(issueNumber, issue, request, api);
+        const reauthorizeBeforeCreate = async () => {
+            await recheck();
             await checkPermissions();
         };
-        result = await findOrCreateMilestone(request, api, recheck);
+        result = await findOrCreateMilestone(request, api, reauthorizeBeforeCreate);
         // Also guard the existing-milestone and read-back paths before writing
         // any receipt: an Issue may have changed after the initial GET.
         await recheck();
