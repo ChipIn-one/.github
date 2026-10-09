@@ -141,8 +141,9 @@ export function buildReconcilePlan({ config, repository, number, classification,
   if (observed.issueType === null && writable) operations.push({ kind: 'setIssueType', value: classification.issueType });
   else if (observed.issueType !== classification.issueType) blockers.push('Issue Type already has human value ' + observed.issueType + '; refusing to overwrite it with ' + classification.issueType + '.');
   const memberships = projectItemsFor(project, repository, number);
-  if (memberships.length === 0 && writable) operations.push({ kind: 'addProjectMembership' });
-  else if (memberships.length > 1) blockers.push('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items); manual reconciliation is required.');
+  if (memberships.length === 0) {
+    if (writable) operations.push({ kind: 'addProjectMembership' });
+  } else if (memberships.length > 1) blockers.push('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items); manual reconciliation is required.');
   else if (!memberships[0].status && writable) operations.push({ kind: 'initializeStatus', itemId: memberships[0].id, value: INITIAL_STATUS });
   else blockers.push(...projectStatusConsistencyBlockers(config, snapshot, memberships[0].status));
   return {
