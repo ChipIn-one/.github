@@ -106,18 +106,42 @@ const verifyCreatedMilestone = (milestone, request) => {
     return verified;
 };
 
-export const findOrCreateMilestone = async (request, api, beforeCreate = async () => {}) => {
+export const findOrCreateMilestone = async (request, api, beforeCreate = async () => {}, pendingNumber = null) => {
     const milestones = await api.listMilestones();
     const found = matchingMilestone(milestones, request.title);
+    if (pendingNumber !== null) {
+        // The preceding attempt completed POST but could not verify GET.
+        // This Issue owns that pending milestone: do not accept it as an
+        // arbitrary legacy milestone with mismatched description/due date.
+        if (!found || found.number !== pendingNumber) {
+            throw new Error('Pending milestone no longer matches this request; reconcile manually before retrying.');
+        }
+        try {
+            const receipt = await api.getMilestone(pendingNumber);
+            return { milestone: verifyCreatedMilestone(receipt, request), created: true };
+        } catch (error) {
+            error.pendingMilestoneNumber = pendingNumber;
+            throw error;
+        }
+    }
     if (found) return { milestone: verifyMilestone(found, request.title), created: false };
 
     // The permission and list reads may be slow. Do not create from a
-    // cancelled/edited request merely because an earlier snapshot was valid.
+    // cancelled/edited request or revoked privileges.
     await beforeCreate();
     try {
         const created = await api.createMilestone(request);
-        const receipt = await api.getMilestone(created.number);
-        return { milestone: verifyCreatedMilestone(receipt, request), created: true };
+        try {
+            const receipt = await api.getMilestone(created.number);
+            return { milestone: verifyCreatedMilestone(receipt, request), created: true };
+        } catch (error) {
+            // GitHub has persisted the POST. Store the milestone number in the
+            // bot receipt so retries cannot bypass metadata verification.
+            if (Number.isSafeInteger(created.number) && created.number > 0) {
+                error.pendingMilestoneNumber = created.number;
+            }
+            throw error;
+        }
     } catch (error) {
         if (error.status !== 422) throw error;
         const updated = await api.listMilestones();
@@ -131,7 +155,11 @@ const milestoneReceipt = ({ milestone, created }) => `${RECEIPT_MARKER}\n`
     + `Milestone ${created ? 'created' : 'already exists'}: ${milestone.html_url}\n\n`
     + `Number: **#${milestone.number}** · State: **${milestone.state}**.\n`
     + 'Existing milestone metadata and Issue assignments were not modified.';
-const errorReceipt = error => `${RECEIPT_MARKER}\nMilestone request not completed: ${displayError(error)}\n\n`
+const pendingMarker = number => `<!-- chipin:create-milestone:pending-verification:v1:${number} -->\n`;
+const errorReceipt = error => `${RECEIPT_MARKER}\n`
+    + (Number.isSafeInteger(error.pendingMilestoneNumber) && error.pendingMilestoneNumber > 0
+        ? pendingMarker(error.pendingMilestoneNumber) : '')
+    + `Milestone request not completed: ${displayError(error)}\n\n`
     + 'Correct the request or permissions, then edit the Issue or run Create milestone with this Issue number. The Issue remains open.';
 const incompleteControlReceipt = (result, error) => milestoneReceipt(result)
     + `\n\nControl Issue not completed: ${displayError(error)}\n`
@@ -157,6 +185,7 @@ const isMilestoneControlIssue = issue => !issue?.pull_request
 
 export const runMilestoneControl = async (issueNumber, api, triggeringActor) => {
     let recognizedControl = false;
+    let pendingNumber = null;
     let result;
     let successReceiptWritten = false;
     try {
@@ -165,6 +194,7 @@ export const runMilestoneControl = async (issueNumber, api, triggeringActor) => 
         recognizedControl = isMilestoneControlIssue(issue);
         const request = parseMilestoneRequest(issue);
         if (!request) return { status: 'ignored' };
+        pendingNumber = await api.getPendingCreated(issueNumber);
 
         // An Issue editor/manual dispatcher cannot borrow the author's rights.
         // Recheck BOTH accounts after potentially long milestone pagination,
@@ -189,7 +219,7 @@ export const runMilestoneControl = async (issueNumber, api, triggeringActor) => 
             await recheck();
             await checkPermissions();
         };
-        result = await findOrCreateMilestone(request, api, reauthorizeBeforeCreate);
+        result = await findOrCreateMilestone(request, api, reauthorizeBeforeCreate, pendingNumber);
         // Also guard the existing-milestone and read-back paths before writing
         // any receipt: an Issue may have changed after the initial GET.
         await recheck();
@@ -247,9 +277,12 @@ export const runMilestoneControl = async (issueNumber, api, triggeringActor) => 
             return { status: 'ignored' };
         }
         if (current?.state === 'open' && (result || isMilestoneControlIssue(current))) {
-            // A milestone may already have been created successfully even if
-            // a later Issue edit or closure failed. Never call that creation a
-            // failure; report the exact partial outcome for a safe retry.
+            // Preserve a pending POST identity across further read/permission
+            // failures. Without this marker, the next run could incorrectly
+            // treat the unverified milestone as a legacy existing milestone.
+            if (!result && !error.pendingMilestoneNumber) {
+                error.pendingMilestoneNumber = pendingNumber ?? await api.getPendingCreated(issueNumber);
+            }
             await api.upsertReceipt(issueNumber, result
                 ? incompleteControlReceipt(result, error) : errorReceipt(error));
         }
@@ -295,16 +328,37 @@ export const makeGitHubApi = ({ token, repository, fetchImpl = fetch }) => {
                 return batch.length < 100 ? items : list(path, page + 1, items);
             });
     };
+    const singleBotReceipt = comments => {
+        const receipts = comments.filter(item => item.user?.login === 'github-actions[bot]'
+            && typeof item.body === 'string' && item.body.startsWith(RECEIPT_MARKER));
+        if (receipts.length > 1) {
+            throw new Error('Multiple bot receipts exist; manual reconciliation required.');
+        }
+        return receipts[0] ?? null;
+    };
+    const getPendingCreated = number => list(`${prefix}/issues/${number}/comments`)
+        .then(comments => {
+            const receipt = singleBotReceipt(comments);
+            if (!receipt) return null;
+            const match = /<!-- chipin:create-milestone:pending-verification:v1:(\d+) -->/.exec(receipt.body);
+            if (!match) {
+                if (receipt.body.includes('chipin:create-milestone:pending-verification:')) {
+                    throw new Error('Malformed milestone pending-verification receipt; reconcile manually.');
+                }
+                return null;
+            }
+            const numberValue = Number(match[1]);
+            if (!Number.isSafeInteger(numberValue) || numberValue < 1) {
+                throw new Error('Invalid pending milestone number; reconcile manually.');
+            }
+            return numberValue;
+        });
     const upsertReceipt = (number, message) => list(`${prefix}/issues/${number}/comments`)
         .then(comments => {
-            const botReceipts = comments.filter(item => item.user?.login === 'github-actions[bot]'
-                && typeof item.body === 'string' && item.body.startsWith(RECEIPT_MARKER));
-            if (botReceipts.length > 1) {
-                throw new Error('Multiple bot receipts exist; manual reconciliation required.');
-            }
-            if (botReceipts.length === 1) {
-                if (botReceipts[0].body === message) return botReceipts[0];
-                return request('PATCH', `${prefix}/issues/comments/${botReceipts[0].id}`, { body: message });
+            const botReceipt = singleBotReceipt(comments);
+            if (botReceipt) {
+                if (botReceipt.body === message) return botReceipt;
+                return request('PATCH', `${prefix}/issues/comments/${botReceipt.id}`, { body: message });
             }
             return request('POST', `${prefix}/issues/${number}/comments`, { body: message });
         });
@@ -319,6 +373,7 @@ export const makeGitHubApi = ({ token, repository, fetchImpl = fetch }) => {
         listMilestones: () => list(`${prefix}/milestones?state=all`),
         createMilestone: data => request('POST', `${prefix}/milestones`, data),
         getMilestone: number => request('GET', `${prefix}/milestones/${number}`),
+        getPendingCreated,
         upsertReceipt,
         closeIssue: number => request('PATCH', `${prefix}/issues/${number}`, { state: 'closed', state_reason: 'completed' }),
     };

@@ -162,6 +162,7 @@ describe('control Issue state transition', () => {
                 return Promise.resolve(result);
             },
             getMilestone: () => Promise.resolve(milestones[0]),
+            getPendingCreated: async () => null,
             upsertReceipt: (number, body) => {
                 comments[0] = body;
                 return Promise.resolve();
@@ -320,6 +321,94 @@ describe('control Issue state transition', () => {
     });
 });
 
+describe('pending created milestone verification across retries', () => {
+    const makeCase = () => {
+        const original = issue();
+        const milestones = [];
+        let currentIssue = original;
+        let botReceipt = null;
+        let creates = 0;
+        let closes = 0;
+        let readbackFails = false;
+        let permissionFails = false;
+        const api = {
+            getIssue: async () => ({ ...currentIssue }),
+            getPermission: async () => {
+                if (permissionFails) throw new Error('permission unavailable');
+                return { permission: 'write' };
+            },
+            listMilestones: async () => milestones.map(x => ({ ...x })),
+            createMilestone: async () => {
+                creates++;
+                const created = { ...milestone(), description: 'Wrong metadata' };
+                milestones.push(created);
+                return { ...created };
+            },
+            getMilestone: async () => {
+                if (readbackFails) throw new Error('GET milestone failed');
+                return { ...milestones[0] };
+            },
+            getPendingCreated: async () => {
+                const match = /chipin:create-milestone:pending-verification:v1:(\d+)/.exec(botReceipt ?? '');
+                return match ? Number(match[1]) : null;
+            },
+            upsertReceipt: async (_number, value) => { botReceipt = value; },
+            closeIssue: async () => {
+                closes++;
+                currentIssue = { ...currentIssue, state: 'closed', state_reason: 'completed' };
+                return { state: 'closed', state_reason: 'completed' };
+            },
+        };
+        return {
+            api, milestones,
+            setIssue: value => { currentIssue = value; },
+            setPermissionFails: value => { permissionFails = value; },
+            setReadbackFails: value => { readbackFails = value; },
+            getReceipt: () => botReceipt,
+            counts: () => ({ creates, closes }),
+        };
+    };
+    it('does not close a control Issue by reusing an unverified POST on retry', async () => {
+        const t = makeCase();
+        await assert.rejects(runMilestoneControl(15, t.api, 'author'), /metadata read-back/);
+        assert.deepEqual(t.counts(), { creates: 1, closes: 0 });
+        assert.match(t.getReceipt(), /pending-verification:v1:8/);
+        await assert.rejects(runMilestoneControl(15, t.api, 'author'), /metadata read-back/);
+        assert.deepEqual(t.counts(), { creates: 1, closes: 0 });
+        assert.match(t.getReceipt(), /pending-verification:v1:8/);
+        t.milestones[0].description = 'Frontend iteration';
+        const result = await runMilestoneControl(15, t.api, 'author');
+        assert.equal(result.status, 'completed');
+        assert.deepEqual(t.counts(), { creates: 1, closes: 1 });
+        assert.doesNotMatch(t.getReceipt(), /pending-verification/);
+    });
+    it('preserves pending milestone identity after a retry permission failure', async () => {
+        const t = makeCase();
+        await assert.rejects(runMilestoneControl(15, t.api, 'author'), /metadata read-back/);
+        t.setPermissionFails(true);
+        await assert.rejects(runMilestoneControl(15, t.api, 'author'), /permission unavailable/);
+        assert.match(t.getReceipt(), /pending-verification:v1:8/);
+        assert.deepEqual(t.counts(), { creates: 1, closes: 0 });
+    });
+    it('refuses to create a new milestone when a pending request is retitled', async () => {
+        const t = makeCase();
+        await assert.rejects(runMilestoneControl(15, t.api, 'author'), /metadata read-back/);
+        t.setIssue(issue('[create-milestone] Different release', 'Description: New'));
+        await assert.rejects(runMilestoneControl(15, t.api, 'author'), /Pending milestone no longer matches/);
+        assert.deepEqual(t.counts(), { creates: 1, closes: 0 });
+        assert.match(t.getReceipt(), /pending-verification:v1:8/);
+    });
+    it('persists a pending marker for a failed GET after POST', async () => {
+        const t = makeCase();
+        t.setReadbackFails(true);
+        await assert.rejects(runMilestoneControl(15, t.api, 'author'), /GET milestone failed/);
+        assert.match(t.getReceipt(), /pending-verification:v1:8/);
+        t.setReadbackFails(false);
+        await assert.rejects(runMilestoneControl(15, t.api, 'author'), /metadata read-back/);
+        assert.deepEqual(t.counts(), { creates: 1, closes: 0 });
+    });
+});
+
 describe('recovery receipt routing', () => {
     const recoveredIssue = title => issue(title, 'Description: Initial release');
     const makeApi = title => {
@@ -334,6 +423,7 @@ describe('recovery receipt routing', () => {
             listMilestones: failWrite,
             createMilestone: failWrite,
             getMilestone: failWrite,
+            getPendingCreated: async () => null,
             upsertReceipt: async (_num, body) => { writes.push(body); },
             closeIssue: failWrite,
             writes,
@@ -375,6 +465,7 @@ describe('concurrent cancellation and ambiguous closure', () => {
             listMilestones: async () => [],
             createMilestone: async () => { creates++; return milestone(); },
             getMilestone: async () => ({ ...milestone(), description: 'Current release', due_on: null }),
+            getPendingCreated: async () => null,
             upsertReceipt: async (_n, body) => { comments[0] = body; },
             closeIssue: async () => { closes++; issueState = 'closed'; return { state: 'closed', state_reason: 'completed' }; },
         };
