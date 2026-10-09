@@ -620,6 +620,42 @@ describe('recovery receipt routing', () => {
         assert.deepEqual(result, { status: 'ignored' });
         assert.equal(api.writes.length, 0);
     });
+    it('ignores a stale event that predates a new control command after failed initial GET', async () => {
+        const api = makeApi('[create-milestone] Product 1.2');
+        const eventSnapshot = issue('Ordinary bug', 'Description: Initial release');
+        const result = await runMilestoneControl(15, api, 'author', eventSnapshot);
+        assert.deepEqual(result, { status: 'ignored' });
+        assert.deepEqual(api.writes, []);
+    });
+    it('never overwrites a confirmed receipt after failed initial GET and newer command edit', async () => {
+        const api = makeApi('[create-milestone] Product 1.3');
+        const confirmedReceipt = '<!-- chipin:create-milestone:v1 -->\\nMilestone created: confirmed';
+        api.writes.push(confirmedReceipt);
+        const previousSnapshot = recoveredIssue('[create-milestone] Product 1.2');
+        const result = await runMilestoneControl(15, api, 'author', previousSnapshot);
+        assert.deepEqual(result, { status: 'ignored' });
+        assert.deepEqual(api.writes, [confirmedReceipt]);
+    });
+    it('rejects stale recovery event when only body or original author differs', async () => {
+        for (const eventSnapshot of [
+            issue('[create-milestone] Product 1.2', 'Description: Earlier release'),
+            { ...recoveredIssue('[create-milestone] Product 1.2'), user: { login: 'other-author' } },
+        ]) {
+            const api = makeApi('[create-milestone] Product 1.2');
+            const result = await runMilestoneControl(15, api, 'author', eventSnapshot);
+            assert.deepEqual(result, { status: 'ignored' });
+            assert.deepEqual(api.writes, []);
+        }
+    });
+    it('posts recovery error only if the issues event snapshot still matches', async () => {
+        const api = makeApi('[create-milestone] Product 1.2');
+        await assert.rejects(
+            runMilestoneControl(15, api, 'author', recoveredIssue('[create-milestone] Product 1.2')),
+            /GET 503/,
+        );
+        assert.equal(api.writes.length, 1);
+        assert.match(api.writes[0], /Milestone request not completed: GET 503/);
+    });
     it('posts one actionable receipt for a recovered control Issue', async () => {
         const api = makeApi('[create-milestone] Product 1.2');
         await assert.rejects(runMilestoneControl(15, api, 'author'), /GET 503/);

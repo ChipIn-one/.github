@@ -326,6 +326,14 @@ export const runMilestoneControl = async (issueNumber, api, triggeringActor, eve
             // Without a fresh state read we cannot safely claim it is open.
             throw error;
         }
+        // If the first Issue GET failed, recovery must not write using the
+        // actor from a stale issues event. The event snapshot check applies to
+        // recovery writes as well as to the normal path. Preserve confirmed
+        // milestone receipts from an already-recognized control request.
+        if (!recognizedControl && !result && eventIssue !== null
+            && !matchesIssueEvent(current, eventIssue)) {
+            return { status: 'ignored' };
+        }
         // A temporary GET failure may recover to an ordinary Issue.
         // Ordinary Issues must not acquire a milestone bot receipt or fail
         // merely because this workflow was triggered for an edit.
