@@ -74,6 +74,9 @@ jobs:
           test -n "${GITHUB_TOKEN:-}"
           node automation/issue-admission.mjs --issue ChipIn-one/chipin-frontend#400 --output fe-admission.json
           node automation/issue-admission.mjs --issue ChipIn-one/chipin-backend#167 --output be-admission.json
+          # Follow-up repo action-pin tasks: exact fresh read-back before new PRs.
+          node automation/issue-admission.mjs --issue ChipIn-one/chipin-backend#172 --output be-pin-admission.json
+          node automation/issue-admission.mjs --issue ChipIn-one/chipin-knowledge-base#35 --owner syllik --output kb-pin-admission.json
       - name: Upload live admission receipts
         if: always() && github.event_name == 'pull_request' && github.event.pull_request.number == 57
         uses: actions/upload-artifact@v4
@@ -82,5 +85,7 @@ jobs:
           path: |
             fe-admission.json
             be-admission.json
+            be-pin-admission.json
+            kb-pin-admission.json
           if-no-files-found: warn
           retention-days: 30
