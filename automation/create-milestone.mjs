@@ -173,7 +173,16 @@ export const findOrCreateMilestone = async (
         if (error.status !== 422) throw error;
         const updated = await api.listMilestones();
         const raced = matchingMilestone(updated, request.title);
-        if (!raced) throw error;
+        if (!raced) {
+            // GitHub explicitly rejected POST and no milestone won the race.
+            // Remove only the intent written by this attempt; retain older
+            // pending state when a previous POST may have succeeded unseen.
+            if (pending === null) {
+                await clearAbortedIntent();
+                error.definitivePostRejection = true;
+            }
+            throw error;
+        }
         // HTTP 422 confirms this POST was rejected. Another request owns the
         // winner; preserve existing-milestone reuse without mutating metadata.
         return { milestone: verifyMilestone(raced, request.title), created: false };
@@ -350,7 +359,7 @@ export const runMilestoneControl = async (issueNumber, api, triggeringActor, eve
             // Preserve a pending POST identity across further read/permission
             // failures. Without this marker, the next run could incorrectly
             // treat the unverified milestone as a legacy existing milestone.
-            if (!result && !error.pendingMilestoneNumber) {
+            if (!result && !error.definitivePostRejection && !error.pendingMilestoneNumber) {
                 const persisted = pendingState ?? await api.getPendingCreated(issueNumber);
                 if (typeof persisted === 'number') {
                     error.pendingMilestoneNumber = persisted;

@@ -396,6 +396,7 @@ describe('pending created milestone verification across retries', () => {
         let permissionFails = false;
         let losePostResponse = false;
         let rejectPostBeforeCommit = false;
+        let rejectPostWith422 = false;
         let rejectIntentWrite = false;
         let onIntentWritten = null;
         let closeOnReadback = false;
@@ -410,6 +411,9 @@ describe('pending created milestone verification across retries', () => {
             createMilestone: async () => {
                 creates++;
                 if (rejectPostBeforeCommit) throw new Error('POST rejected before commit');
+                if (rejectPostWith422) {
+                    throw Object.assign(new Error('POST rejected (HTTP 422)'), { status: 422 });
+                }
                 const created = { ...milestone(), description: 'Wrong metadata' };
                 milestones.push(created);
                 if (losePostResponse) throw new Error('POST response lost');
@@ -454,6 +458,7 @@ describe('pending created milestone verification across retries', () => {
             setReadbackFails: value => { readbackFails = value; },
             setLosePostResponse: value => { losePostResponse = value; },
             setRejectPostBeforeCommit: value => { rejectPostBeforeCommit = value; },
+            setRejectPostWith422: value => { rejectPostWith422 = value; },
             setRejectIntentWrite: value => { rejectIntentWrite = value; },
             onIntent: action => { onIntentWritten = action; },
             setCloseOnReadback: value => { closeOnReadback = value; },
@@ -522,6 +527,20 @@ describe('pending created milestone verification across retries', () => {
         scenario.setLosePostResponse(false);
         assert.equal((await runMilestoneControl(15, scenario.api, 'author')).status, 'completed');
         assert.deepEqual(scenario.counts(), { creates: 1, closes: 1 });
+    });
+    it('clears fresh intent after 422 without a matching milestone so edited request can retry', async () => {
+        const scenario = makeCase();
+        scenario.setRejectPostWith422(true);
+        await assert.rejects(runMilestoneControl(15, scenario.api, 'author'), /HTTP 422/);
+        assert.deepEqual(scenario.counts(), { creates: 1, closes: 0 });
+        assert.equal(scenario.clearCount(), 1);
+        assert.doesNotMatch(scenario.getReceipt(), /pending-intent:/);
+        assert.match(scenario.getReceipt(), /HTTP 422/);
+        scenario.setIssue(issue('[create-milestone] FE 1.2', 'Description: Corrected release'));
+        scenario.setRejectPostWith422(false);
+        await assert.rejects(runMilestoneControl(15, scenario.api, 'author'), /metadata read-back/);
+        assert.deepEqual(scenario.counts(), { creates: 2, closes: 0 });
+        assert.match(scenario.getReceipt(), /pending-verification:v1:8/);
     });
     it('can retry an intent after a POST rejected before any milestone was stored', async () => {
         const scenario = makeCase();
