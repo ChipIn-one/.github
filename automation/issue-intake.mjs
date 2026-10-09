@@ -112,6 +112,12 @@ function projectStatusConsistencyBlockers(config, snapshot, status, prefix = '')
 export function buildReconcilePlan({ config, repository, number, classification, snapshot, project, selectedOwner = null }) {
   const operations = [];
   const blockers = [];
+  // Never plan writes for cancelled/unreadable Issues. Closed/completed is a
+  // distinct terminal reconciliation path; it cannot produce INTAKE_COMPLETE.
+  const state = snapshot?.issue?.state;
+  const reason = snapshot?.issue?.state_reason;
+  const writable = state === 'open' || (state === 'closed' && reason === 'completed');
+  if (!writable) blockers.push('Native Issue is not open or closed/completed; refusing all intake mutations.');
   if (!SUPPORTED.has(repository)) blockers.push('Repository is outside ChipIn intake scope: ' + repository + '.');
   const observed = observedMetadata(config, snapshot);
   blockers.push(...observed.blockers);
@@ -120,7 +126,7 @@ export function buildReconcilePlan({ config, repository, number, classification,
   try { required = requiredOwner(repository, selectedOwner); }
   catch (error) { blockers.push(error.message); }
   if (!Array.isArray(snapshot?.issue?.assignees)) blockers.push('Native Issue assignees are unreadable.');
-  else if (required && !snapshot.issue.assignees.some(user => user?.login === required)) {
+  else if (writable && required && !snapshot.issue.assignees.some(user => user?.login === required)) {
     operations.push({ kind: 'addAssignee', login: required });
   }
   const desired = {
@@ -129,15 +135,15 @@ export function buildReconcilePlan({ config, repository, number, classification,
   };
   for (const [name, value] of Object.entries(desired)) {
     const current = observed.fields[name] ?? null;
-    if (current === null) operations.push({ kind: 'setIssueField', field: name, fieldId: config.issueFields[name].id, value });
+    if (current === null && writable) operations.push({ kind: 'setIssueField', field: name, fieldId: config.issueFields[name].id, value });
     else if (current !== value) blockers.push(name + ' already has human value ' + current + '; refusing to overwrite it with ' + value + '.');
   }
-  if (observed.issueType === null) operations.push({ kind: 'setIssueType', value: classification.issueType });
+  if (observed.issueType === null && writable) operations.push({ kind: 'setIssueType', value: classification.issueType });
   else if (observed.issueType !== classification.issueType) blockers.push('Issue Type already has human value ' + observed.issueType + '; refusing to overwrite it with ' + classification.issueType + '.');
   const memberships = projectItemsFor(project, repository, number);
-  if (memberships.length === 0) operations.push({ kind: 'addProjectMembership' });
+  if (memberships.length === 0 && writable) operations.push({ kind: 'addProjectMembership' });
   else if (memberships.length > 1) blockers.push('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items); manual reconciliation is required.');
-  else if (!memberships[0].status) operations.push({ kind: 'initializeStatus', itemId: memberships[0].id, value: INITIAL_STATUS });
+  else if (!memberships[0].status && writable) operations.push({ kind: 'initializeStatus', itemId: memberships[0].id, value: INITIAL_STATUS });
   else blockers.push(...projectStatusConsistencyBlockers(config, snapshot, memberships[0].status));
   return {
     issue: key(repository, number),
