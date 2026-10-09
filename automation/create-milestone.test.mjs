@@ -215,7 +215,61 @@ describe('control Issue state transition', () => {
             return { permission: 'write' };
         };
         assert.equal((await runMilestoneControl(15, test.api, 'authorized-editor')).status, 'completed');
-        assert.deepEqual(checked, ['authorized-editor', 'author']);
+        assert.deepEqual(checked, ['authorized-editor', 'author', 'authorized-editor', 'author']);
+    });
+    it('rejects creation if the triggering actor loses write access during pagination', async () => {
+        const test = adapter();
+        const calls = [];
+        test.api.getPermission = async login => {
+            calls.push(login);
+            return { permission: login === 'authorized-editor' && calls.filter(x => x === login).length > 1
+                ? 'triage' : 'write' };
+        };
+        await assert.rejects(
+            runMilestoneControl(15, test.api, 'authorized-editor'),
+            /Triggering actor requires/,
+        );
+        assert.deepEqual(calls, ['authorized-editor', 'author', 'authorized-editor']);
+        assert.equal(test.stats.creates, 0);
+        assert.equal(test.stats.closes, 0);
+        assert.match(test.comments[0], /Triggering actor requires/);
+    });
+    it('rejects creation if the original author loses write access during pagination', async () => {
+        const test = adapter();
+        const calls = [];
+        test.api.getPermission = async login => {
+            calls.push(login);
+            return { permission: login === 'author' && calls.filter(x => x === login).length > 1
+                ? 'triage' : 'write' };
+        };
+        await assert.rejects(
+            runMilestoneControl(15, test.api, 'authorized-editor'),
+            /Issue author requires/,
+        );
+        assert.deepEqual(calls, ['authorized-editor', 'author', 'authorized-editor', 'author']);
+        assert.equal(test.stats.creates, 0);
+        assert.equal(test.stats.closes, 0);
+        assert.match(test.comments[0], /Issue author requires/);
+    });
+    it('rejects creation when the same author/actor is demoted before POST', async () => {
+        const test = adapter();
+        let checks = 0;
+        test.api.getPermission = async () => ({ permission: ++checks === 1 ? 'write' : 'read' });
+        await assert.rejects(runMilestoneControl(15, test.api, 'author'), /Triggering actor requires/);
+        assert.equal(checks, 2);
+        assert.equal(test.stats.creates, 0);
+        assert.equal(test.stats.closes, 0);
+    });
+    it('rejects creation if fresh permissions cannot be read', async () => {
+        const test = adapter();
+        let checks = 0;
+        test.api.getPermission = async () => {
+            if (++checks === 2) throw new Error('permission API unavailable');
+            return { permission: 'write' };
+        };
+        await assert.rejects(runMilestoneControl(15, test.api, 'author'), /permission API unavailable/);
+        assert.equal(test.stats.creates, 0);
+        assert.equal(test.stats.closes, 0);
     });
     it('creates, comments and closes, then retry is a no-op', () => {
         const test = adapter();

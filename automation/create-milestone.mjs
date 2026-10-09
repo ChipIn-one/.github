@@ -166,22 +166,28 @@ export const runMilestoneControl = async (issueNumber, api, triggeringActor) => 
         const request = parseMilestoneRequest(issue);
         if (!request) return { status: 'ignored' };
 
-        // Editing and manually dispatching both execute with this repository's
-        // GitHub token. Require the triggering user to be independently authorized,
-        // so a triage editor cannot borrow the Issue author's write permission.
-        if (typeof triggeringActor !== 'string' || !/^[A-Za-z\d](?:[A-Za-z\d-]{0,38})$/.test(triggeringActor)) {
-            throw new Error('A valid trusted triggering actor is required.');
-        }
-        const actorPermission = await api.getPermission(triggeringActor);
-        if (!canCreateMilestone(actorPermission)) {
-            throw new Error('Triggering actor requires repository write, maintain, or admin permission.');
-        }
-        const authorPermission = issue.user?.login === triggeringActor
-            ? actorPermission : await api.getPermission(issue.user?.login);
-        if (!canCreateMilestone(authorPermission)) {
-            throw new Error('Issue author requires repository write, maintain, or admin permission.');
-        }
-        const recheck = () => confirmUnchangedControl(issueNumber, issue, request, api);
+        // An Issue editor/manual dispatcher cannot borrow the author's rights.
+        // Recheck BOTH accounts after potentially long milestone pagination,
+        // directly before POST, so a mid-run permission revocation fails closed.
+        const checkPermissions = async () => {
+            if (typeof triggeringActor !== 'string' || !/^[A-Za-z\d](?:[A-Za-z\d-]{0,38})$/.test(triggeringActor)) {
+                throw new Error('A valid trusted triggering actor is required.');
+            }
+            const actorPermission = await api.getPermission(triggeringActor);
+            if (!canCreateMilestone(actorPermission)) {
+                throw new Error('Triggering actor requires repository write, maintain, or admin permission.');
+            }
+            const authorPermission = issue.user?.login === triggeringActor
+                ? actorPermission : await api.getPermission(issue.user?.login);
+            if (!canCreateMilestone(authorPermission)) {
+                throw new Error('Issue author requires repository write, maintain, or admin permission.');
+            }
+        };
+        await checkPermissions();
+        const recheck = async () => {
+            await confirmUnchangedControl(issueNumber, issue, request, api);
+            await checkPermissions();
+        };
         result = await findOrCreateMilestone(request, api, recheck);
         // Also guard the existing-milestone and read-back paths before writing
         // any receipt: an Issue may have changed after the initial GET.
