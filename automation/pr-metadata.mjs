@@ -143,11 +143,9 @@ export async function verifyRelease(client,refs) {
     const impl=await client.request(ROOT+"/pulls/"+num);
     if (!impl?.merged_at || impl.base?.ref!=="dev") throw new Error("RELEASE: PR #"+num+" not merged into dev");
     const task=implementationIdentity(impl.body);
-    await assertSingleNativeIssue(client,num,task.issueNumber);
-    const linked=await reconcileDevelopmentLink(client,{repository:REPO,pullRequestNumber:num});
+    // Release verification is read-only. It may NEVER add a missing native link
+    // to an already-merged implementation PR (especially a terminal Issue).
     await assertSingleNativeIssue(client,num,task.issueNumber,true);
-    if (!linked.readBackConfirmed || linked.issueNumber!==task.issueNumber)
-      throw new Error("RELEASE_NATIVE_LINK: included implementation PR lacks exact native Development read-back");
     issues.push(task.issueNumber);
   }
   if ([...new Set(issues)].sort((a,b)=>a-b).join(",")!==[...refs.issues].sort((a,b)=>a-b).join(","))
