@@ -1,6 +1,6 @@
 # ChipIn GitHub issue schema
 
-Last reviewed: 2026-10-07
+Last reviewed: 2026-10-08
 
 This document defines the shared GitHub task metadata model for ChipIn repositories.
 It does not define repository-specific implementation, review, build, test, deploy, or agent-execution rules.
@@ -15,7 +15,7 @@ Keep the axes separate:
 | Work kind | Organization Issue Type | `Task`, `Feature`, `Bug` |
 | Priority | Organization Issue Field `Priority` | `P0`, `P1`, `P2`, `P3` |
 | Severity | Organization Issue Field `Severity` | `Critical`, `Major`, `Minor`; use only when relevant |
-| Release target | Native repository Milestone | Optional concrete product release target |
+| Release target | Native repository Milestone (FE/BE only) | Optional concrete product release target; KB does not use product-release milestones |
 | Workflow position / completion mirror | ChipIn Project #5 `Status` | `Backlog`, `Todo`, `In Progress`; `Done` mirrors `closed/completed` only |
 | Completion state | Native GitHub Issue state/reason | open = unfinished; closed/completed = complete; closed/not planned = cancelled |
 | Parent / decomposition | Native GitHub issue relationships | Parent is optional; cross-repo product parent lives in KB when decomposition is needed |
@@ -25,7 +25,7 @@ Organization Issue Fields and Project fields are different objects. Do not creat
 
 A missing Milestone is valid and means the issue is not committed to a concrete release. Milestone membership never authorizes execution or completion.
 
-GitHub Milestones are repository-scoped. Same-named milestones in FE/BE/KB represent the same product release by convention and must use the same product-level name. Do not derive the name from repository-local package/API versions unless product versioning explicitly adopts that scheme.
+GitHub Milestones are repository-scoped. Only FE and BE use product-release milestones. Same-named milestones in FE and BE represent the same product release by convention and must use the same product-level name. The knowledge base is not a milestone participant; KB specs and documentation are linked to FE/BE work through native relationships/PRs. Do not derive a product milestone name from repository-local package/API versions unless product versioning explicitly adopts that scheme.
 
 ## Release-target rules
 

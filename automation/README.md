@@ -59,6 +59,30 @@ grants `issues: write`, `pull-requests: read`, and `contents: read`; missing tas
 native mutation/read-back problem still fails eligible same-repository reconciliation instead of
 substituting a textual link.
 
+## Repository-local milestone creation
+
+`create-milestone.mjs` is a shared repository-scoped control-Issue reconciler exposed by
+`automation/create-milestone-action/action.yml`.
+The allowlist contains **FE and BE only**; KB remains specification/documentation
+and does not receive a product-release milestone caller. The FE and BE callers each
+grant only `contents: read` and `issues: write`, and pass the local `GITHUB_TOKEN`;
+no shared PAT, webhook, Project API, or alternate release metadata is needed.
+
+Control Issues use `[create-milestone] <title>` and mandatory `Description:`
+with optional `Due date: YYYY-MM-DD`. Both the original Issue author and
+the triggering GitHub actor must have write/maintain/admin permission.
+Ordinary Issues are ignored. Closed and open
+milestones both participate in deduplication, and existing release objects are
+never reopened or changed. Callers serialize competing requests through
+`concurrency.queue: max`, and the reconciler re-reads conflicts and writes an
+updatable bot receipt with milestone URL and number. Errors leave the Issue open.
+
+Each repository must merge its caller workflow to its own **default branch**
+before an Issue event can invoke it. See
+[create-milestone-action/README.md](./create-milestone-action/README.md) and
+`create-milestone.test.mjs`. A live canary is independent of Project #5
+membership reconciliation and Release-scope retirement.
+
 ## Historical metadata migration
 
 `metadata-migration.mjs` implements the completed task #6 / backend #117 migration as historical, auditable evidence. Active intake imports `github-metadata.mjs` directly; the historical mapping is not canonical schema.
