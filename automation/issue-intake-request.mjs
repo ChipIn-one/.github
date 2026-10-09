@@ -37,6 +37,7 @@ const ALLOWED_QUEUED_KEYS = new Set([
   'issueType',
   'priority',
   'severity',
+  'owner',
 ]);
 
 function normalizeSeverity(value) {
