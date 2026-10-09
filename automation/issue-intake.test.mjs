@@ -25,6 +25,8 @@ const config = {
   issueTypes: { Task: 10, Bug: 11, Feature: 12 },
 };
 
+const DURABLE_BODY = '## Problem\nCurrent task behavior is incorrect and requires a concrete change.\n\n## Outcome\nDeliver a verifiable change with a stable outcome.\n\n## Acceptance\n- [ ] Verified result matches the specified behavior.\n';
+
 const classification = {
   issueType: 'Bug',
   priority: 'P1',
@@ -37,6 +39,12 @@ function issueSnapshot({ type = null, priority = null, severity = null, state = 
   if (severity) issueFieldValues.push({ issue_field_id: 2, single_select_option: { name: severity } });
   return {
     issue: {
+      number: 999,
+      repository_url: 'https://api.github.com/repos/ChipIn-one/chipin-frontend',
+      title: 'Canonical intake test task',
+      body: DURABLE_BODY,
+      updated_at: '2026-10-09T12:00:00Z',
+      assignees: [{ login: 'syllik' }],
       type: type ? { name: type } : null,
       node_id: 'ISSUE_NODE',
       html_url: 'https://github.com/ChipIn-one/chipin-frontend/issues/999',
@@ -79,6 +87,7 @@ function argsFor(operation = 'reconcile', target = 'ChipIn-one/chipin-frontend#9
     '--type', 'Bug',
     '--priority', 'P1',
     '--severity', 'Major',
+    ...(operation === 'create' ? ['--body', DURABLE_BODY] : []),
     '--activate', 'issue-intake-v1',
   ];
 }
