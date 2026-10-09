@@ -24,6 +24,7 @@ runs:
   using: composite
   steps:
     - name: Require canonical Issue admission before Development link
+      id: admission
       shell: bash
       env:
         CHIPIN_PR_REPOSITORY: ${{ inputs.repository }}
@@ -35,12 +36,24 @@ runs:
         test -n "${GITHUB_TOKEN:-}"
         node "$GITHUB_ACTION_PATH/../issue-admission-pr.mjs" \
           --repository "$CHIPIN_PR_REPOSITORY" --pr "$CHIPIN_PR_NUMBER" --expected-head-sha "$EXPECTED_HEAD_SHA" \
-          --config "$GITHUB_ACTION_PATH/../metadata-migration.config.json"
+          --config "$GITHUB_ACTION_PATH/../metadata-migration.config.json" \
+          --output "$RUNNER_TEMP/chipin-link-admission.json"
+        # Link only the same exact admitted Issue; the later GitHub PR reread
+        # still checks that the native Task identity has not changed.
+        node -e 'const r=require(process.argv[1]); if(r.receipts.length!==1)process.exit(2); process.stdout.write("task_identity="+r.receipts[0].issue+"\n")' \
+          "$RUNNER_TEMP/chipin-link-admission.json" >> "$GITHUB_OUTPUT"
     - name: Reconcile native Development relationship
       shell: bash
       env:
         CHIPIN_PR_REPOSITORY: ${{ inputs.repository }}
         CHIPIN_PR_NUMBER: ${{ inputs.pull-request-number }}
-        CHIPIN_TASK_IDENTITY: ${{ inputs.task-identity }}
+        CHIPIN_TASK_IDENTITY: ${{ steps.admission.outputs.task_identity }}
+        CHIPIN_REQUESTED_TASK_IDENTITY: ${{ inputs.task-identity }}
         GITHUB_TOKEN: ${{ inputs.token }}
-      run: node "$GITHUB_ACTION_PATH/../development-link.mjs"
+      run: |
+        set -euo pipefail
+        if [[ -n "$CHIPIN_REQUESTED_TASK_IDENTITY" && "$CHIPIN_REQUESTED_TASK_IDENTITY" != "$CHIPIN_TASK_IDENTITY" ]]; then
+          echo 'Explicit workflow task identity conflicts with admitted Issue.' >&2
+          exit 2
+        fi
+        node "$GITHUB_ACTION_PATH/../development-link.mjs"

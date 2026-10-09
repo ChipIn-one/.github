@@ -31,7 +31,7 @@ CHIPIN_ISSUE_WRITE=1
 
 After creating an issue with a shared form, run `ChipIn-one/.github -> Actions -> Issue metadata finalizer`.
 
-Provide exact issue identity, Issue Type, Priority, applicable Severity, and `apply=false` first. No release target is required. Existing Milestone state is left untouched.
+Provide exact issue identity, Issue Type, Priority, applicable Severity, and `apply=false` first. For KB Issues, choose an explicit native GitHub login in the workflow `owner` input for both plan and apply. FE/BE use their required owner policies; leaving KB owner blank fails closed. No release target is required. Existing Milestone state is left untouched.
 
 The workflow is intentionally `workflow_dispatch` only. Organization-profile workflows do not subscribe to sibling-repository issue events.
 

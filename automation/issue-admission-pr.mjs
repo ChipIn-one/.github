@@ -56,6 +56,15 @@ export async function preflightPr({ client, config, repository, number, expected
     assertFreshReceipt(result.receipt, { issue: id.canonical });
     receipts.push(result.receipt);
   }
+  // PR-body edits do not change the head SHA. Re-read trusted PR identity after
+  // every Issue read to detect swaps of Task identity, owner, or Included Issues.
+  const latest = await client.request('/repos/' + repository + '/pulls/' + number);
+  const identity = value => JSON.stringify({
+    number: value?.number, state: value?.state, body: value?.body,
+    head: { sha: value?.head?.sha, ref: value?.head?.ref, repo: value?.head?.repo?.full_name },
+    base: { ref: value?.base?.ref, repo: value?.base?.repo?.full_name },
+  });
+  if (identity(latest) !== identity(pr)) throw new Error('STALE: PR identity/body/owner or branch changed during admission.');
   return { contractVersion: 'chipin-pr-admission/v1', pr: repository + '#' + number,
     prHeadSha: pr.head.sha, verifiedAt: new Date().toISOString(), status: 'INTAKE_COMPLETE', receipts };
 }

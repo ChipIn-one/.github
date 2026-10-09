@@ -56,6 +56,22 @@ test('PR head SHA and exact identities are included in a successful current read
   assert.equal(output.status, 'INTAKE_COMPLETE');
 });
 
+test('PR body edits without a head commit cannot swap an admitted Issue', async () => {
+  let calls = 0;
+  const client = { request: async () => {
+    calls++;
+    return pr(FE, 'dev', 'feat/issue-71-test',
+      'Task identity: ' + FE + '#' + (calls === 1 ? 71 : 72));
+  } };
+  await assert.rejects(() => preflightPr({ client, config: {}, repository: FE, number: 10,
+    expectedHeadSha: 'a'.repeat(40), read: async () => ({ blockers: [], receipt: {
+      contractVersion: 'chipin-issue-admission/v1', status: 'INTAKE_COMPLETE',
+      issue: FE + '#71', revision: 'rev', checkedAt: new Date().toISOString(), blockers: [],
+    } }),
+  }), /STALE: PR identity/);
+  assert.equal(calls, 2);
+});
+
 test('current PR SHA is mandatory and a stale event blocks before metadata read', async () => {
   let reads = 0;
   const input = {
