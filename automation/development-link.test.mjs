@@ -425,7 +425,7 @@ function kbAdmittedClient(body) {
 }
 
 test('KB native link accepts exactly the owner that passed canonical admission', async () => {
-  const client = kbAdmittedClient('Task identity: ' + KB_REPOSITORY + '#7\\nTask owner: @syllik');
+  const client = kbAdmittedClient('Task identity: ' + KB_REPOSITORY + '#7\nTask owner: @syllik');
   const outcome = await reconcileDevelopmentLink(client, {
     repository: KB_REPOSITORY, pullRequestNumber: 10, expectedHeadSha: ADMITTED_SHA,
     admission: {
@@ -441,9 +441,9 @@ test('KB native link accepts exactly the owner that passed canonical admission',
 
 test('KB owner edit, removal and duplicate marker block before native link mutation', async () => {
   const bodies = [
-    'Task identity: ' + KB_REPOSITORY + '#7\\nTask owner: @another-owner',
+    'Task identity: ' + KB_REPOSITORY + '#7\nTask owner: @another-owner',
     'Task identity: ' + KB_REPOSITORY + '#7',
-    'Task identity: ' + KB_REPOSITORY + '#7\\nTask owner: @syllik\\nTask owner: @another-owner',
+    'Task identity: ' + KB_REPOSITORY + '#7\nTask owner: @syllik\nTask owner: @another-owner',
   ];
   for (const body of bodies) {
     const client = kbAdmittedClient(body);
