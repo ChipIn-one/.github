@@ -101,6 +101,14 @@ export function readTaskIdentityMarker(body) {
   return parseTaskIdentity(line.slice(`${TASK_IDENTITY_MARKER} `.length));
 }
 
+// Reuse the same explicit KB owner marker at both PR admission and the
+// immediate native Development mutation boundary; never infer a KB default.
+export function readKBTaskOwnerMarker(body) {
+  const matches = String(body ?? '').match(/^Task owner:\\s*@?([a-z\\d-]+)\\s*$/gim) ?? [];
+  if (matches.length !== 1) throw new Error('KB PR requires one explicit Task owner: @login line.');
+  return matches[0].split(':')[1].trim().replace(/^@/, '');
+}
+
 function resolveTaskIdentity({ explicitTaskIdentity, pullRequestBody }) {
   const bodyIdentity = readTaskIdentityMarker(pullRequestBody);
   if (!explicitTaskIdentity) {
@@ -337,6 +345,14 @@ export async function reconcileDevelopmentLink(client, {
     const admittedMarker = readTaskIdentityMarker(current.body);
     if (!admittedMarker || admittedMarker.canonical !== task.canonical) {
       throw new Error('STALE: PR Task identity changed or disappeared after canonical admission.');
+    }
+    if (repository === 'ChipIn-one/chipin-knowledge-base') {
+      let currentOwner;
+      try { currentOwner = readKBTaskOwnerMarker(current.body); }
+      catch (error) { throw new Error('STALE: ' + error.message); }
+      if (currentOwner !== admission?.selectedOwner) {
+        throw new Error('STALE: KB PR Task owner differs from the admitted native assignee.');
+      }
     }
     admittedPRBody = current.body;
   }
