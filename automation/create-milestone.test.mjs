@@ -163,6 +163,7 @@ describe('control Issue state transition', () => {
             },
             getMilestone: () => Promise.resolve(milestones[0]),
             getPendingCreated: async () => null,
+            clearPendingIntent: async () => null,
             upsertReceipt: (number, body) => {
                 comments[0] = body;
                 return Promise.resolve();
@@ -396,6 +397,9 @@ describe('pending created milestone verification across retries', () => {
         let losePostResponse = false;
         let rejectPostBeforeCommit = false;
         let rejectIntentWrite = false;
+        let onIntentWritten = null;
+        let closeOnReadback = false;
+        let clears = 0;
         const api = {
             getIssue: async () => ({ ...currentIssue }),
             getPermission: async () => {
@@ -413,6 +417,9 @@ describe('pending created milestone verification across retries', () => {
             },
             getMilestone: async () => {
                 if (readbackFails) throw new Error('GET milestone failed');
+                if (closeOnReadback) {
+                    currentIssue = { ...currentIssue, state: 'closed', state_reason: 'not_planned' };
+                }
                 return { ...milestones[0] };
             },
             getPendingCreated: async () => {
@@ -421,11 +428,18 @@ describe('pending created milestone verification across retries', () => {
                 const intent = /chipin:create-milestone:pending-intent:v1:([a-f0-9]{64})/.exec(botReceipt ?? '');
                 return intent ? { intentHash: intent[1] } : null;
             },
+            clearPendingIntent: async (_number, hash) => {
+                if (botReceipt?.includes(`pending-intent:v1:${hash}`)) {
+                    clears++;
+                    botReceipt = '<!-- chipin:create-milestone:v1 -->\nMilestone creation cancelled before POST.';
+                }
+            },
             upsertReceipt: async (_number, value) => {
                 if (rejectIntentWrite && value.includes('pending-intent:')) {
                     throw new Error('Receipt write failed');
                 }
                 botReceipt = value;
+                if (value.includes('pending-intent:') && onIntentWritten) onIntentWritten();
             },
             closeIssue: async () => {
                 closes++;
@@ -441,10 +455,51 @@ describe('pending created milestone verification across retries', () => {
             setLosePostResponse: value => { losePostResponse = value; },
             setRejectPostBeforeCommit: value => { rejectPostBeforeCommit = value; },
             setRejectIntentWrite: value => { rejectIntentWrite = value; },
+            onIntent: action => { onIntentWritten = action; },
+            setCloseOnReadback: value => { closeOnReadback = value; },
             getReceipt: () => botReceipt,
+            getIssue: () => currentIssue,
+            clearCount: () => clears,
             counts: () => ({ creates, closes }),
         };
     };
+    it('clears a newly recorded intent when an Issue edit aborts the last pre-POST check', async () => {
+        const test = makeCase();
+        test.onIntent(() => test.setIssue(issue('[create-milestone] FE 1.2', 'Description: New release')));
+        await assert.rejects(runMilestoneControl(15, test.api, 'author'), /request changed/);
+        assert.deepEqual(test.counts(), { creates: 0, closes: 0 });
+        assert.equal(test.clearCount(), 1);
+        assert.doesNotMatch(test.getReceipt(), /pending-intent:/);
+        test.onIntent(null);
+        await assert.rejects(runMilestoneControl(15, test.api, 'author'), /metadata read-back/);
+        assert.deepEqual(test.counts(), { creates: 1, closes: 0 });
+    });
+    it('clears an unstarted intent when the control Issue was cancelled before POST', async () => {
+        const test = makeCase();
+        test.onIntent(() => test.setIssue({
+            ...issue(), state: 'closed', state_reason: 'not_planned',
+        }));
+        await assert.rejects(runMilestoneControl(15, test.api, 'author'), /cancelled/);
+        assert.deepEqual(test.counts(), { creates: 0, closes: 0 });
+        assert.equal(test.clearCount(), 1);
+        assert.equal(test.getIssue().state, 'closed');
+        assert.doesNotMatch(test.getReceipt(), /pending-intent:/);
+    });
+    it('writes the confirmed milestone URL after external closure before first success receipt', async () => {
+        const test = makeCase();
+        test.setCloseOnReadback(true);
+        test.api.createMilestone = async () => {
+            test.milestones.push({ ...milestone(), description: 'Frontend iteration' });
+            return { ...test.milestones[0] };
+        };
+        await assert.rejects(runMilestoneControl(15, test.api, 'author'), /cancelled/);
+        assert.equal(test.getIssue().state, 'closed');
+        assert.equal(test.getIssue().state_reason, 'not_planned');
+        assert.match(test.getReceipt(), /Milestone created: https:\/\/github.com\//);
+        assert.match(test.getReceipt(), /Number: \*\*#8\*\*/);
+        assert.doesNotMatch(test.getReceipt(), /pending-intent:/);
+        assert.equal(test.counts().closes, 0);
+    });
     it('persists intent before POST and verifies persisted metadata after a lost response', async () => {
         const scenario = makeCase();
         scenario.setLosePostResponse(true);
@@ -552,6 +607,7 @@ describe('recovery receipt routing', () => {
             createMilestone: failWrite,
             getMilestone: failWrite,
             getPendingCreated: async () => null,
+            clearPendingIntent: async () => null,
             upsertReceipt: async (_num, body) => { writes.push(body); },
             closeIssue: failWrite,
             writes,
@@ -594,6 +650,7 @@ describe('concurrent cancellation and ambiguous closure', () => {
             createMilestone: async () => { creates++; return milestone(); },
             getMilestone: async () => ({ ...milestone(), description: 'Current release', due_on: null }),
             getPendingCreated: async () => null,
+            clearPendingIntent: async () => null,
             upsertReceipt: async (_n, body) => { comments[0] = body; },
             closeIssue: async () => { closes++; issueState = 'closed'; return { state: 'closed', state_reason: 'completed' }; },
         };

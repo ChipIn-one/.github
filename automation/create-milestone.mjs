@@ -111,7 +111,8 @@ const requestFingerprint = request => createHash('sha256')
     .update(JSON.stringify(request)).digest('hex');
 
 export const findOrCreateMilestone = async (
-    request, api, beforeCreate = async () => {}, pending = null, beforePost = async () => {},
+    request, api, beforeCreate = async () => {}, pending = null,
+    beforePost = async () => {}, clearAbortedIntent = async () => {},
 ) => {
     const milestones = await api.listMilestones();
     const found = matchingMilestone(milestones, request.title);
@@ -149,7 +150,14 @@ export const findOrCreateMilestone = async (
     await beforePost();
     // Receipt writes can take time; recheck authorization and Issue state
     // immediately before creating the milestone.
-    await beforeCreate();
+    try {
+        await beforeCreate();
+    } catch (error) {
+        // No POST occurred in this run. Clear only a newly recorded intent;
+        // never erase a prior ambiguous POST's verification obligation.
+        if (pending === null) await clearAbortedIntent();
+        throw error;
+    }
     try {
         const created = await api.createMilestone(request);
         try {
@@ -264,7 +272,10 @@ export const runMilestoneControl = async (issueNumber, api, triggeringActor, eve
             await checkPermissions();
         };
         const recordIntent = () => api.upsertReceipt(issueNumber, pendingIntentReceipt(request));
-        result = await findOrCreateMilestone(request, api, reauthorizeBeforeCreate, pendingState, recordIntent);
+        const clearAbortedIntent = () => api.clearPendingIntent(issueNumber, requestFingerprint(request));
+        result = await findOrCreateMilestone(
+            request, api, reauthorizeBeforeCreate, pendingState, recordIntent, clearAbortedIntent,
+        );
         // Also guard the existing-milestone and read-back paths before writing
         // any receipt: an Issue may have changed after the initial GET.
         await recheck();
@@ -320,6 +331,12 @@ export const runMilestoneControl = async (issueNumber, api, triggeringActor, eve
         // merely because this workflow was triggered for an edit.
         if (!recognizedControl && !result && !isMilestoneControlIssue(current)) {
             return { status: 'ignored' };
+        }
+        // The milestone is confirmed even if the control Issue was closed
+        // externally before the first success receipt. Report that truth
+        // without touching the Issue's terminal state.
+        if (result && current?.state === 'closed' && !successReceiptWritten) {
+            await api.upsertReceipt(issueNumber, milestoneReceipt(result));
         }
         if (current?.state === 'open' && (result || isMilestoneControlIssue(current))) {
             // Preserve a pending POST identity across further read/permission
@@ -406,6 +423,16 @@ export const makeGitHubApi = ({ token, repository, fetchImpl = fetch }) => {
             }
             return null;
         });
+    const clearPendingIntent = (number, hash) => list(`${prefix}/issues/${number}/comments`)
+        .then(comments => {
+            const receipt = singleBotReceipt(comments);
+            if (!receipt) return null;
+            // Refuse to overwrite a receipt that a separate run changed.
+            if (!receipt.body.includes(pendingIntentMarker(hash).trim())) return null;
+            return request('PATCH', `${prefix}/issues/comments/${receipt.id}`, {
+                body: `${RECEIPT_MARKER}\nMilestone creation cancelled before POST; no milestone was created by this run. Retry the updated request.`,
+            });
+        });
     const upsertReceipt = (number, message) => list(`${prefix}/issues/${number}/comments`)
         .then(comments => {
             const botReceipt = singleBotReceipt(comments);
@@ -427,6 +454,7 @@ export const makeGitHubApi = ({ token, repository, fetchImpl = fetch }) => {
         createMilestone: data => request('POST', `${prefix}/milestones`, data),
         getMilestone: number => request('GET', `${prefix}/milestones/${number}`),
         getPendingCreated,
+        clearPendingIntent,
         upsertReceipt,
         closeIssue: number => request('PATCH', `${prefix}/issues/${number}`, { state: 'closed', state_reason: 'completed' }),
     };
