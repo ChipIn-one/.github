@@ -461,3 +461,39 @@ test('KB owner edit, removal and duplicate marker block before native link mutat
     assert.equal(mutationCalls(client).length, 0);
   }
 });
+
+test('expired admission after slow final PR REST read blocks both linked and unlinked paths', async () => {
+  const originalNow = Date.now;
+  const checkedAt = originalNow();
+  try {
+    for (const alreadyLinked of [false, true]) {
+      Date.now = () => checkedAt;
+      const client = admittedClient({ linkedPullRequests: alreadyLinked ? [10] : [] });
+      const baseRequest = client.request;
+      let requestCount = 0;
+      client.request = async (...args) => {
+        const response = await baseRequest(...args);
+        requestCount += 1;
+        if (requestCount === 2) Date.now = () => checkedAt + 121_000;
+        return response;
+      };
+      let admissionReads = 0;
+      await assert.rejects(() => reconcileDevelopmentLink(client, {
+        repository: REPOSITORY,
+        pullRequestNumber: 10,
+        expectedHeadSha: ADMITTED_SHA,
+        admission: allowedAdmission(async () => {
+          admissionReads += 1;
+          const result = acceptedRead();
+          result.receipt.checkedAt = new Date(checkedAt).toISOString();
+          return result;
+        }),
+      }), /STALE admission receipt/);
+      assert.equal(admissionReads, 1, 'live admission succeeded before the final slow PR read');
+      assert.equal(requestCount, 2);
+      assert.equal(mutationCalls(client).length, 0);
+    }
+  } finally {
+    Date.now = originalNow;
+  }
+});
