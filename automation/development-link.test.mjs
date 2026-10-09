@@ -305,6 +305,80 @@ test("unreadable Issue, PR, or native relationship fails closed", async () => {
   );
 });
 
+
+const ADMITTED_SHA = 'a'.repeat(40);
+const REVISION = 'f'.repeat(64);
+const acceptedRead = () => ({
+  blockers: [],
+  receipt: {
+    contractVersion: 'chipin-issue-admission/v1',
+    status: 'INTAKE_COMPLETE',
+    issue: REPOSITORY + '#7',
+    revision: REVISION,
+    checkedAt: new Date().toISOString(),
+    blockers: [],
+  },
+});
+function admittedClient(options = {}) {
+  const client = makeClient(options);
+  client.request = async () => ({
+    number: 10, state: 'open', body: 'Task identity: ' + REPOSITORY + '#7',
+    head: { sha: ADMITTED_SHA, repo: { full_name: REPOSITORY } },
+    base: { ref: 'dev', repo: { full_name: REPOSITORY } },
+  });
+  return client;
+}
+const allowedAdmission = read => ({
+  client: {}, config: {}, selectedOwner: 'syllik',
+  expectedRevision: REVISION, read,
+});
+
+test('revalidates current exact Issue revision immediately before native Development mutation', async () => {
+  const client = admittedClient();
+  let count = 0;
+  const result = await reconcileDevelopmentLink(client, {
+    repository: REPOSITORY, pullRequestNumber: 10, expectedHeadSha: ADMITTED_SHA,
+    admission: allowedAdmission(async input => {
+      count += 1;
+      assert.equal(input.repository, REPOSITORY);
+      assert.equal(input.number, 7);
+      assert.equal(input.expectedRevision, REVISION);
+      assert.equal(input.selectedOwner, 'syllik');
+      return acceptedRead();
+    }),
+  });
+  assert.equal(result.result, 'linked');
+  assert.equal(count, 1);
+  assert.equal(mutationCalls(client).length, 1);
+});
+
+test('stale, cancelled, closed and expired Issues block before native Development mutation', async () => {
+  const bad = [
+    { blockers: ['Native Issue must be open (closed/not_planned)'], receipt: acceptedRead().receipt },
+    { blockers: ['STALE: native Issue revision changed'], receipt: acceptedRead().receipt },
+    { blockers: [], receipt: { ...acceptedRead().receipt, revision: 'b'.repeat(64) } },
+    { blockers: [], receipt: { ...acceptedRead().receipt, checkedAt: '2020-01-01T00:00:00Z' } },
+    { blockers: [], receipt: { ...acceptedRead().receipt, status: 'TERMINAL_RECONCILED',
+      contractVersion: 'chipin-terminal-reconciliation/v1' } },
+  ];
+  for (const output of bad) {
+    const client = admittedClient();
+    await assert.rejects(() => reconcileDevelopmentLink(client, {
+      repository: REPOSITORY, pullRequestNumber: 10, expectedHeadSha: ADMITTED_SHA,
+      admission: allowedAdmission(async () => output),
+    }), /STALE|INTAKE_COMPLETE|admission receipt/);
+    assert.equal(mutationCalls(client).length, 0);
+  }
+});
+
+test('trusted SHA without live admission input never mutates Development relationship', async () => {
+  const client = admittedClient();
+  await assert.rejects(() => reconcileDevelopmentLink(client, {
+    repository: REPOSITORY, pullRequestNumber: 10, expectedHeadSha: ADMITTED_SHA,
+  }), /Live exact-Issue admission revision/);
+  assert.equal(mutationCalls(client).length, 0);
+});
+
 test("the only write operation is addCloseIssueReferences", async () => {
   const client = makeClient();
   await reconcileDevelopmentLink(client, { repository: REPOSITORY, pullRequestNumber: 10 });
