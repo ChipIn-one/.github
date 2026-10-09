@@ -167,10 +167,75 @@ async function eligibleReviewer(client,login) {
   const p=await client.request(ROOT+"/collaborators/"+login+"/permission");
   if (!["write","maintain","admin"].includes(p?.permission)) throw new Error("REVIEWER_POLICY: reviewer lacks write-or-higher collaborator eligibility");
 }
-async function shaCIGreen(client,sha) {
-  const checks=await client.request(ROOT+"/commits/"+sha+"/check-runs?per_page=100");
-  if (!Array.isArray(checks?.check_runs)) throw new Error("REVIEW_CI: SHA check-runs unreadable");
-  return checks.check_runs.some(x=>x.head_sha===sha&&x.name==="frontend-ci"&&x.status==="completed"&&x.conclusion==="success");
+// GitHub branch protection is the live authority for required checks, not a
+// frontend-ci success discovered anywhere on the SHA. The producer must also
+// be the expected GitHub Actions workflow, for this PR and this base revision.
+const TRUSTED_CI = Object.freeze({
+  dev: { "frontend-ci": ".github/workflows/frontend-ci.yml" },
+  main: { "main-ci": ".github/workflows/main-ci.yml" },
+});
+const ACTIONS_APP_ID = 15368;
+
+export async function requiredShaCIGreen(client, pr) {
+  const sha = pr?.head?.sha;
+  const branch = pr?.base?.ref;
+  const workflows = TRUSTED_CI[branch];
+  if (!/^[0-9a-f]{40}$/iu.test(sha || "") || !workflows)
+    throw new Error("REVIEW_CI: unsupported target branch or invalid current head SHA");
+
+  // GET branch is readable without the admin-only /protection endpoint.
+  const base = await client.request(ROOT + "/branches/" + encodeURIComponent(branch));
+  const protection = base?.protection?.required_status_checks;
+  const checks = protection?.checks;
+  if (base?.name !== branch || base.protected !== true || !Array.isArray(checks) || checks.length === 0)
+    throw new Error("REVIEW_CI: target-branch required status-check policy unreadable");
+  const contexts = protection.contexts;
+  if (!Array.isArray(contexts) || contexts.length !== checks.length ||
+      contexts.some(name => !checks.some(item => item.context === name)))
+    throw new Error("REVIEW_CI: inconsistent target-branch check policy");
+  if (new Set(checks.map(x => x.context)).size !== checks.length)
+    throw new Error("REVIEW_CI: ambiguous target-branch required checks");
+  if (checks.some(x => !Object.hasOwn(workflows, x.context) || x.app_id !== ACTIONS_APP_ID))
+    throw new Error("REVIEW_CI: unapproved required check or producer for " + branch);
+
+  const found = await client.request(ROOT + "/commits/" + sha + "/check-runs?per_page=100&filter=latest");
+  if (!Number.isInteger(found?.total_count) || !Array.isArray(found.check_runs) ||
+      found.total_count !== found.check_runs.length || found.check_runs.length > 100)
+    throw new Error("REVIEW_CI: current-SHA latest check runs unreadable or incomplete");
+
+  const blockers = [];
+  for (const {context, app_id} of checks) {
+    const matching = found.check_runs.filter(x => x.name === context && x.app?.id === app_id);
+    if (matching.length !== 1) {
+      blockers.push(context + ": missing or ambiguous trusted latest check");
+      continue;
+    }
+    const check = matching[0];
+    if (check.head_sha !== sha || check.status !== "completed" || check.conclusion !== "success") {
+      blockers.push(context + ": current-head check is not successful");
+      continue;
+    }
+    if (check.app?.slug !== "github-actions" || !Number.isSafeInteger(check.id)) {
+      blockers.push(context + ": untrusted check-run producer");
+      continue;
+    }
+    const match = /^https:\/\/github\.com\/ChipIn-one\/chipin-frontend\/actions\/runs\/([1-9]\d*)\/job\/([1-9]\d*)$/u.exec(check.details_url || "");
+    if (!match || Number(match[2]) !== check.id) {
+      blockers.push(context + ": untrusted workflow job URL");
+      continue;
+    }
+    const run = await client.request(ROOT + "/actions/runs/" + match[1]);
+    const linked = run?.pull_requests?.some(p =>
+      p.number === pr.number && p.head?.sha === sha && p.head?.ref === pr.head.ref &&
+      p.base?.ref === branch && (!pr.base.sha || p.base?.sha === pr.base.sha));
+    if (run?.id !== Number(match[1]) || run?.repository?.full_name !== REPO ||
+        run?.path !== workflows[context] || run?.event !== "pull_request" ||
+        run?.head_sha !== sha || run?.head_branch !== pr.head.ref ||
+        run?.status !== "completed" || run?.conclusion !== "success" || !linked)
+      blockers.push(context + ": stale, untrusted or wrong-PR workflow run");
+  }
+  return {ok: blockers.length === 0, blockers, branch, headSha: sha,
+    required: checks.map(x => x.context)};
 }
 export async function reconcilePR(client,policy,number,expectedSha) {
   if (policy?.repository!==REPO || policy.project!==PROJECT || policy.ownerPolicy?.allowIssueOwner!==true
@@ -198,7 +263,9 @@ export async function reconcilePR(client,policy,number,expectedSha) {
     await verifyRelease(client,releaseReferences(pr.body));
   }
   const fresh=await client.request(url);
-  if (fresh.head?.sha!==pr.head.sha || fresh.body!==pr.body || fresh.state!=="open") throw new Error("PR_DRIFT: metadata changed mid-run");
+  if (fresh.head?.sha!==pr.head.sha || fresh.head?.ref!==pr.head.ref ||
+      fresh.base?.sha!==pr.base?.sha || fresh.base?.ref!==pr.base.ref ||
+      fresh.body!==pr.body || fresh.state!=="open") throw new Error("PR_DRIFT: metadata changed mid-run");
   await ensureCategory(client,n,kind);
   const project=await ensureProjectPR(client,pr.node_id);
   const prIssue=await client.request(ROOT+"/issues/"+n);
@@ -219,8 +286,10 @@ export async function reconcilePR(client,policy,number,expectedSha) {
     const selected=chooseReviewer({manual:reviewers.map(x=>x.login),
       approved:policy.reviewerPolicy[kind],author:pr.user?.login});
     if (selected) {
-      if (!await shaCIGreen(client,pr.head.sha)) {
-        blockers.push("REVIEW_CI: no successful frontend-ci on current head "+pr.head.sha+"; request deferred");
+      const ci=await requiredShaCIGreen(client,pr);
+      if (!ci.ok) {
+        blockers.push("REVIEW_CI: required target-branch checks not green on current head " +
+          pr.head.sha + ": " + ci.blockers.join("; ") + "; request deferred");
       } else {
         const prior=await client.listAll(ROOT+"/pulls/"+n+"/reviews");
         if (!Array.isArray(prior)) throw new Error("REVIEW_POLICY: review history unreadable");
