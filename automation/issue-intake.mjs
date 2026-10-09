@@ -233,7 +233,9 @@ export async function initializeProjectStatus(client, config, project, itemId) {
 
 export function verifyFinalState({ config, repository, number, classification, snapshot, project, selectedOwner = null }) {
   const observed = observedMetadata(config, snapshot);
-  const admission = verifyAdmission({ config, repository, number, selectedOwner, snapshot, project });
+  // This is a canonical writer read-back, not permission to execute a closed task.
+  // Only the read-only admission preflight uses the default open-Issue requirement.
+  const admission = verifyAdmission({ config, repository, number, selectedOwner, snapshot, project, allowTerminalReconciliation: true });
   const blockers = [...admission.blockers];
   if (observed.issueType !== classification.issueType) blockers.push('Read-back Issue Type is ' + (observed.issueType || 'missing') + ', expected ' + classification.issueType + '.');
   const expected = {
