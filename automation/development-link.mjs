@@ -1,8 +1,10 @@
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import { readFile } from "node:fs/promises";
 
 import { GitHubClient } from "./github-metadata.mjs";
+import { readAdmission, assertFreshReceipt } from "./issue-admission.mjs";
 
 export const SUPPORTED_REPOSITORIES = new Set([
   "ChipIn-one/chipin-frontend",
@@ -273,6 +275,7 @@ export async function reconcileDevelopmentLink(client, {
   pullRequestNumber,
   explicitTaskIdentity = null,
   expectedHeadSha = null,
+  admission = null,
 }) {
   assertSupportedRepository(repository);
   const prNumber = parsePositiveInteger(pullRequestNumber, "Pull request number");
@@ -334,6 +337,29 @@ export async function reconcileDevelopmentLink(client, {
     if (!admittedMarker || admittedMarker.canonical !== task.canonical) {
       throw new Error('STALE: PR Task identity changed or disappeared after canonical admission.');
     }
+  }
+
+  if (expectedHeadSha !== null) {
+    // A PR-SHA reread alone cannot prove the Issue is still admitted:
+    // native closure/ownership/fields/Project may drift after the earlier action step.
+    // The read-only canonical reader must confirm the SAME revision at this boundary.
+    if (!admission?.client || !admission?.config ||
+        !/^[a-f0-9]{64}$/.test(admission.expectedRevision ?? '') ||
+        !admission.selectedOwner) {
+      throw new Error('Live exact-Issue admission revision and org read credential are required before Development mutation.');
+    }
+    const latest = await (admission.read ?? readAdmission)({
+      client: admission.client, config: admission.config,
+      repository: task.repository, number: task.issueNumber,
+      selectedOwner: admission.selectedOwner,
+      expectedRevision: admission.expectedRevision,
+    });
+    if (latest?.blockers?.length) {
+      throw new Error('STALE: Issue admission changed before Development mutation: ' + latest.blockers.join('; '));
+    }
+    assertFreshReceipt(latest?.receipt, {
+      issue: task.canonical, revision: admission.expectedRevision,
+    });
   }
 
   if (before.linked) {
@@ -411,13 +437,27 @@ async function main() {
   const expectedHeadSha = args.get("--expected-head-sha") || process.env.CHIPIN_EXPECTED_HEAD_SHA || null;
   if (!repository) throw new Error("PR repository is required.");
   if (!pullRequestNumber) throw new Error("Pull request number is required.");
-
+  if (!expectedHeadSha || !process.env.CHIPIN_ADMISSION_TOKEN ||
+      !/^[a-f0-9]{64}$/.test(process.env.CHIPIN_EXPECTED_ADMISSION_REVISION ?? '') ||
+      !process.env.CHIPIN_SELECTED_OWNER) {
+    throw new Error('Trusted PR SHA, live admission token, exact revision and native required owner are mandatory.');
+  }
+  const configPath = process.env.GITHUB_ACTION_PATH
+    ? resolve(process.env.GITHUB_ACTION_PATH, '../metadata-migration.config.json')
+    : resolve('automation/metadata-migration.config.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  const admission = {
+    client: new GitHubClient(process.env.CHIPIN_ADMISSION_TOKEN),
+    config, expectedRevision: process.env.CHIPIN_EXPECTED_ADMISSION_REVISION,
+    selectedOwner: process.env.CHIPIN_SELECTED_OWNER,
+  };
   const client = new GitHubClient(process.env.GITHUB_TOKEN);
   const receipt = await reconcileDevelopmentLink(client, {
     repository,
     pullRequestNumber,
     explicitTaskIdentity,
     expectedHeadSha,
+    admission,
   });
   process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
 }
