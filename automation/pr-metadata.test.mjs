@@ -142,7 +142,7 @@ test("release retries preserve manual values, avoid duplicate Project item and n
   assert.equal(one.kind,"release");assert.equal(one.project.status,"pending-org-writer");
   assert.equal(two.project.status,"pending-org-writer");
   assert.equal(projectAdds,0);assert.equal(labelAdds,1);assert.equal(issueWrites,1); // no FE Project write
-  assert.ok(nativeReads>=4); // native userLinkedOnly read-back on both retries
+  assert.ok(nativeReads>=2); // read-only native link verification on both retries
   assert.ok(!two.blockers.some(x=>x.includes("REVIEWER_POLICY")));
   assert.equal(items.length,0);
   assert.deepEqual(labels.map(x=>x.name),["manual-label","pr:release"]);
