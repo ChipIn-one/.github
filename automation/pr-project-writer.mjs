@@ -60,12 +60,12 @@ export async function reconcileProjectPR({reader,writer,config,number,expectedSh
 
   const project=await ensureProjectPR(writer,pr.node_id);
   return {contractVersion:"chipin-pr-project-reconcile/v1",number,kind,sha:expectedSha,
-    itemId:project.itemId,created:project.created,readBack:project.readBack,admission:admitted.status};
+    itemId:project.id,created:project.created,readBack:project.readBack,admission:admitted.status};
 }
 
 export async function reconcileOpenPRs({reader,writer,config,log=console.log}) {
   // Paginate all open PRs. Never trust FE event fields or checkout FE head.
-  const prs=await reader.listAll(ROOT+"/pulls?state=open&per_page=100");
+  const prs=await reader.listAll(ROOT+"/pulls?state=open");
   const receipts=[],blocked=[];
   for(const candidate of prs) {
     const names=(candidate.labels??[]).map(x=>x.name);
