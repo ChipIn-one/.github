@@ -63,8 +63,29 @@ test("Project write requires actual read-back, not mutation claim",async()=>{
     if(q.startsWith("query"))return{organization:{projectV2:{id:"P5",items:{totalCount:0,pageInfo:{hasNextPage:false,endCursor:null},nodes:[]}}}};
     writes++;return{addProjectV2ItemById:{item:{id:"new"}}};
   }};
-  await assert.rejects(ensureProjectPR(client,"PR_NEW"),/missing PR item/);
+  await assert.rejects(ensureProjectPR(client,"PR_NEW",{beforeWrite:async()=>{}}),/missing PR item/);
   assert.equal(writes,1);
+});
+
+test("new Project item requires a successful pre-write admission gate after scan",async()=>{
+  let reads=0,mutations=0,checks=0;
+  const client={async graphql(q){
+    if(q.startsWith("query")){
+      reads++;return {organization:{projectV2:{id:"P5",items:{
+        totalCount:0,pageInfo:{hasNextPage:false,endCursor:null},nodes:[]
+      }}}};
+    }
+    mutations++;return{addProjectV2ItemById:{item:{id:"NEW"}}};
+  }};
+  await assert.rejects(ensureProjectPR(client,"PR_42"),/pre-write validation callback required/);
+  assert.equal(reads,1);assert.equal(mutations,0);
+  await assert.rejects(ensureProjectPR(client,"PR_42",{
+    beforeWrite:async()=>{
+      checks++;assert.equal(reads,2);assert.equal(mutations,0);
+      throw new Error("canonical Issue revision changed during Project scan");
+    }
+  }),/revision changed/);
+  assert.equal(checks,1);assert.equal(mutations,0);
 });
 
 test("Project GraphQL permission failures become actionable blockers",async()=>{
