@@ -63,7 +63,66 @@ test("Project write requires actual read-back, not mutation claim",async()=>{
     if(q.startsWith("query"))return{organization:{projectV2:{id:"P5",items:{totalCount:0,pageInfo:{hasNextPage:false,endCursor:null},nodes:[]}}}};
     writes++;return{addProjectV2ItemById:{item:{id:"new"}}};
   }};
-  await assert.rejects(ensureProjectPR(client,"PR_NEW",{beforeWrite:async()=>{}}),/missing PR item/);
+  await assert.rejects(ensureProjectPR(client,"PR_NEW",{beforeWrite:async()=>{},retryWait:async()=>{}}),/missing PR item on read-back after 7 complete reads/);
+  assert.equal(writes,1);
+});
+
+test("Project membership becomes visible after a successful write without a second mutation",async()=>{
+  let reads=0,writes=0,admissions=0,waits=0;
+  const item={id:"ITEM_42",content:{__typename:"PullRequest",id:"PR_42"}};
+  const client={async graphql(query){
+    if(query.startsWith("query")){
+      reads++;
+      const items=reads>=4?[item]:[];
+      return{organization:{projectV2:{id:"P5",items:{
+        totalCount:items.length,pageInfo:{hasNextPage:false,endCursor:null},nodes:items
+      }}}};
+    }
+    writes++;
+    return{addProjectV2ItemById:{item:{id:"ITEM_42"}}};
+  }};
+  const result=await ensureProjectPR(client,"PR_42",{
+    beforeWrite:async()=>{admissions++;assert.equal(reads,1);},
+    retryWait:async(ms)=>{assert.ok(ms>0);waits++;}
+  });
+  assert.deepEqual(result,{id:"ITEM_42",created:true,readBack:true});
+  assert.equal(reads,4);assert.equal(writes,1);
+  assert.equal(admissions,1);assert.equal(waits,2);
+});
+
+test("Project read-back exhausts bounded reads without making duplicate writes",async()=>{
+  let reads=0,writes=0,admissions=0,waits=0;
+  const client={async graphql(query){
+    if(query.startsWith("query")){
+      reads++;
+      return{organization:{projectV2:{id:"P5",items:{
+        totalCount:0,pageInfo:{hasNextPage:false,endCursor:null},nodes:[]
+      }}}};
+    }
+    writes++;return{addProjectV2ItemById:{item:{id:"ITEM_42"}}};
+  }};
+  await assert.rejects(ensureProjectPR(client,"PR_42",{
+    beforeWrite:async()=>{admissions++;},
+    retryWait:async()=>{waits++;}
+  }),/missing PR item on read-back after 7 complete reads/);
+  assert.equal(reads,8); // initial scan, then 7 full read-back attempts
+  assert.equal(writes,1);assert.equal(admissions,1);assert.equal(waits,6);
+});
+
+test("Project read-back never accepts a different mutation item ID",async()=>{
+  let writes=0;
+  const client={async graphql(query){
+    if(query.startsWith("query")){
+      const nodes=writes?[{id:"DIFFERENT",content:{__typename:"PullRequest",id:"PR_42"}}]:[];
+      return{organization:{projectV2:{id:"P5",items:{
+        totalCount:nodes.length,pageInfo:{hasNextPage:false,endCursor:null},nodes
+      }}}};
+    }
+    writes++;return{addProjectV2ItemById:{item:{id:"ITEM_42"}}};
+  }};
+  await assert.rejects(ensureProjectPR(client,"PR_42",{
+    beforeWrite:async()=>{},retryWait:async()=>{}
+  }),/mutation item ID differs from membership read-back/);
   assert.equal(writes,1);
 });
 
