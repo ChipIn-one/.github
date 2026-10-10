@@ -88,7 +88,39 @@ export async function reconcileProjectPR({reader,writer,config,number,expectedSh
   for(const entry of refreshed)
     assertFreshReceipt(entry.receipt,{issue:entry.issue,revision:entry.revision});
 
-  const project=await ensureProjectPR(writer,pr.node_id);
+  // The Project-wide membership scan in ensureProjectPR can take longer than
+  // 120 seconds. Re-read authoritative Issue/Project revisions *after* that
+  // scan, and check native evidence, labels and PR identity before PROJECT_ADD.
+  const beforeWrite=async()=>{
+    const postScanReceipts=[];
+    for(const entry of refreshed) {
+      const issueNumber=Number(entry.issue.split("#")[1]);
+      const result=await reread({
+        client:reader,config,repository:REPO,number:issueNumber,
+        selectedOwner:"syllik",expectedRevision:entry.revision
+      });
+      if(result.blockers?.length)
+        throw new Error("PROJECT_ADMISSION: "+entry.issue+" "+result.blockers.join("; "));
+      assertFreshReceipt(result.receipt,{issue:entry.issue,revision:entry.revision});
+      postScanReceipts.push({receipt:result.receipt,issue:entry.issue,revision:entry.revision});
+    }
+    const labelsAfterScan=await reader.listAll(ROOT+"/issues/"+number+"/labels");
+    if(!Array.isArray(labelsAfterScan)||labelsAfterScan.some(x=>!x?.name))
+      throw new Error("PROJECT_REQUEST: unreadable PR categories after Project scan");
+    const namesAfterScan=labelsAfterScan.map(x=>x.name);
+    if(!namesAfterScan.includes(label)||namesAfterScan.includes(VALID.get(kind==="implementation"?"release":"implementation")))
+      throw new Error("PROJECT_REQUEST: PR category changed during Project scan");
+    if(kind==="implementation")
+      await verifyNative(reader,number,implementationIdentity(pr.body).issueNumber,true);
+    else
+      await verifyIncluded(reader,releaseReferences(pr.body));
+    const latestAfterScan=await reader.request(ROOT+"/pulls/"+number);
+    if(prIdentity(latestAfterScan)!==prIdentity(pr))
+      throw new Error("PROJECT_REQUEST: PR drifted during Project scan");
+    for(const entry of postScanReceipts)
+      assertFreshReceipt(entry.receipt,{issue:entry.issue,revision:entry.revision});
+  };
+  const project=await ensureProjectPR(writer,pr.node_id,{beforeWrite});
   return {contractVersion:"chipin-pr-project-reconcile/v1",number,kind,sha:expectedSha,
     itemId:project.id,created:project.created,readBack:project.readBack,admission:admitted.status};
 }
