@@ -125,10 +125,14 @@ export async function readProject(client) {
   if (items.length!==count) throw new Error("PROJECT: incomplete pagination");
   return {id:projectId,items};
 }
-export async function ensureProjectPR(client,prId) {
+export async function ensureProjectPR(client,prId,{beforeWrite}={}) {
   const before=await readProject(client);
   const existing=uniqueProjectItem(before.items,prId);
   if (!existing) {
+    // Project pagination can exceed admission's 120-second lifetime. The
+    // trusted caller revalidates all authoritative evidence AFTER this scan,
+    // immediately before any Project mutation. A throw fails closed.
+    if (beforeWrite) await beforeWrite();
     const added=await client.graphql(PROJECT_ADD,{project:before.id,pr:prId});
     if (!added?.addProjectV2ItemById?.item?.id) throw new Error("PROJECT: membership write not confirmed");
   }
