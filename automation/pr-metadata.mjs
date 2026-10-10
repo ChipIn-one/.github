@@ -1,4 +1,5 @@
 import process from "node:process";
+import { setTimeout as wait } from "node:timers/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { GitHubClient } from "./github-metadata.mjs";
@@ -125,9 +126,15 @@ export async function readProject(client) {
   if (items.length!==count) throw new Error("PROJECT: incomplete pagination");
   return {id:projectId,items};
 }
-export async function ensureProjectPR(client,prId,{beforeWrite}={}) {
+// GitHub Projects v2 can return a successful item mutation before that item is
+// visible in the paginated membership collection. Retry READS only; never repeat
+// the mutation, bypass admission, or treat a missing item as a success.
+const PROJECT_READBACK_DELAYS_MS = Object.freeze([1000, 2000, 4000, 6000, 8000, 10000]);
+
+export async function ensureProjectPR(client,prId,{beforeWrite,retryWait=wait}={}) {
   const before=await readProject(client);
   const existing=uniqueProjectItem(before.items,prId);
+  let addedId=null;
   if (!existing) {
     // Project pagination can exceed admission's 120-second lifetime.
     // No new Project item is authorized without an explicit trusted gate.
@@ -135,12 +142,22 @@ export async function ensureProjectPR(client,prId,{beforeWrite}={}) {
       throw new Error("PROJECT_ADMISSION: pre-write validation callback required");
     await beforeWrite();
     const added=await client.graphql(PROJECT_ADD,{project:before.id,pr:prId});
-    if (!added?.addProjectV2ItemById?.item?.id) throw new Error("PROJECT: membership write not confirmed");
+    addedId=added?.addProjectV2ItemById?.item?.id;
+    if (!addedId) throw new Error("PROJECT: membership write not confirmed");
   }
-  const after=await readProject(client);
-  const found=uniqueProjectItem(after.items,prId);
-  if (!found) throw new Error("PROJECT: missing PR item on read-back");
-  return {id:found.id,created:!existing,readBack:true};
+  for(let attempt=0;attempt<=PROJECT_READBACK_DELAYS_MS.length;attempt++) {
+    if(attempt>0) await retryWait(PROJECT_READBACK_DELAYS_MS[attempt-1]);
+    // Fail closed on malformed pages, permissions and duplicates. Only a valid,
+    // complete Project read lacking this particular PR is retryable.
+    const after=await readProject(client);
+    const found=uniqueProjectItem(after.items,prId);
+    if(!found) continue;
+    if(addedId && found.id!==addedId)
+      throw new Error("PROJECT: mutation item ID differs from membership read-back");
+    return {id:found.id,created:!existing,readBack:true};
+  }
+  throw new Error("PROJECT: missing PR item on read-back after "
+    +(PROJECT_READBACK_DELAYS_MS.length+1)+" complete reads");
 }
 export async function verifyRelease(client,refs) {
   const issues=[];
