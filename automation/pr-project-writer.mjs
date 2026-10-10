@@ -48,8 +48,10 @@ export async function reconcileProjectPR({reader,writer,config,number,expectedSh
   let latest=await reader.request(ROOT+"/pulls/"+number);
   if(prIdentity(latest)!==prIdentity(pr)) throw new Error("PROJECT_REQUEST: PR drifted during validation");
 
-  // Re-read *each* admitted Issue/Project revision on the mutation boundary.
-  // Do not use an old bridge comment or an event payload as admission.
+  // Re-read *each* admitted Issue/Project revision at the mutation boundary.
+  // Preserve the refreshed receipts: the initial preflight receipt may age out
+  // while many Issues, native links and paginated labels are being checked.
+  const refreshed=[];
   for(const receipt of admitted.receipts) {
     const number=Number(receipt.issue.split("#")[1]);
     const result=await reread({
@@ -58,10 +60,10 @@ export async function reconcileProjectPR({reader,writer,config,number,expectedSh
     });
     if(result.blockers?.length) throw new Error("PROJECT_ADMISSION: "+receipt.issue+" "+result.blockers.join("; "));
     assertFreshReceipt(result.receipt,{issue:receipt.issue,revision:receipt.revision});
+    refreshed.push({receipt:result.receipt,issue:receipt.issue,revision:receipt.revision});
   }
   latest=await reader.request(ROOT+"/pulls/"+number);
   if(prIdentity(latest)!==prIdentity(pr)) throw new Error("PROJECT_REQUEST: PR drifted during final admission");
-  for(const receipt of admitted.receipts) assertFreshReceipt(receipt,{issue:receipt.issue,revision:receipt.revision});
 
   // A PR's label may change during admission. Check all pages again on the
   // Project write boundary; a late conflicting or removed category blocks.
@@ -71,6 +73,20 @@ export async function reconcileProjectPR({reader,writer,config,number,expectedSh
   const finalNames=finalLabels.map(x=>x.name);
   if(!finalNames.includes(label)||finalNames.includes(VALID.get(kind==="implementation"?"release":"implementation")))
     throw new Error("PROJECT_REQUEST: PR category changed before Project write");
+
+  // Native Development/release links may drift while a multi-Issue admission
+  // and paginated label read are in flight. Reverify the actual native evidence
+  // immediately before authorizing a Project item (never mutate native links).
+  if(kind==="implementation") {
+    await verifyNative(reader,number,implementationIdentity(pr.body).issueNumber,true);
+  } else {
+    await verifyIncluded(reader,releaseReferences(pr.body));
+  }
+  latest=await reader.request(ROOT+"/pulls/"+number);
+  if(prIdentity(latest)!==prIdentity(pr)) throw new Error("PROJECT_REQUEST: PR drifted before Project write");
+  // Freshness is checked after ALL potentially slow external reads, not before.
+  for(const entry of refreshed)
+    assertFreshReceipt(entry.receipt,{issue:entry.issue,revision:entry.revision});
 
   const project=await ensureProjectPR(writer,pr.node_id);
   return {contractVersion:"chipin-pr-project-reconcile/v1",number,kind,sha:expectedSha,
