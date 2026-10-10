@@ -212,6 +212,94 @@ test("fresh reread replaces aged preflight receipt at Project boundary",async()=
     reread:async()=>({receipt:freshReceipt,blockers:[]}),
     verifyIncluded:async()=>{verified++;}
   });
-  assert.equal(writes,1);assert.equal(verified,2);
+  assert.equal(writes,1);assert.equal(verified,3);
   assert.equal(result.readBack,true);
+});
+
+test("Project scan cannot authorize a write after Issue admission revision changes",async()=>{
+  const p=mkPR();let writes=0,admissionReads=0,projectScans=0,nativeReads=0;
+  const reader={
+    async request(path){if(path===root+"/pulls/42")return p;throw Error("unexpected "+path);},
+    async listAll(path){assert.equal(path,root+"/issues/42/labels");return[{name:"pr:release"}];}
+  };
+  const writer={async graphql(query){
+    if(query.startsWith("query")){
+      projectScans++;
+      return{organization:{projectV2:{id:"P5",items:{
+        totalCount:0,pageInfo:{hasNextPage:false,endCursor:null},nodes:[]
+      }}}};
+    }
+    writes++;throw Error("Project mutation must be blocked");
+  }};
+  await assert.rejects(reconcileProjectPR({
+    reader,writer,config:{},number:42,expectedSha:SHA,
+    admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
+    reread:async()=>{
+      admissionReads++;
+      if(projectScans>0)return{receipt:{...receipt,status:"BLOCKED",
+        blockers:["Issue revision changed during Project scan"]},
+        blockers:["Issue revision changed during Project scan"]};
+      return{receipt,blockers:[]};
+    },
+    verifyIncluded:async()=>{nativeReads++;}
+  }),/revision changed during Project scan/);
+  assert.equal(projectScans,1);
+  assert.equal(admissionReads,2);
+  assert.equal(nativeReads,2);
+  assert.equal(writes,0);
+});
+
+test("Project scan expiry is caught after re-reading canonical admission",async()=>{
+  const p=mkPR();let writes=0,projectScans=0,admissionReads=0;
+  const reader={
+    async request(path){if(path===root+"/pulls/42")return p;throw Error("unexpected "+path);},
+    async listAll(path){assert.equal(path,root+"/issues/42/labels");return[{name:"pr:release"}];}
+  };
+  const writer={async graphql(query){
+    if(query.startsWith("query")){
+      projectScans++;
+      return{organization:{projectV2:{id:"P5",items:{
+        totalCount:0,pageInfo:{hasNextPage:false,endCursor:null},nodes:[]
+      }}}};
+    }
+    writes++;throw Error("Project mutation must be blocked");
+  }};
+  await assert.rejects(reconcileProjectPR({
+    reader,writer,config:{},number:42,expectedSha:SHA,
+    admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
+    reread:async()=>{
+      admissionReads++;
+      return{receipt:projectScans>0
+        ?{...receipt,checkedAt:new Date(Date.now()-180_000).toISOString()}
+        :receipt,blockers:[]};
+    },
+    verifyIncluded:async()=>{}
+  }),/STALE admission receipt/);
+  assert.equal(projectScans,1);assert.equal(admissionReads,2);assert.equal(writes,0);
+});
+
+test("Project writer rechecks native release evidence after pre-write Project scan",async()=>{
+  const p=mkPR();let writes=0,nativeReads=0,scans=0;
+  const reader={
+    async request(path){if(path===root+"/pulls/42")return p;throw Error("unexpected "+path);},
+    async listAll(path){assert.equal(path,root+"/issues/42/labels");return[{name:"pr:release"}];}
+  };
+  const writer={async graphql(query){
+    if(query.startsWith("query")){
+      scans++;return{organization:{projectV2:{id:"P5",items:{
+        totalCount:0,pageInfo:{hasNextPage:false,endCursor:null},nodes:[]
+      }}}};
+    }
+    writes++;throw Error("Project mutation must be blocked");
+  }};
+  await assert.rejects(reconcileProjectPR({
+    reader,writer,config:{},number:42,expectedSha:SHA,
+    admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
+    reread:async()=>({receipt,blockers:[]}),
+    verifyIncluded:async()=>{
+      nativeReads++;
+      if(scans>0)throw Error("RELEASE: included native link changed after Project scan");
+    }
+  }),/native link changed after Project scan/);
+  assert.equal(nativeReads,3);assert.equal(scans,1);assert.equal(writes,0);
 });
