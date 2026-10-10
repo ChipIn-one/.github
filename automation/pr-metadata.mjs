@@ -153,7 +153,8 @@ export async function verifyRelease(client,refs) {
 }
 export async function ensureCategory(client,prNumber,kind) {
   const label=CATEGORIES[kind];
-  const current=await client.request(ROOT+"/issues/"+prNumber+"/labels");
+  // Fetch every labels page: a conflicting category may be beyond GitHub's default 30.
+  const current=await client.listAll(ROOT+"/issues/"+prNumber+"/labels");
   if (!Array.isArray(current)) throw new Error("LABEL: unreadable existing labels");
   const conflicting=CATEGORIES[kind==="release"?"implementation":"release"];
   if (current.some(x=>x.name===conflicting))
@@ -162,8 +163,9 @@ export async function ensureCategory(client,prNumber,kind) {
     await client.request(ROOT+"/labels",{method:"POST",body:{name:label,color:kind==="release"?"0366d6":"0e8a16",description:"ChipIn PR category"}});
   }
   if (!current.some(x=>x.name===label)) await client.request(ROOT+"/issues/"+prNumber+"/labels",{method:"POST",body:{labels:[label]}});
-  const final=await client.request(ROOT+"/issues/"+prNumber+"/labels");
+  const final=await client.listAll(ROOT+"/issues/"+prNumber+"/labels");
   if (!Array.isArray(final)||!final.some(x=>x.name===label)) throw new Error("LABEL: failed read-back");
+  if (final.some(x=>x.name===conflicting)) throw new Error("LABEL_CONFLICT: contradictory category appeared during read-back");
 }
 async function assignable(client,login) {
   if (!/^[a-z\d][a-z\d-]{0,38}$/iu.test(login)) throw new Error("OWNER_POLICY: invalid login");
