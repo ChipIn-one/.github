@@ -14,11 +14,10 @@ const receipt={
 };
 test("org writer rejects unlabelled PR before Project GraphQL mutation",async()=>{
   let writes=0;const p=mkPR();
-  const reader={async request(path){
-    if(path===root+"/pulls/42")return p;
-    if(path===root+"/issues/42/labels")return [];
-    throw Error("unexpected "+path);
-  }};
+  const reader={
+    async request(path){if(path===root+"/pulls/42")return p;throw Error("unexpected "+path);},
+    async listAll(path){assert.equal(path,root+"/issues/42/labels");return [];}
+  };
   await assert.rejects(reconcileProjectPR({
     reader,writer:{graphql:async()=>{writes++;throw Error("unexpected");}},
     config:{},number:42,expectedSha:SHA,
@@ -38,11 +37,10 @@ test("org writer requires current SHA and never writes on stale PR",async()=>{
 
 test("org writer adds exactly one Project item after fresh Issue/native checks; retry idempotent",async()=>{
   const p=mkPR(),events=[];const items=[];
-  const reader={async request(path){
-    if(path===root+"/pulls/42")return p;
-    if(path===root+"/issues/42/labels")return [{name:"pr:release"}];
-    throw Error("unexpected "+path);
-  }};
+  const reader={
+    async request(path){if(path===root+"/pulls/42")return p;throw Error("unexpected "+path);},
+    async listAll(path){assert.equal(path,root+"/issues/42/labels");return [{name:"pr:release"}];}
+  };
   const writer={async graphql(q){
     if(q.startsWith("query"))return {organization:{projectV2:{
       id:"P5",items:{totalCount:items.length,
@@ -71,13 +69,15 @@ test("org writer adds exactly one Project item after fresh Issue/native checks; 
 
 test("org writer detects PR body drift after admission and performs no Project mutation",async()=>{
   const p=mkPR();let reads=0,writes=0;
-  const reader={async request(path){
-    if(path===root+"/pulls/42"){
-      reads++;return reads>=2?{...p,body:p.body+"\nmodified"}:p;
-    }
-    if(path===root+"/issues/42/labels")return[{name:"pr:release"}];
-    throw Error("unexpected "+path);
-  }};
+  const reader={
+    async request(path){
+      if(path===root+"/pulls/42"){
+        reads++;return reads>=2?{...p,body:p.body+"\nmodified"}:p;
+      }
+      throw Error("unexpected "+path);
+    },
+    async listAll(path){assert.equal(path,root+"/issues/42/labels");return [{name:"pr:release"}];}
+  };
   await assert.rejects(reconcileProjectPR({
     reader,writer:{graphql:async()=>{writes++;throw Error("unexpected");}},
     config:{},number:42,expectedSha:SHA,
@@ -85,4 +85,39 @@ test("org writer detects PR body drift after admission and performs no Project m
     verifyIncluded:async()=>{}
   }),/drifted/);
   assert.equal(writes,0);
+});
+
+test("Project writer rejects contradictory category beyond first 100 labels",async()=>{
+  const p=mkPR();let writes=0,admissions=0;
+  const labels=Array.from({length:100},(_,i)=>({name:"other-"+i}));
+  labels.push({name:"pr:release"},{name:"pr:implementation"});
+  const reader={
+    async request(path){if(path===root+"/pulls/42")return p;throw Error("unexpected "+path);},
+    async listAll(path){assert.equal(path,root+"/issues/42/labels");return labels;}
+  };
+  await assert.rejects(reconcileProjectPR({
+    reader,writer:{async graphql(){writes++;throw Error("unexpected Project write");}},
+    config:{},number:42,expectedSha:SHA,
+    admit:async()=>{admissions++;throw Error("should not reach admission");}
+  }),/contradictory PR category labels/);
+  assert.equal(writes,0);assert.equal(admissions,0);
+});
+
+test("Project writer rejects a late label change before writing",async()=>{
+  const p=mkPR();let writes=0,labelReads=0;
+  const reader={
+    async request(path){if(path===root+"/pulls/42")return p;throw Error("unexpected "+path);},
+    async listAll(path){
+      assert.equal(path,root+"/issues/42/labels");labelReads++;
+      return labelReads===1?[{name:"pr:release"}]:[{name:"pr:release"},{name:"pr:implementation"}];
+    }
+  };
+  await assert.rejects(reconcileProjectPR({
+    reader,writer:{async graphql(){writes++;throw Error("unexpected Project write");}},
+    config:{},number:42,expectedSha:SHA,
+    admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
+    reread:async()=>({receipt,blockers:[]}),
+    verifyIncluded:async()=>{}
+  }),/category changed before Project write/);
+  assert.equal(writes,0);assert.equal(labelReads,2);
 });
