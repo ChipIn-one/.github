@@ -1,0 +1,14 @@
+{
+  "repository": "ChipIn-one/chipin-frontend",
+  "project": 5,
+  "ownerPolicy": {
+    "allowIssueOwner": true,
+    "implementationOwner": "syllik",
+    "releaseOwner": "syllik",
+    "allowAuthorFallback": false
+  },
+  "reviewerPolicy": {
+    "implementation": [],
+    "release": []
+  }
+}

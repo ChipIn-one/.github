@@ -1,0 +1,360 @@
+import process from "node:process";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { GitHubClient } from "./github-metadata.mjs";
+import { preflightPr } from "./issue-admission-pr.mjs";
+import { readAdmission, assertFreshReceipt } from "./issue-admission.mjs";
+import { reconcileDevelopmentLink, readTaskIdentityMarker } from "./development-link.mjs";
+
+const REPO = "ChipIn-one/chipin-frontend";
+const ROOT = "/repos/" + REPO;
+const PROJECT = 5;
+const CATEGORIES = { implementation: "pr:implementation", release: "pr:release" };
+const PROJECT_QUERY = 'query PRMembership($after:String){ organization(login:"ChipIn-one"){ projectV2(number:5){id items(first:100,after:$after){totalCount pageInfo{hasNextPage endCursor} nodes{id content{__typename ... on PullRequest{id number repository{nameWithOwner}}}}}}}}';
+const PROJECT_ADD = 'mutation AddPR($project:ID!,$pr:ID!){addProjectV2ItemById(input:{projectId:$project,contentId:$pr}){item{id}}}';
+const FULL_REF = /^ChipIn-one\/chipin-frontend#([1-9]\d*)$/u;
+const PR_NATIVE_QUERY = 'query PRNativeIdentity($number:Int!,$after:String){repository(owner:"ChipIn-one",name:"chipin-frontend"){nameWithOwner pullRequest(number:$number){number closingIssuesReferences(first:100,after:$after,userLinkedOnly:true){totalCount pageInfo{hasNextPage endCursor} nodes{id number repository{nameWithOwner}}}}}}';
+
+export function classifyPR(pr) {
+  if (pr.base?.repo?.full_name !== REPO || pr.head?.repo?.full_name !== REPO) throw new Error("SCOPE: same-repo frontend PR only");
+  if (pr.base.ref === "dev" && !["main", "dev"].includes(pr.head.ref)) return "implementation";
+  if (pr.base.ref === "main" && pr.head.ref === "dev") return "release";
+  throw new Error("ROUTE: only implementation→dev and dev→main");
+}
+export function implementationIdentity(body) {
+  const identity = readTaskIdentityMarker(body);
+  if (!identity || identity.repository !== REPO) throw new Error("IDENTITY: exactly one canonical frontend Task identity line required");
+  return identity;
+}
+export function releaseReferences(body) {
+  if (readTaskIdentityMarker(body)) throw new Error("RELEASE: release is not a single Task identity");
+  const lines = String(body ?? "").split(/\r?\n/u);
+  function field(name) {
+    const hit = lines.filter(line => line.startsWith(name + ":"));
+    if (hit.length !== 1) throw new Error("RELEASE: exactly one " + name + ": line required");
+    const refs = hit[0].slice(name.length + 1).split(",").map(x=>x.trim());
+    if (!refs.length || refs.some(x=>!FULL_REF.test(x)) || new Set(refs).size !== refs.length)
+      throw new Error("RELEASE: invalid, ambiguous or duplicate " + name + " references");
+    return refs.map(x=>Number(FULL_REF.exec(x)[1]));
+  }
+  return { prs:field("Included implementation PRs"), issues:field("Included Issues") };
+}
+export function bodyGaps(body) {
+  return ["Summary","Tests","Version impact","Dependencies"].filter(
+    key=>!new RegExp("^## "+key+"\\s*$","miu").test(String(body??""))
+  ).map(key=>"BODY: missing ## "+key+" (preserve human edits; add manually)");
+}
+export function chooseOwner({manual=[],issue=[],approved=null,author=null,allowAuthor=false}) {
+  if (manual.length) return null;
+  // Multiple native Issue assignees are valid under #53. Use the explicitly
+  // approved owner only if they really are among those assignees; never drop
+  // or silently choose among other human owners.
+  if (issue.length>1 && !(approved && issue.includes(approved)))
+    throw new Error("OWNER_POLICY: multiple Issue assignees without a matching approved owner");
+  const owner = issue.length>1 ? approved : (issue[0] ?? approved ?? (allowAuthor ? author : null));
+  if (!owner) throw new Error("OWNER_POLICY: no Issue owner or approved repository/release owner; assign Issue or configure explicit owner");
+  return owner;
+}
+export function chooseReviewer({manual=[],approved=[],author}) {
+  if (manual.length) return null;
+  // Single-maintainer policy: no fabricated reviewer or self-review. Human merges and
+  // independent external code reviews remain separate from native GitHub approvals.
+  if (approved.length===0) return null;
+  if (approved.length!==1) throw new Error("REVIEWER_POLICY: configure at most one approved reviewer; no inference");
+  if (approved[0]===author || !approved[0]) throw new Error("REVIEWER_POLICY: no self-review");
+  return approved[0];
+}
+export function uniqueProjectItem(items, id) {
+  const selected=items.filter(x=>x?.content?.__typename==="PullRequest" && x.content.id===id);
+  if (selected.length>1) throw new Error("PROJECT: duplicate PR membership, manual reconciliation required");
+  return selected[0]??null;
+}
+// A single-Issue implementation identity also forbids stale manual Development links
+// to any other Issue (for example after a PR body edit).
+export async function assertSingleNativeIssue(client,number,issueNumber,requireLinked=false) {
+  let cursor=null,total=null;
+  const seen=new Set();const nodes=[];
+  do {
+    const data=await client.graphql(PR_NATIVE_QUERY,{number,after:cursor});
+    const root=data?.repository,pr=root?.pullRequest,refs=pr?.closingIssuesReferences;
+    if (root?.nameWithOwner!==REPO || pr?.number!==number ||
+        !Number.isInteger(refs?.totalCount) || !refs?.pageInfo || !Array.isArray(refs.nodes))
+      throw new Error("NATIVE_IDENTITY: PR linked-Issue read is unavailable");
+    if (total!==null && total!==refs.totalCount) throw new Error("NATIVE_IDENTITY: linked-Issue count changed during read");
+    total=refs.totalCount;
+    for (const node of refs.nodes) {
+      if (!node?.id || !Number.isInteger(node.number) || node.repository?.nameWithOwner!==REPO || seen.has(node.id))
+        throw new Error("NATIVE_IDENTITY: unreadable/duplicate linked Issue");
+      seen.add(node.id);nodes.push(node);
+    }
+    if (refs.pageInfo.hasNextPage && (!refs.pageInfo.endCursor || cursor===refs.pageInfo.endCursor))
+      throw new Error("NATIVE_IDENTITY: invalid linked-Issue pagination");
+    cursor=refs.pageInfo.hasNextPage?refs.pageInfo.endCursor:null;
+  } while(cursor);
+  if (nodes.length!==total) throw new Error("NATIVE_IDENTITY: incomplete linked-Issue read-back");
+  if (nodes.some(x=>x.number!==issueNumber) || nodes.length>1)
+    throw new Error("NATIVE_IDENTITY: PR has a conflicting native linked Issue; single-Issue contract blocks reassignment");
+  if (requireLinked && nodes.length!==1)
+    throw new Error("NATIVE_IDENTITY: expected one native linked Issue on read-back");
+  return nodes.length===1;
+}
+
+export async function readProject(client) {
+  const items=[];const seen=new Set(); let cursor=null, projectId=null, count=null;
+  do {
+    let result;
+    try {
+      result=await client.graphql(PROJECT_QUERY,{after:cursor});
+    } catch (error) {
+      throw new Error("PROJECT_PERMISSION: Project #5 GraphQL read failed; configure FE token with org Projects v2 read/write: "+error.message);
+    }
+    const p=result?.organization?.projectV2;
+    if (!p?.id || !p.items?.pageInfo || !Array.isArray(p.items.nodes) || !Number.isInteger(p.items.totalCount))
+      throw new Error("PROJECT_PERMISSION: Project #5 unreadable; needs organization Projects read/write grant");
+    if (projectId && projectId!==p.id) throw new Error("PROJECT: project changed mid-read");
+    if (count!==null && count!==p.items.totalCount) throw new Error("PROJECT: membership changed mid-read");
+    projectId=p.id;count=p.items.totalCount;
+    for (const item of p.items.nodes) {
+      if (!item?.id || seen.has(item.id)) throw new Error("PROJECT: duplicate or missing item ID");
+      seen.add(item.id);items.push(item);
+    }
+    if (p.items.pageInfo.hasNextPage && (!p.items.pageInfo.endCursor || cursor===p.items.pageInfo.endCursor))
+      throw new Error("PROJECT: broken pagination");
+    cursor=p.items.pageInfo.hasNextPage?p.items.pageInfo.endCursor:null;
+  }while(cursor);
+  if (items.length!==count) throw new Error("PROJECT: incomplete pagination");
+  return {id:projectId,items};
+}
+export async function ensureProjectPR(client,prId,{beforeWrite}={}) {
+  const before=await readProject(client);
+  const existing=uniqueProjectItem(before.items,prId);
+  if (!existing) {
+    // Project pagination can exceed admission's 120-second lifetime.
+    // No new Project item is authorized without an explicit trusted gate.
+    if (typeof beforeWrite !== "function")
+      throw new Error("PROJECT_ADMISSION: pre-write validation callback required");
+    await beforeWrite();
+    const added=await client.graphql(PROJECT_ADD,{project:before.id,pr:prId});
+    if (!added?.addProjectV2ItemById?.item?.id) throw new Error("PROJECT: membership write not confirmed");
+  }
+  const after=await readProject(client);
+  const found=uniqueProjectItem(after.items,prId);
+  if (!found) throw new Error("PROJECT: missing PR item on read-back");
+  return {id:found.id,created:!existing,readBack:true};
+}
+export async function verifyRelease(client,refs) {
+  const issues=[];
+  for (const num of refs.prs) {
+    const impl=await client.request(ROOT+"/pulls/"+num);
+    if (!impl?.merged_at || impl.base?.ref!=="dev") throw new Error("RELEASE: PR #"+num+" not merged into dev");
+    const task=implementationIdentity(impl.body);
+    // Release verification is read-only. It may NEVER add a missing native link
+    // to an already-merged implementation PR (especially a terminal Issue).
+    await assertSingleNativeIssue(client,num,task.issueNumber,true);
+    issues.push(task.issueNumber);
+  }
+  if ([...new Set(issues)].sort((a,b)=>a-b).join(",")!==[...refs.issues].sort((a,b)=>a-b).join(","))
+    throw new Error("RELEASE: listed Issue set does not match included PR identities");
+}
+export async function ensureCategory(client,prNumber,kind) {
+  const label=CATEGORIES[kind];
+  // Fetch every labels page: a conflicting category may be beyond GitHub's default 30.
+  const current=await client.listAll(ROOT+"/issues/"+prNumber+"/labels");
+  if (!Array.isArray(current)) throw new Error("LABEL: unreadable existing labels");
+  const conflicting=CATEGORIES[kind==="release"?"implementation":"release"];
+  if (current.some(x=>x.name===conflicting))
+    throw new Error("LABEL_CONFLICT: existing manual PR category "+conflicting+" conflicts with "+label+"; no overwrite");
+  if (!await client.request(ROOT+"/labels/"+encodeURIComponent(label),{allow404:true})) {
+    await client.request(ROOT+"/labels",{method:"POST",body:{name:label,color:kind==="release"?"0366d6":"0e8a16",description:"ChipIn PR category"}});
+  }
+  if (!current.some(x=>x.name===label)) await client.request(ROOT+"/issues/"+prNumber+"/labels",{method:"POST",body:{labels:[label]}});
+  const final=await client.listAll(ROOT+"/issues/"+prNumber+"/labels");
+  if (!Array.isArray(final)||!final.some(x=>x.name===label)) throw new Error("LABEL: failed read-back");
+  if (final.some(x=>x.name===conflicting)) throw new Error("LABEL_CONFLICT: contradictory category appeared during read-back");
+}
+async function assignable(client,login) {
+  if (!/^[a-z\d][a-z\d-]{0,38}$/iu.test(login)) throw new Error("OWNER_POLICY: invalid login");
+  await client.request(ROOT+"/assignees/"+login);
+}
+async function eligibleReviewer(client,login) {
+  if (!/^[a-z\d][a-z\d-]{0,38}$/iu.test(login)) throw new Error("REVIEWER_POLICY: invalid login");
+  const p=await client.request(ROOT+"/collaborators/"+login+"/permission");
+  if (!["write","maintain","admin"].includes(p?.permission)) throw new Error("REVIEWER_POLICY: reviewer lacks write-or-higher collaborator eligibility");
+}
+// GitHub branch protection is the live authority for required checks, not a
+// frontend-ci success discovered anywhere on the SHA. The producer must also
+// be the expected GitHub Actions workflow, for this PR and this base revision.
+const TRUSTED_CI = Object.freeze({
+  dev: { "frontend-ci": ".github/workflows/frontend-ci.yml" },
+  main: { "main-ci": ".github/workflows/main-ci.yml" },
+});
+const ACTIONS_APP_ID = 15368;
+
+export async function requiredShaCIGreen(client, pr) {
+  const sha = pr?.head?.sha;
+  const branch = pr?.base?.ref;
+  const workflows = TRUSTED_CI[branch];
+  if (!/^[0-9a-f]{40}$/iu.test(sha || "") || !workflows)
+    throw new Error("REVIEW_CI: unsupported target branch or invalid current head SHA");
+
+  // GET branch is readable without the admin-only /protection endpoint.
+  const base = await client.request(ROOT + "/branches/" + encodeURIComponent(branch));
+  const protection = base?.protection?.required_status_checks;
+  const checks = protection?.checks;
+  if (base?.name !== branch || base.protected !== true || !Array.isArray(checks) || checks.length === 0)
+    throw new Error("REVIEW_CI: target-branch required status-check policy unreadable");
+  const contexts = protection.contexts;
+  if (!Array.isArray(contexts) || contexts.length !== checks.length ||
+      contexts.some(name => !checks.some(item => item.context === name)))
+    throw new Error("REVIEW_CI: inconsistent target-branch check policy");
+  if (new Set(checks.map(x => x.context)).size !== checks.length)
+    throw new Error("REVIEW_CI: ambiguous target-branch required checks");
+  if (checks.some(x => !Object.hasOwn(workflows, x.context) || x.app_id !== ACTIONS_APP_ID))
+    throw new Error("REVIEW_CI: unapproved required check or producer for " + branch);
+
+  const found = await client.request(ROOT + "/commits/" + sha + "/check-runs?per_page=100&filter=latest");
+  if (!Number.isInteger(found?.total_count) || !Array.isArray(found.check_runs) ||
+      found.total_count !== found.check_runs.length || found.check_runs.length > 100)
+    throw new Error("REVIEW_CI: current-SHA latest check runs unreadable or incomplete");
+
+  const blockers = [];
+  for (const {context, app_id} of checks) {
+    const matching = found.check_runs.filter(x => x.name === context && x.app?.id === app_id);
+    if (matching.length !== 1) {
+      blockers.push(context + ": missing or ambiguous trusted latest check");
+      continue;
+    }
+    const check = matching[0];
+    if (check.head_sha !== sha || check.status !== "completed" || check.conclusion !== "success") {
+      blockers.push(context + ": current-head check is not successful");
+      continue;
+    }
+    if (check.app?.slug !== "github-actions" || !Number.isSafeInteger(check.id)) {
+      blockers.push(context + ": untrusted check-run producer");
+      continue;
+    }
+    const match = /^https:\/\/github\.com\/ChipIn-one\/chipin-frontend\/actions\/runs\/([1-9]\d*)\/job\/([1-9]\d*)$/u.exec(check.details_url || "");
+    if (!match || Number(match[2]) !== check.id) {
+      blockers.push(context + ": untrusted workflow job URL");
+      continue;
+    }
+    const run = await client.request(ROOT + "/actions/runs/" + match[1]);
+    const linked = run?.pull_requests?.some(p =>
+      p.number === pr.number && p.head?.sha === sha && p.head?.ref === pr.head.ref &&
+      p.base?.ref === branch && (!pr.base.sha || p.base?.sha === pr.base.sha));
+    if (run?.id !== Number(match[1]) || run?.repository?.full_name !== REPO ||
+        run?.path !== workflows[context] || run?.event !== "pull_request" ||
+        run?.head_sha !== sha || run?.head_branch !== pr.head.ref ||
+        run?.status !== "completed" || run?.conclusion !== "success" || !linked)
+      blockers.push(context + ": stale, untrusted or wrong-PR workflow run");
+  }
+  return {ok: blockers.length === 0, blockers, branch, headSha: sha,
+    required: checks.map(x => x.context)};
+}
+export async function reconcilePR(client,policy,number,expectedSha,{admissionClient,admissionConfig,admit=preflightPr}={}) {
+  if (policy?.repository!==REPO || policy.project!==PROJECT || policy.ownerPolicy?.allowIssueOwner!==true
+      || !Array.isArray(policy.reviewerPolicy?.implementation) || !Array.isArray(policy.reviewerPolicy?.release))
+    throw new Error("CONFIG: explicit FE Project #5, owner and reviewer policy required");
+  const n=Number(number);
+  if (!Number.isSafeInteger(n)||n<=0) throw new Error("PR: invalid PR number");
+  const url=ROOT+"/pulls/"+n;
+  const pr=await client.request(url);
+  if (pr?.number!==n || pr.state!=="open" || !pr.node_id || !pr.head?.sha) throw new Error("PR: unreadable or not open");
+  if (!expectedSha || pr.head.sha!==expectedSha) throw new Error("SHA: event head no longer matches PR");
+  const kind=classifyPR(pr);
+  // Org #53 is the canonical authority; PR metadata is never an alternative
+  // intake writer, and must not mutate Development/PR metadata without admission.
+  if (!admissionClient || !admissionConfig) throw new Error("ADMISSION: read-only org credential and canonical config required");
+  const admitted=await admit({
+    client:admissionClient,config:admissionConfig,repository:REPO,
+    number:n,expectedHeadSha:expectedSha
+  });
+  const blockers=bodyGaps(pr.body);
+  let issue=null,taskIdentity=null;
+  if (kind==="implementation") {
+    const identity=implementationIdentity(pr.body);
+    await assertSingleNativeIssue(client,n,identity.issueNumber);
+    const receipt=admitted.receipts[0];
+    const native=await reconcileDevelopmentLink(client,{
+      repository:REPO,pullRequestNumber:n,expectedHeadSha:expectedSha,
+      admission:{client:admissionClient,config:admissionConfig,
+        expectedRevision:receipt.revision,selectedOwner:"syllik"}
+    });
+    await assertSingleNativeIssue(client,n,identity.issueNumber,true);
+    if (!native.readBackConfirmed || native.issueNumber!==identity.issueNumber) throw new Error("NATIVE_LINK: missing exact userLinkedOnly read-back");
+    issue=await client.request(ROOT+"/issues/"+identity.issueNumber);
+    if (issue?.number!==identity.issueNumber || issue.pull_request) throw new Error("IDENTITY: target is not an Issue");
+    taskIdentity=identity.canonical;
+  } else {
+    await verifyRelease(client,releaseReferences(pr.body));
+  }
+  const fresh=await client.request(url);
+  if (fresh.head?.sha!==pr.head.sha || fresh.head?.ref!==pr.head.ref ||
+      fresh.base?.sha!==pr.base?.sha || fresh.base?.ref!==pr.base.ref ||
+      fresh.body!==pr.body || fresh.state!=="open") throw new Error("PR_DRIFT: metadata changed mid-run");
+  // Native linking may update the Issue revision. Before PR metadata mutation,
+  // require a NEW current Issue/Project admission and PR identity read-back.
+  await admit({client:admissionClient,config:admissionConfig,
+    repository:REPO,number:n,expectedHeadSha:expectedSha});
+  await ensureCategory(client,n,kind);
+  // Project #5 is exclusively written/read back by the .github trusted worker.
+  // FE GITHUB_TOKEN never receives the org Project credential.
+  const project={status:"pending-org-writer",number:5};
+  const prIssue=await client.request(ROOT+"/issues/"+n);
+  const currentOwners=(prIssue.assignees??[]).map(x=>x.login);
+  const issueOwners=issue?(issue.assignees??[]).map(x=>x.login):[];
+  try {
+    const selected=chooseOwner({manual:currentOwners,issue:issueOwners,
+      approved:kind==="release"?policy.ownerPolicy.releaseOwner:policy.ownerPolicy.implementationOwner,
+      author:pr.user?.login,allowAuthor:policy.ownerPolicy.allowAuthorFallback===true});
+    if (selected) {
+      await assignable(client,selected);
+      await client.request(ROOT+"/issues/"+n+"/assignees",{method:"POST",body:{assignees:[selected]}});
+      if (!(await client.request(ROOT+"/issues/"+n)).assignees?.some(x=>x.login===selected)) throw new Error("OWNER_READ_BACK: missing");
+    }
+  } catch (e) {blockers.push(e.message);}
+  const reviewers=(await client.request(url)).requested_reviewers??[];
+  try {
+    const teams=(await client.request(url)).requested_teams??[];
+    const selected=chooseReviewer({manual:[...reviewers.map(x=>x.login),...teams.map(x=>x.slug)],
+      approved:policy.reviewerPolicy[kind],author:pr.user?.login});
+    if (selected) {
+      const ci=await requiredShaCIGreen(client,pr);
+      if (!ci.ok) {
+        blockers.push("REVIEW_CI: required target-branch checks not green on current head " +
+          pr.head.sha + ": " + ci.blockers.join("; ") + "; request deferred");
+      } else {
+        const prior=await client.listAll(ROOT+"/pulls/"+n+"/reviews");
+        if (!Array.isArray(prior)) throw new Error("REVIEW_POLICY: review history unreadable");
+        const alreadyReviewed=prior.some(x=>x.user?.login===selected && x.commit_id===pr.head.sha
+          && ["APPROVED","CHANGES_REQUESTED","COMMENTED"].includes(x.state));
+        if (!alreadyReviewed) {
+          await eligibleReviewer(client,selected);
+          await client.request(ROOT+"/pulls/"+n+"/requested_reviewers",{method:"POST",body:{reviewers:[selected]}});
+          if (!(await client.request(url)).requested_reviewers?.some(x=>x.login===selected)) throw new Error("REVIEW_READ_BACK: missing");
+        }
+      }
+    }
+  } catch(e) {blockers.push(e.message);}
+  const last=await client.request(url);
+  if (last.head?.sha!==pr.head.sha) throw new Error("SHA: PR changed before receipt");
+  // No Project GraphQL calls from FE; org worker verifies membership after write.
+  if (issue) {
+    const afterIssue=await client.request(ROOT+"/issues/"+issue.number);
+    if (afterIssue.state!==issue.state || afterIssue.state_reason!==issue.state_reason)
+      throw new Error("ISSUE_STATE: changed during reconciliation; task completion is exclusively Issue-owned");
+  }
+  return {number:n,kind,headSha:pr.head.sha,taskIdentity,project,blockers,issueStateUnchanged:true};
+}
+async function main(){
+  const {readFile}=await import("node:fs/promises");
+  const policy=JSON.parse(await readFile(new URL("./pr-metadata.config.json",import.meta.url),"utf8"));
+  const admissionConfig=JSON.parse(await readFile(new URL("./metadata-migration.config.json",import.meta.url),"utf8"));
+  const client=new GitHubClient(process.env.CHIPIN_PR_METADATA_TOKEN);
+  const admissionClient=new GitHubClient(process.env.CHIPIN_ADMISSION_READ_TOKEN);
+  const receipt=await reconcilePR(client,policy,process.env.CHIPIN_PR_NUMBER,process.env.CHIPIN_PR_SHA,{admissionClient,admissionConfig});
+  console.log(JSON.stringify(receipt,null,2));
+  if (receipt.blockers.length) process.exitCode=1;
+}
+if(process.argv[1]&&pathToFileURL(resolve(process.argv[1])).href===import.meta.url)
+  main().catch(e=>{console.error("PR METADATA BLOCKED: "+e.message);process.exitCode=1;});
