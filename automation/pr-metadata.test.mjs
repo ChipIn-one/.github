@@ -72,11 +72,10 @@ test("Project GraphQL permission failures become actionable blockers",async()=>{
 });
 test("manual category conflicts block instead of adding competing labels",async()=>{
   let writes=0;
-  const client={async request(path,opts={}) {
-    if(opts.method)writes++;
-    if(path.includes("/issues/42/labels"))return[{name:"pr:release"}];
-    throw new Error("unexpected "+path);
-  }};
+  const client={
+    async listAll(path){assert.equal(path,"/repos/"+repo+"/issues/42/labels");return[{name:"pr:release"}];},
+    async request(path,opts={}){if(opts.method)writes++;throw new Error("unexpected "+path);}
+  };
   await assert.rejects(ensureCategory(client,42,"implementation"),/LABEL_CONFLICT/u);
   assert.equal(writes,0);
 });
@@ -119,14 +118,16 @@ test("release retries preserve manual values, avoid duplicate Project item and n
       projectAdds++;items.push({id:"ITEM_20",content:{__typename:"PullRequest",id:"PR_20"}});
       return{addProjectV2ItemById:{item:{id:"ITEM_20"}}};
     },
+    async listAll(path){
+      assert.equal(path,PATH+"/issues/20/labels");return [...labels];
+    },
     async request(path,opts={}) {
       if (opts.method && path.includes("/issues/"))issueWrites++;
       if(path===PATH+"/pulls/20")return release;
       if(path===PATH+"/pulls/10")return impl;
       if(path===PATH+"/issues/20")return{number:20,assignees:[{login:"human-owner"}]};
-      if(path===PATH+"/issues/20/labels") {
-        if(opts.method==="POST"){labelAdds++;labels.push({name:"pr:release"});}
-        return labels;
+      if(path===PATH+"/issues/20/labels" && opts.method==="POST"){
+        labelAdds++;labels.push({name:"pr:release"});return labels;
       }
       if(path===PATH+"/labels/pr%3Arelease")return{name:"pr:release"};
       throw new Error("unexpected REST request "+path);
@@ -170,4 +171,34 @@ import "../evidence/pr54-ci-gate-reproduction.test.mjs";
 test("single-maintainer reviewer policy does not invent a second person",()=>{
   assert.equal(chooseReviewer({approved:[],author:"syllik"}),null);
   assert.throws(()=>chooseReviewer({approved:["syllik"],author:"syllik"}),/self-review/);
+});
+
+test("adapter rejects a contradictory category beyond the first 100 labels",async()=>{
+  const labels=Array.from({length:100},(_,i)=>({name:"manual-"+i}));
+  labels.push({name:"pr:implementation"},{name:"pr:release"});
+  let mutations=0;
+  const client={
+    async listAll(path){
+      assert.equal(path,"/repos/"+repo+"/issues/381/labels");return labels;
+    },
+    async request(path,opts={}){if(opts.method)mutations++;throw Error("unexpected "+path);}
+  };
+  await assert.rejects(ensureCategory(client,381,"implementation"),/LABEL_CONFLICT/);
+  assert.equal(mutations,0);
+});
+
+test("adapter read-back rejects a conflicting label added after write",async()=>{
+  const labels=[{name:"manual"}];let reads=0,adds=0;
+  const client={
+    async listAll(){reads++;return reads===1?[...labels]:[...labels,{name:"pr:release"}];},
+    async request(path,opts={}){
+      if(path.endsWith("/labels/pr%3Aimplementation"))return{name:"pr:implementation"};
+      if(path.endsWith("/issues/42/labels") && opts.method==="POST"){
+        adds++;labels.push({name:"pr:implementation"});return labels;
+      }
+      throw Error("unexpected "+path);
+    }
+  };
+  await assert.rejects(ensureCategory(client,42,"implementation"),/LABEL_CONFLICT/);
+  assert.equal(adds,1);assert.equal(reads,2);
 });
