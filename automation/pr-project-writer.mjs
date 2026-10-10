@@ -29,7 +29,11 @@ export async function reconcileProjectPR({reader,writer,config,number,expectedSh
     throw new Error("PROJECT_REQUEST: PR missing, closed or stale");
   const kind=classifyPR(pr);
   const label=VALID.get(kind);
-  const names=(await reader.request(ROOT+"/issues/"+number+"/labels")).map(x=>x.name);
+  // Read all REST label pages; category conflicts hidden after page one must block.
+  const labels=await reader.listAll(ROOT+"/issues/"+number+"/labels");
+  if(!Array.isArray(labels)||labels.some(x=>!x?.name))
+    throw new Error("PROJECT_REQUEST: unreadable PR category labels");
+  const names=labels.map(x=>x.name);
   if (!names.includes(label)) throw new Error("PROJECT_REQUEST: verified category label missing");
   if (names.includes(VALID.get(kind==="implementation"?"release":"implementation")))
     throw new Error("PROJECT_REQUEST: contradictory PR category labels");
@@ -58,6 +62,15 @@ export async function reconcileProjectPR({reader,writer,config,number,expectedSh
   latest=await reader.request(ROOT+"/pulls/"+number);
   if(prIdentity(latest)!==prIdentity(pr)) throw new Error("PROJECT_REQUEST: PR drifted during final admission");
   for(const receipt of admitted.receipts) assertFreshReceipt(receipt,{issue:receipt.issue,revision:receipt.revision});
+
+  // A PR's label may change during admission. Check all pages again on the
+  // Project write boundary; a late conflicting or removed category blocks.
+  const finalLabels=await reader.listAll(ROOT+"/issues/"+number+"/labels");
+  if(!Array.isArray(finalLabels)||finalLabels.some(x=>!x?.name))
+    throw new Error("PROJECT_REQUEST: unreadable final PR category labels");
+  const finalNames=finalLabels.map(x=>x.name);
+  if(!finalNames.includes(label)||finalNames.includes(VALID.get(kind==="implementation"?"release":"implementation")))
+    throw new Error("PROJECT_REQUEST: PR category changed before Project write");
 
   const project=await ensureProjectPR(writer,pr.node_id);
   return {contractVersion:"chipin-pr-project-reconcile/v1",number,kind,sha:expectedSha,
