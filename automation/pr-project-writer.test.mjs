@@ -121,3 +121,97 @@ test("Project writer rejects a late label change before writing",async()=>{
   }),/category changed before Project write/);
   assert.equal(writes,0);assert.equal(labelReads,2);
 });
+
+test("release native linkage changes after admission and blocks Project mutation",async()=>{
+  const p=mkPR();let writes=0,verifyReads=0,admissionReads=0;
+  const reader={
+    async request(path){if(path===root+"/pulls/42")return p;throw Error("unexpected "+path);},
+    async listAll(path){assert.equal(path,root+"/issues/42/labels");return[{name:"pr:release"}];}
+  };
+  await assert.rejects(reconcileProjectPR({
+    reader,writer:{async graphql(){writes++;throw Error("Project write must not happen");}},
+    config:{},number:42,expectedSha:SHA,
+    admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
+    reread:async()=>{admissionReads++;return{receipt,blockers:[]};},
+    verifyIncluded:async()=>{
+      verifyReads++;
+      if(verifyReads===2)throw Error("RELEASE: included PR native Task identity changed");
+    },
+  }),/native Task identity changed/);
+  assert.equal(admissionReads,1);
+  assert.equal(verifyReads,2);
+  assert.equal(writes,0);
+});
+
+test("implementation native linkage changes after admission and blocks Project mutation",async()=>{
+  const p={...mkPR(),body:"Task identity: "+repo+"#5",
+    head:{sha:SHA,ref:"feat/issue-381-identity",repo:{full_name:repo}},
+    base:{sha:"b".repeat(40),ref:"dev",repo:{full_name:repo}}};
+  let writes=0,verifyReads=0;
+  const reader={
+    async request(path){if(path===root+"/pulls/42")return p;throw Error("unexpected "+path);},
+    async listAll(path){assert.equal(path,root+"/issues/42/labels");return[{name:"pr:implementation"}];}
+  };
+  await assert.rejects(reconcileProjectPR({
+    reader,writer:{async graphql(){writes++;throw Error("Project write must not happen");}},
+    config:{},number:42,expectedSha:SHA,
+    admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
+    reread:async()=>({receipt,blockers:[]}),
+    verifyNative:async(_,number,issue,required)=>{
+      verifyReads++;
+      assert.equal(number,42);assert.equal(issue,5);assert.equal(required,true);
+      if(verifyReads===2)throw Error("NATIVE_IDENTITY: Issue #5 link removed during admission");
+    },
+  }),/Issue #5 link removed/);
+  assert.equal(verifyReads,2);
+  assert.equal(writes,0);
+});
+
+test("Project write rejects refreshed admission expiring during paginated final labels",async()=>{
+  const p=mkPR();let writes=0,labelsReads=0,verified=0;
+  const currentReceipt={...receipt,checkedAt:new Date().toISOString()};
+  const reader={
+    async request(path){if(path===root+"/pulls/42")return p;throw Error("unexpected "+path);},
+    async listAll(path){
+      assert.equal(path,root+"/issues/42/labels");labelsReads++;
+      if(labelsReads===2) currentReceipt.checkedAt=new Date(Date.now()-180_000).toISOString();
+      return[{name:"pr:release"}];
+    }
+  };
+  await assert.rejects(reconcileProjectPR({
+    reader,writer:{async graphql(){writes++;throw Error("Project write must not happen");}},
+    config:{},number:42,expectedSha:SHA,
+    admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
+    reread:async()=>({receipt:currentReceipt,blockers:[]}),
+    verifyIncluded:async()=>{verified++;}
+  }),/STALE admission receipt/);
+  assert.equal(labelsReads,2);
+  assert.equal(verified,2);
+  assert.equal(writes,0);
+});
+
+test("fresh reread replaces aged preflight receipt at Project boundary",async()=>{
+  const p=mkPR(),oldReceipt={...receipt,checkedAt:new Date(Date.now()-180_000).toISOString()};
+  const freshReceipt={...receipt,checkedAt:new Date().toISOString()};
+  let writes=0,verified=0;
+  const items=[];
+  const reader={
+    async request(path){if(path===root+"/pulls/42")return p;throw Error("unexpected "+path);},
+    async listAll(path){assert.equal(path,root+"/issues/42/labels");return[{name:"pr:release"}];}
+  };
+  const writer={async graphql(query){
+    if(query.startsWith("query"))return{organization:{projectV2:{id:"P5",items:{
+      totalCount:items.length,pageInfo:{hasNextPage:false,endCursor:null},nodes:[...items]
+    }}}};
+    writes++;items.push({id:"ITEM_42",content:{__typename:"PullRequest",id:"PR_42"}});
+    return{addProjectV2ItemById:{item:{id:"ITEM_42"}}};
+  }};
+  const result=await reconcileProjectPR({
+    reader,writer,config:{},number:42,expectedSha:SHA,
+    admit:async()=>({status:"INTAKE_COMPLETE",receipts:[oldReceipt]}),
+    reread:async()=>({receipt:freshReceipt,blockers:[]}),
+    verifyIncluded:async()=>{verified++;}
+  });
+  assert.equal(writes,1);assert.equal(verified,2);
+  assert.equal(result.readBack,true);
+});
