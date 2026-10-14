@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { runPreflight, parsePreflightArgs } from './issue-admission-preflight.mjs';
+import { GitHubClient } from './github-metadata.mjs';
 const issue = 'ChipIn-one/chipin-frontend#153';
 const revision = 'b'.repeat(64);
 const receipt = { contractVersion: 'chipin-issue-admission/v1', status: 'INTAKE_COMPLETE',
@@ -57,12 +58,27 @@ test('exact Issue identity and stale expectedRevision parse fail closed', () => 
   assert.throws(() => parsePreflightArgs(['--issue', issue, '--expected-revision', 'sha-not-hash']), { code: 'INVALID_REQUEST' });
 });
 test('real token-backed GitHubClient transient failure drives bounded canonical retry', async () => {
-  let calls = 0;
-  const result = await runPreflight(['--issue', issue], {GITHUB_TOKEN:'approved'}, {
+  let attempts = 0;
+  const value = await runPreflight(['--issue', issue], {GITHUB_TOKEN:'approved'}, {
     loadConfig:async()=>configBytes,
     retryOptions:{pause:async()=>{}},
-    makeTokenClient:token=>new (await import('./github-metadata.mjs')).GitHubClient(token),
+    makeTokenClient:token=>new GitHubClient(token, async () => {
+      attempts++;
+      if (attempts === 1) return {ok:false,status:503,text:async()=>'SENSITIVE_RESPONSE_BODY'};
+      return {ok:true,status:200,json:async()=>({})};
+    }),
+    reader:async ({client}) => {
+      try { await client.request('/repos/ChipIn-one/chipin-frontend/issues/153'); }
+      catch (e) {
+        assert.equal(e.code, 'TRANSPORT_ERROR');
+        return {blockers:[`Native Issue unreadable: ${e.message}`,
+          'Unreadable or mismatched native Issue identity.'],receipt:{...receipt,status:'BLOCKED'}};
+      }
+      return {blockers:[],receipt};
+    },
   });
+  assert.equal(value,receipt);
+  assert.equal(attempts,2);
 });
 test('transport failure accompanied by derived metadata blockers retries and recovers', async () => {
   let count = 0;
