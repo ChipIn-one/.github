@@ -13,9 +13,10 @@ function setup() {
   return { envelope, expectedIssue: issue, expectedRevision: revision, expectedRequestId: requestId,
     expectedProducer: 'trusted-bot[bot]', expectedSourceSha: sha, expectedReaderBlobSha: reader,
     expectedConfigSha256: config, run: { id: 12, run_attempt: 1,
-      repository: { full_name: 'ChipIn-one/.github' }, path: '.github/workflows/issue-admission-preflight.yml',
+      repository: { full_name: 'ChipIn-one/.github' }, path: '.github/workflows/issue-admission-preflight.yml@master',
       event: 'repository_dispatch', head_branch: 'master', head_sha: sha,
-      status: 'completed', conclusion: 'success', actor: { login: 'trusted-bot[bot]' } },
+      status: 'completed', conclusion: 'success', actor: { login: 'trusted-bot[bot]' },
+      triggering_actor: { login: 'trusted-bot[bot]' } },
     artifact: { id: 789, workflow_run: { id: 12 }, name: `chipin-admission-12-1-${requestId}`,
       expired: false, digest: `sha256:${'e'.repeat(64)}` },
     archiveSha256: 'e'.repeat(64), recordConsumed: async () => true };
@@ -25,12 +26,33 @@ test('trusted Actions run and downloaded artifact digest admit canonical v1 revi
   assert.equal(result.revision, revision);
   assert.equal(result.artifactId, 789);
 });
+test('GitHub API workflow path accepts exact master-qualified and bare canonical paths, never another ref', async () => {
+  const bare = setup(); bare.run.path = '.github/workflows/issue-admission-preflight.yml';
+  assert.equal((await verifyAdmissionEvidence(bare)).revision, revision);
+  for (const path of [
+    '.github/workflows/issue-admission-preflight.yml@dev',
+    '.github/workflows/issue-admission-preflight.yml@master/other',
+    '.github/workflows/other.yml@master',
+  ]) {
+    const v = setup(); v.run.path = path;
+    await assert.rejects(verifyAdmissionEvidence(v), { code: 'UNTRUSTED_RUN' });
+  }
+});
+test('untrusted re-run initiator cannot borrow the original trusted actor', async () => {
+  const rerun = setup(); rerun.run.run_attempt = 2; rerun.envelope.run.attempt = 2;
+  rerun.artifact.name = `chipin-admission-12-2-${requestId}`;
+  rerun.run.triggering_actor.login = 'untrusted-executor';
+  await assert.rejects(verifyAdmissionEvidence(rerun), { code: 'UNTRUSTED_RUN' });
+  const missing = setup(); delete missing.run.triggering_actor;
+  await assert.rejects(verifyAdmissionEvidence(missing), { code: 'UNTRUSTED_RUN' });
+});
 test('wrong issue, digest tampering, invalid revision, wrong producer, and request mismatch block', async () => {
   for (const modify of [
     v => { v.expectedIssue = 'ChipIn-one/chipin-backend#178'; },
     v => { v.envelope.receipt.fields = { Priority: 'P0' }; },
     v => { delete v.envelope.receipt.revision; },
     v => { v.run.actor.login = 'attacker'; },
+    v => { v.run.triggering_actor.login = 'attacker'; },
     v => { v.expectedRequestId = 'unmatched-req-123456'; },
   ]) {
     const v = setup(); modify(v); await assert.rejects(verifyAdmissionEvidence(v));
