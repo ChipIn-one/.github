@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   issue-preflight:
-    if: github.ref == 'refs/heads/master' && github.actor == vars.CHIPIN_TRUSTED_PREFLIGHT_ACTOR && vars.CHIPIN_TRUSTED_PREFLIGHT_ACTOR != ''
+    if: github.ref == 'refs/heads/master' && github.actor == vars.CHIPIN_TRUSTED_PREFLIGHT_ACTOR && github.triggering_actor == vars.CHIPIN_TRUSTED_PREFLIGHT_ACTOR && vars.CHIPIN_TRUSTED_PREFLIGHT_ACTOR != ''
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
