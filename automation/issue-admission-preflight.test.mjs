@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { runPreflight, parsePreflightArgs } from './issue-admission-preflight.mjs';
 const issue = 'ChipIn-one/chipin-frontend#153';
 const revision = 'b'.repeat(64);
@@ -22,6 +23,27 @@ test('producer mode requires trusted GitHub Actions context, no fallback', async
   await assert.rejects(runPreflight(['--issue', issue, '--producer', 'actions', '--request-id', 'some-long-request-key'],
     { GITHUB_ACTIONS: 'true' }, { loadConfig: async () => configBytes }), { code: 'AUTH_UNAVAILABLE' });
 });
+test('trusted workflow forwards the KB owner from dispatch payload to canonical preflight', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/issue-admission-preflight.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /OWNER: \$\{\{ github\.event\.client_payload\.owner \}\}/);
+  assert.match(workflow, /args\+=\(--owner "\$OWNER"\)/);
+  assert.match(workflow, /github\.triggering_actor == vars\.CHIPIN_TRUSTED_PREFLIGHT_ACTOR/);
+});
+test('KB requires a validated selected owner; explicit FE/BE owner policy remains canonical', () => {
+  assert.throws(() => parsePreflightArgs(['--issue', 'ChipIn-one/chipin-knowledge-base#35']), {code:'INVALID_REQUEST'});
+  for (const owner of ['bad name', 'bad/owner', '--bad', 'a'.repeat(39)]) {
+    assert.throws(() => parsePreflightArgs(['--issue', 'ChipIn-one/chipin-knowledge-base#35', '--owner', owner]), {code:'INVALID_REQUEST'});
+  }
+  assert.equal(parsePreflightArgs(['--issue', 'ChipIn-one/chipin-knowledge-base#35', '--owner', 'syllik']).owner, 'syllik');
+});
+test('producer requires a trusted rerun actor independently of the original actor', async () => {
+  const env = {GITHUB_ACTIONS:'true', GITHUB_EVENT_NAME:'repository_dispatch', GITHUB_REPOSITORY:'ChipIn-one/.github',
+    GITHUB_REF:'refs/heads/master', GITHUB_SHA:'a'.repeat(40), GITHUB_TOKEN:'approved',
+    GITHUB_RUN_ID:'1234', GITHUB_RUN_ATTEMPT:'2', GITHUB_ACTOR:'syllik',
+    GITHUB_TRIGGERING_ACTOR:'untrusted', CHIPIN_TRUSTED_PREFLIGHT_ACTOR:'syllik'};
+  await assert.rejects(runPreflight(['--issue', issue, '--producer', 'actions', '--request-id', 'some-long-request-key'], env,
+    {loadConfig: async () => configBytes, makeTokenClient: () => ({})}), {code:'UNTRUSTED_PRODUCER_RUNTIME'});
+});
 test('KB owner explicit passed to canonical reader', async () => {
   let selectedOwner;
   await runPreflight(['--issue', 'ChipIn-one/chipin-knowledge-base#35', '--owner', 'syllik'], {}, {
@@ -33,6 +55,32 @@ test('KB owner explicit passed to canonical reader', async () => {
 test('exact Issue identity and stale expectedRevision parse fail closed', () => {
   assert.throws(() => parsePreflightArgs(['--issue', 'ChipIn-one/.github#119']), { code: 'INVALID_REQUEST' });
   assert.throws(() => parsePreflightArgs(['--issue', issue, '--expected-revision', 'sha-not-hash']), { code: 'INVALID_REQUEST' });
+});
+test('transport failure accompanied by derived metadata blockers retries and recovers', async () => {
+  let count = 0;
+  const value = await runPreflight(['--issue', issue], {}, {
+    loadConfig: async () => configBytes, makeGhClient: () => ({}),
+    retryOptions: {pause: async () => {}},
+    reader: async () => {
+      count++;
+      return count === 1 ? {blockers: ['Project #5 unreadable: TRANSPORT_ERROR',
+        'Project #5 membership count 0, expected one.', 'Project #5 Status missing or unsupported.'],
+        receipt:{...receipt,status:'BLOCKED'}} : {blockers:[],receipt};
+    },
+  });
+  assert.equal(count, 2);
+  assert.equal(value, receipt);
+});
+test('permanent read failure alongside transient one is not retried', async () => {
+  let count = 0;
+  await assert.rejects(runPreflight(['--issue', issue], {}, {
+    loadConfig: async () => configBytes, makeGhClient: () => ({}),
+    retryOptions: {pause: async () => {}},
+    reader: async () => {count++; return {blockers: ['Native Issue unreadable: PERMISSION_DENIED',
+      'Project #5 unreadable: TRANSPORT_ERROR', 'Unreadable or mismatched native Issue identity.'],
+      receipt:{...receipt,status:'BLOCKED'}};},
+  }), {code:'ADMISSION_BLOCKED'});
+  assert.equal(count, 1);
 });
 test('genuine invalid metadata is blocked without mutation or retry', async () => {
   let count = 0;
