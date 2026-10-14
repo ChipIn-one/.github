@@ -78,12 +78,60 @@ export class GhReadClient {
   }
 }
 
+// Normalize the legacy token GitHubClient's unstructured HTTP/network errors at
+// the read-only boundary. Do not expose response bodies or downgrade 401/403.
+function normalizeTokenReadFailure(cause, capability) {
+  if (cause instanceof PreflightError) return cause;
+  const message = typeof cause?.message === 'string' ? cause.message : '';
+  const statusMatch = /^(?:[A-Z]+ \S+|GraphQL) -> (\d{3})(?::|$)/.exec(message);
+  const status = statusMatch ? Number(statusMatch[1]) : null;
+  const networkCodes = new Set(['ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN',
+    'ECONNREFUSED', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET']);
+  const transient = status === 408 || status === 429 || (status >= 500 && status <= 599) ||
+    cause?.name === 'AbortError' || (cause instanceof TypeError && message === 'fetch failed') ||
+    networkCodes.has(cause?.code) || networkCodes.has(cause?.cause?.code);
+  const code = status === 401 || status === 403 ? 'PERMISSION_DENIED'
+    : transient ? 'TRANSPORT_ERROR'
+      : status === 404 ? 'NOT_FOUND' : 'SCHEMA_UNREADABLE';
+  const remedy = code === 'TRANSPORT_ERROR' ? 'Retry the transient read within the bounded preflight budget.'
+    : code === 'PERMISSION_DENIED' ? 'Confirm existing approved org Issue Fields, native Issue and Project #5 read permissions.'
+      : 'Investigate approved canonical read availability; do not retry invalid schema or permissions.';
+  return error(code, 'token', capability, remedy);
+}
+
+export class TokenReadClient {
+  #client;
+  constructor(client) { this.#client = client; }
+  async request(path, options = {}) {
+    if (options.method && options.method !== 'GET' || options.body !== undefined ||
+        !/^\/(repos|orgs)\/[A-Za-z0-9_.\-/]+(?:\?.*)?$/.test(path)) {
+      throw error('READ_ONLY_VIOLATION', 'token', 'REST GET', 'Mutations and unsupported API routes are forbidden.');
+    }
+    try { return await this.#client.request(path, options); }
+    catch (cause) { throw normalizeTokenReadFailure(cause, 'REST GET'); }
+  }
+  async listAll(path) {
+    if (!/^\/(repos|orgs)\/[A-Za-z0-9_.\-/]+(?:\?.*)?$/.test(path)) {
+      throw error('READ_ONLY_VIOLATION', 'token', 'REST GET pagination', 'Unsupported API route.');
+    }
+    try { return await this.#client.listAll(path); }
+    catch (cause) { throw normalizeTokenReadFailure(cause, 'REST GET pagination'); }
+  }
+  async graphql(query, variables = {}) {
+    if (!/^\s*query\s+[\w]+\s*\(/.test(query) || /\bmutation\b/i.test(query)) {
+      throw error('READ_ONLY_VIOLATION', 'token', 'GraphQL query', 'Only canonical read queries are accepted.');
+    }
+    try { return await this.#client.graphql(query, variables); }
+    catch (cause) { throw normalizeTokenReadFailure(cause, 'GraphQL query'); }
+  }
+}
+
 // Deterministic priority. A present but unauthorized explicit credential is not silently
 // downgraded to a different principal; absence falls through to existing gh auth.
 export function selectDirectTransport({ token, makeTokenClient, makeGhClient = () => new GhReadClient() } = {}) {
   if (typeof token === 'string' && token.length) {
     if (!makeTokenClient) throw error('INVALID_REQUEST', 'token', 'client factory', 'Inject the canonical GitHubClient constructor.');
-    return { transport: 'token', principal: 'approved-read-credential', client: makeTokenClient(token) };
+    return { transport: 'token', principal: 'approved-read-credential', client: new TokenReadClient(makeTokenClient(token)) };
   }
   return { transport: 'gh', principal: 'existing-gh-session', client: makeGhClient() };
 }
