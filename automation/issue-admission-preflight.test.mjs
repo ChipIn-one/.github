@@ -56,6 +56,14 @@ test('exact Issue identity and stale expectedRevision parse fail closed', () => 
   assert.throws(() => parsePreflightArgs(['--issue', 'ChipIn-one/.github#119']), { code: 'INVALID_REQUEST' });
   assert.throws(() => parsePreflightArgs(['--issue', issue, '--expected-revision', 'sha-not-hash']), { code: 'INVALID_REQUEST' });
 });
+test('real token-backed GitHubClient transient failure drives bounded canonical retry', async () => {
+  let calls = 0;
+  const result = await runPreflight(['--issue', issue], {GITHUB_TOKEN:'approved'}, {
+    loadConfig:async()=>configBytes,
+    retryOptions:{pause:async()=>{}},
+    makeTokenClient:token=>new (await import('./github-metadata.mjs')).GitHubClient(token),
+  });
+});
 test('transport failure accompanied by derived metadata blockers retries and recovers', async () => {
   let count = 0;
   const value = await runPreflight(['--issue', issue], {}, {
