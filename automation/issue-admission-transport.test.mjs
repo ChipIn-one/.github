@@ -1,8 +1,35 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { GhReadClient, selectDirectTransport, safeAdmissionDiagnostics } from './issue-admission-transport.mjs';
+import { GhReadClient, TokenReadClient, selectDirectTransport, safeAdmissionDiagnostics } from './issue-admission-transport.mjs';
+import { GitHubClient } from './github-metadata.mjs';
 const stub = (record, value = '{}') => async (_program, args) => { record.push(args); return { stdout: value }; };
 
+test('token-backed HTTP 503/429 and network errors normalize as transient without leaking bodies', async () => {
+  for (const status of [429, 500, 503]) {
+    const raw = new GitHubClient('approved', async () => ({ok:false, status, text:async () => 'SENSITIVE_RESPONSE_BODY'}));
+    const client = new TokenReadClient(raw);
+    await assert.rejects(client.request('/repos/ChipIn-one/chipin-frontend/issues/153'), e => {
+      assert.equal(e.code, 'TRANSPORT_ERROR');
+      assert.ok(!JSON.stringify(e).includes('SENSITIVE_RESPONSE_BODY'));
+      return true;
+    });
+    await assert.rejects(client.graphql('query MetadataProject($org: String!) { organization(login: $org) { id } }', {org:'ChipIn-one'}),
+      {code:'TRANSPORT_ERROR'});
+  }
+  const raw = new GitHubClient('approved', async () => { throw new TypeError('fetch failed'); });
+  await assert.rejects(new TokenReadClient(raw).request('/repos/ChipIn-one/chipin-frontend/issues/153'), {code:'TRANSPORT_ERROR'});
+});
+test('token-backed auth failure and schema failure remain permanent; writes forbidden', async () => {
+  for (const [status, code] of [[401,'PERMISSION_DENIED'],[403,'PERMISSION_DENIED'],[422,'SCHEMA_UNREADABLE']]) {
+    const raw = new GitHubClient('approved', async () => ({ok:false,status,text:async()=>'SECRET'}));
+    await assert.rejects(new TokenReadClient(raw).request('/repos/ChipIn-one/chipin-frontend/issues/153'), e => {
+      assert.equal(e.code, code); assert.ok(!JSON.stringify(e).includes('SECRET')); return true;
+    });
+  }
+  const never = new TokenReadClient({request:()=>{throw Error('should not invoke')} });
+  await assert.rejects(never.request('/repos/x/y/issues/1', {method:'PATCH'}), {code:'READ_ONLY_VIOLATION'});
+  await assert.rejects(never.graphql('mutation Foo { editIssue(input:{}) { id } }'), {code:'READ_ONLY_VIOLATION'});
+});
 test('missing GITHUB_TOKEN resolves pre-existing authenticated gh without credential extraction', async () => {
   const calls = [];
   const selected = selectDirectTransport({ token: '', makeGhClient: () => new GhReadClient({ run: stub(calls) }) });
@@ -12,10 +39,13 @@ test('missing GITHUB_TOKEN resolves pre-existing authenticated gh without creden
   assert.ok(!JSON.stringify(calls).includes('auth token'));
 });
 test('explicit approved credential wins deterministically', () => {
-  const selected = selectDirectTransport({ token: 'injected', makeTokenClient: token => ({ token }),
+  let received;
+  const selected = selectDirectTransport({ token: 'injected', makeTokenClient: token => { received = token; return {}; },
     makeGhClient: () => { throw Error('gh must not be touched'); } });
   assert.equal(selected.transport, 'token');
-  assert.equal(selected.client.token, 'injected');
+  assert.equal(received, 'injected');
+  assert.ok(selected.client instanceof TokenReadClient);
+  assert.equal(Object.hasOwn(selected.client, 'token'), false);
 });
 test('gh rejects privileged method and GraphQL mutation', async () => {
   const client = new GhReadClient({ run: () => { throw Error('must not run'); } });
