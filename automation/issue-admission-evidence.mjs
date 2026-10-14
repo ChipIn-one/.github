@@ -75,10 +75,11 @@ export async function verifyAdmissionEvidence({ envelope, expectedIssue, expecte
   const runId = envelope.run?.id, attempt = envelope.run?.attempt;
   if (!Number.isSafeInteger(runId) || runId < 1 || !Number.isSafeInteger(attempt) || attempt < 1 ||
     run?.id !== runId || run?.run_attempt !== attempt || run?.repository?.full_name !== ROOT ||
-    run?.path !== WORKFLOW || run?.event !== 'repository_dispatch' ||
+    ![WORKFLOW, `${WORKFLOW}@master`].includes(run?.path) || run?.event !== 'repository_dispatch' ||
     run?.head_branch !== 'master' || run?.head_sha !== expectedSourceSha ||
-    run?.status !== 'completed' || run?.conclusion !== 'success' || run?.actor?.login !== expectedProducer) {
-    block('UNTRUSTED_RUN', 'GitHub API must confirm successful expected workflow, actor, ref, SHA, run and attempt.');
+    run?.status !== 'completed' || run?.conclusion !== 'success' ||
+    run?.actor?.login !== expectedProducer || run?.triggering_actor?.login !== expectedProducer) {
+    block('UNTRUSTED_RUN', 'GitHub API must confirm successful expected workflow, initiating and triggering actors, ref, SHA, run and attempt.');
   }
   const expectedName = `chipin-admission-${runId}-${attempt}-${expectedRequestId}`;
   if (!Number.isSafeInteger(artifact?.id) || artifact.id < 1 || artifact?.workflow_run?.id !== runId ||
