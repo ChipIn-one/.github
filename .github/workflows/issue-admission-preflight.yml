@@ -29,6 +29,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
           CHIPIN_TRUSTED_PREFLIGHT_ACTOR: ${{ vars.CHIPIN_TRUSTED_PREFLIGHT_ACTOR }}
           ISSUE: ${{ github.event.client_payload.issue }}
+          OWNER: ${{ github.event.client_payload.owner }}
           REQUEST_ID: ${{ github.event.client_payload.request_id }}
           EXPECTED_REVISION: ${{ github.event.client_payload.expected_revision }}
         shell: bash
@@ -36,6 +37,7 @@ jobs:
           set -euo pipefail
           test -n "${GITHUB_TOKEN:-}"
           args=(--issue "$ISSUE" --request-id "$REQUEST_ID" --producer actions --output admission-envelope.json)
+          if [[ -n "${OWNER:-}" ]]; then args+=(--owner "$OWNER"); fi
           if [[ -n "${EXPECTED_REVISION:-}" ]]; then args+=(--expected-revision "$EXPECTED_REVISION"); fi
           node automation/issue-admission-preflight.mjs "${args[@]}"
       - name: Upload immutable run-attempt evidence
