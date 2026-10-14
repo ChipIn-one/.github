@@ -24,8 +24,9 @@ function setup() {
     readerBlobSha: reader, configSha256: sha256(configContent), runId: 123, runAttempt: 1 });
   const zip = singleFileZip(JSON.stringify(envelope));
   const run = { id:123, run_attempt:1, repository:{full_name:'ChipIn-one/.github'},
-    path:'.github/workflows/issue-admission-preflight.yml', event:'repository_dispatch',
-    head_branch:'master', head_sha:source, status:'completed', conclusion:'success', actor:{login:'syllik'} };
+    path:'.github/workflows/issue-admission-preflight.yml@master', event:'repository_dispatch',
+    head_branch:'master', head_sha:source, status:'completed', conclusion:'success', actor:{login:'syllik'},
+    triggering_actor:{login:'syllik'} };
   const artifact = { id:456, workflow_run:{id:123}, name:`chipin-admission-123-1-${req}`,
     expired:false, digest:`sha256:${sha256(zip)}` };
   let calls=[];
@@ -47,6 +48,16 @@ test('consumer authoritatively reads run/artifact/master/reader/config, verifies
   assert.equal(value.artifactId,456);
   assert.equal(fixture.calls.length,5);
   assert.ok(fixture.calls.every(p=>p.startsWith('/repos/ChipIn-one/.github/')));
+});
+test('consumer rejects untrusted rerun initiator despite trusted original actor', async () => {
+  const fixture=setup();
+  const original=fixture.params.api.request;
+  fixture.params.api.request = async path => {
+    const response=await original(path);
+    if (path.endsWith('/actions/runs/123')) return {...response, triggering_actor:{login:'untrusted-executor'}};
+    return response;
+  };
+  await assert.rejects(consumeAdmissionArtifact(fixture.params), {code:'UNTRUSTED_RUN'});
 });
 test('consumer fails closed on master drift or altered downloaded artifact', async () => {
   const fixture=setup(); fixture.params.expectedSourceSha='f'.repeat(40);
