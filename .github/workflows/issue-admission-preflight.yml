@@ -1,0 +1,47 @@
+name: Trusted issue admission preflight
+
+# Only an already-approved trusted orchestrator can submit repository_dispatch.
+# Executor has no dispatch authority. No pull_request / untrusted code trigger.
+on:
+  repository_dispatch:
+    types: [chipin-admission-preflight-v1]
+
+permissions:
+  contents: read
+
+jobs:
+  issue-preflight:
+    if: github.ref == 'refs/heads/master' && github.actor == vars.CHIPIN_TRUSTED_PREFLIGHT_ACTOR && vars.CHIPIN_TRUSTED_PREFLIGHT_ACTOR != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Trusted master checkout (never task or PR code)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Node 24.21.0
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.21.0'
+      - name: Canonical read-only issue preflight
+        env:
+          GITHUB_TOKEN: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
+          CHIPIN_TRUSTED_PREFLIGHT_ACTOR: ${{ vars.CHIPIN_TRUSTED_PREFLIGHT_ACTOR }}
+          ISSUE: ${{ github.event.client_payload.issue }}
+          REQUEST_ID: ${{ github.event.client_payload.request_id }}
+          EXPECTED_REVISION: ${{ github.event.client_payload.expected_revision }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GITHUB_TOKEN:-}"
+          args=(--issue "$ISSUE" --request-id "$REQUEST_ID" --producer actions --output admission-envelope.json)
+          if [[ -n "${EXPECTED_REVISION:-}" ]]; then args+=(--expected-revision "$EXPECTED_REVISION"); fi
+          node automation/issue-admission-preflight.mjs "${args[@]}"
+      - name: Upload immutable run-attempt evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: chipin-admission-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.client_payload.request_id }}
+          path: admission-envelope.json
+          if-no-files-found: error
+          retention-days: 1
