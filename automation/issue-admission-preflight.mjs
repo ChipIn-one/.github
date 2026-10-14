@@ -21,7 +21,9 @@ export function parsePreflightArgs(argv) {
     params[key] = argv[i + 1];
   }
   const match = /^(ChipIn-one\/(?:chipin-frontend|chipin-backend|chipin-knowledge-base))#([1-9]\d*)$/.exec(params.issue ?? '');
-  if (!match || (params['expected-revision'] && !/^[a-f0-9]{64}$/.test(params['expected-revision'])) ||
+  if (!match || (params.owner && !/^[a-z\d](?:[a-z\d-]{0,37})$/i.test(params.owner)) ||
+      (match[1] === 'ChipIn-one/chipin-knowledge-base' && !params.owner) ||
+      (params['expected-revision'] && !/^[a-f0-9]{64}$/.test(params['expected-revision'])) ||
       (!!params.producer !== !!params['request-id'])) throw new PreflightError('INVALID_REQUEST');
   return { ...params, repository: match[1], number: Number(match[2]) };
 }
@@ -36,7 +38,8 @@ function producerContext(env, configBytes) {
       env.GITHUB_REPOSITORY !== 'ChipIn-one/.github' || env.GITHUB_REF !== 'refs/heads/master' ||
       !/^[a-f0-9]{40}$/.test(env.GITHUB_SHA ?? '') || !env.GITHUB_TOKEN ||
       !/^[1-9]\d*$/.test(env.GITHUB_RUN_ID ?? '') || !/^[1-9]\d*$/.test(env.GITHUB_RUN_ATTEMPT ?? '') ||
-      !env.GITHUB_ACTOR || env.GITHUB_ACTOR !== env.CHIPIN_TRUSTED_PREFLIGHT_ACTOR) {
+      !env.GITHUB_ACTOR || env.GITHUB_ACTOR !== env.CHIPIN_TRUSTED_PREFLIGHT_ACTOR ||
+      !env.GITHUB_TRIGGERING_ACTOR || env.GITHUB_TRIGGERING_ACTOR !== env.CHIPIN_TRUSTED_PREFLIGHT_ACTOR) {
     throw new PreflightError('UNTRUSTED_PRODUCER_RUNTIME');
   }
   const checkout = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 5000 }).trim();
@@ -66,8 +69,14 @@ export async function runPreflight(argv, env = process.env, overrides = {}) {
     });
     // The canonical reader collects exceptions as blockers. Retry only when
     // *every* blocker is explicitly a transport failure, never policy/auth.
-    if (current.blockers.length && current.blockers.every(value =>
-      /(?:^|: )TRANSPORT_ERROR(?:$|\b)/.test(value))) throw new PreflightError('TRANSPORT_ERROR');
+    // readAdmission() also reports derived validation blockers when a mandatory
+    // snapshot is missing; classify only exact canonical read-boundary failures.
+    const readFailure = /^(?:Organization schema unreadable|Project #5 unreadable|Native Issue unreadable|Second canonical read-back failed): /;
+    const transientReadFailure = current.blockers.some(value =>
+      readFailure.test(value) && value.endsWith(': TRANSPORT_ERROR'));
+    const permanentReadFailure = current.blockers.some(value =>
+      readFailure.test(value) && !value.endsWith(': TRANSPORT_ERROR'));
+    if (transientReadFailure && !permanentReadFailure) throw new PreflightError('TRANSPORT_ERROR');
     return current;
   }, overrides.retryOptions);
   if (result.blockers.length) {
