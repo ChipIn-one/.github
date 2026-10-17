@@ -1,13 +1,14 @@
 name: Trusted issue admission preflight
 
-# Only an already-approved trusted orchestrator can submit repository_dispatch.
-# Executor has no dispatch authority. No pull_request / untrusted code trigger.
+# A separately trusted external actor, or the authenticated human-orchestrator
+# artifact route, may send repository_dispatch. Executor cannot dispatch.
 on:
   repository_dispatch:
     types: [chipin-admission-preflight-v1]
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   issue-preflight:
@@ -24,6 +25,12 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '24.21.0'
+      - name: Authenticate human orchestrator artifact when dispatch actor is shared Actions bot
+        if: github.actor == 'github-actions[bot]'
+        env:
+          ACTIONS_READ_TOKEN: ${{ github.token }}
+          CHIPIN_TRUSTED_PREFLIGHT_ACTOR: ${{ vars.CHIPIN_TRUSTED_PREFLIGHT_ACTOR }}
+        run: node automation/issue-admission-human-orchestrator.mjs verify
       - name: Canonical read-only issue preflight
         env:
           GITHUB_TOKEN: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
