@@ -1,0 +1,59 @@
+name: Human issue admission orchestrator
+
+# Only an explicitly authorized human may request this bounded preflight.
+# Never run untrusted PR code or expose contents:write to an Executor.
+on:
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Exact FE/BE/KB Issue identity (ChipIn-one/repository#number)
+        required: true
+        type: string
+      owner:
+        description: Explicit KB owner only (empty for FE/BE)
+        required: false
+        type: string
+      expected_revision:
+        description: Previously pinned full 64-hex revision (optional for initial binding)
+        required: false
+        type: string
+
+permissions: {}
+
+jobs:
+  trusted-human-request:
+    if: github.ref == 'refs/heads/master' && github.actor == 'syllik' && github.triggering_actor == 'syllik'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Trusted master checkout only
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Node 24.21.0
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.21.0'
+      - name: Prepare immutable exact request
+        id: prepare
+        env:
+          ISSUE: ${{ inputs.issue }}
+          OWNER: ${{ inputs.owner }}
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+        run: node automation/issue-admission-human-orchestrator.mjs prepare
+      - name: Upload request provenance before dispatch
+        id: request
+        uses: actions/upload-artifact@v4
+        with:
+          name: chipin-admission-request-${{ github.run_id }}-${{ github.run_attempt }}-${{ steps.prepare.outputs.request_id }}
+          path: admission-request.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Submit exactly one repository_dispatch using job-scoped GitHub token
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.request.outputs.artifact-id }}
+        run: node automation/issue-admission-human-orchestrator.mjs dispatch
