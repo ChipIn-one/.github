@@ -56,7 +56,7 @@ export function validateProvenance({payload, request, run, artifact, zipDigest, 
       !positive(request.orchestrator_run_id) || !positive(request.orchestrator_run_attempt)) fail();
   validateInputs(request);
   const age = now - Date.parse(request.created_at);
-  if (!Number.isFinite(age) || age < 0 || age > 180000 ||
+  if (!Number.isFinite(age) || age < 0 || age >= 120000 ||
       request.orchestrator_sha !== producerSha || request.orchestrator_actor !== human ||
       run.id !== request.orchestrator_run_id || run.run_attempt !== request.orchestrator_run_attempt ||
       run.repository?.full_name !== repo || run.event !== 'workflow_dispatch' ||
@@ -117,6 +117,34 @@ async function unpackRequest(zip) {
   } finally { await rm(dir, {recursive:true, force:true}); }
 }
 
+
+// The Actions job concurrency serializes requests. Authenticated current-run
+// enumeration then rejects a reused original request (including failed attempts).
+// Fail closed on missing/paged history; no producer write credential is needed.
+export async function assertFirstProducerRun(env, request, api = github, now = Date.now()) {
+  if (env.GITHUB_RUN_ATTEMPT !== '1' || !positive(env.GITHUB_RUN_ID)) fail();
+  const start = new Date(Date.parse(request.created_at) - 5000).toISOString();
+  const end = new Date(now + 5000).toISOString();
+  const window = encodeURIComponent(start + '..' + end);
+  const result = await api('/actions/workflows/issue-admission-preflight.yml/runs' +
+    '?event=repository_dispatch&per_page=100&created=' + window, env.ACTIONS_READ_TOKEN);
+  if (!Number.isSafeInteger(result?.total_count) || result.total_count > 100 ||
+      !Array.isArray(result.workflow_runs) || result.workflow_runs.length !== result.total_count) fail();
+  const matches = result.workflow_runs.filter(run =>
+    run.display_title === 'chipin-admission-' + request.request_id);
+  if (matches.length !== 1 || matches[0].id !== Number(env.GITHUB_RUN_ID) ||
+      matches[0].run_attempt !== 1 ||
+      matches[0].event !== 'repository_dispatch' ||
+      matches[0].repository?.full_name !== repo ||
+      matches[0].head_sha !== env.GITHUB_SHA) fail();
+}
+
+export function assertFreshOriginalRequest(request, now = Date.now()) {
+  const age = now - Date.parse(request?.created_at);
+  if (!Number.isFinite(age) || age < 0 || age >= 120000) fail();
+  return request;
+}
+
 export async function verifyHumanRequest(env, {
   loadEvent = readFile, api = github, download = downloadZip,
   unpack = unpackRequest, now = Date.now(),
@@ -136,8 +164,10 @@ export async function verifyHumanRequest(env, {
       !Number.isInteger(artifact.size_in_bytes) || artifact.size_in_bytes > 32768) fail();
   const zip = await download(p.orchestrator_artifact_id,env.ACTIONS_READ_TOKEN);
   const request = await unpack(zip);
-  return validateProvenance({payload:p,request,run,artifact,zipDigest:hash(zip),
+  const verified = validateProvenance({payload:p,request,run,artifact,zipDigest:hash(zip),
     producerSha:env.GITHUB_SHA,now});
+  await assertFirstProducerRun(env, verified, api, now);
+  return verified;
 }
 
 async function main() {
@@ -168,6 +198,10 @@ async function main() {
     case 'verify': {
       const request=await verifyHumanRequest(env);
       await writeFile('verified-admission-request.json',JSON.stringify(request)+'\n',{mode:0o600});
+      break;
+    }
+    case 'fresh': {
+      assertFreshOriginalRequest(JSON.parse(await readFile('verified-admission-request.json','utf8')));
       break;
     }
     default: fail();

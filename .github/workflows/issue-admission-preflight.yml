@@ -6,6 +6,9 @@ on:
   repository_dispatch:
     types: [chipin-admission-preflight-v1]
 
+# Authenticated run-history identity: never infer identity from a plain Issue GET.
+run-name: chipin-admission-${{ github.event.client_payload.request_id }}
+
 permissions:
   contents: read
   actions: read
@@ -13,6 +16,10 @@ permissions:
 jobs:
   issue-preflight:
     if: github.ref == 'refs/heads/master' && github.actor == vars.CHIPIN_TRUSTED_PREFLIGHT_ACTOR && github.triggering_actor == vars.CHIPIN_TRUSTED_PREFLIGHT_ACTOR && vars.CHIPIN_TRUSTED_PREFLIGHT_ACTOR != ''
+    # Serialized per human request; existing external actor uses a unique group.
+    concurrency:
+      group: ${{ github.actor == 'github-actions[bot]' && format('chipin-human-admission-{0}-{1}-{2}', github.event.client_payload.orchestrator_run_id, github.event.client_payload.orchestrator_run_attempt, github.event.client_payload.request_id) || format('chipin-external-admission-{0}', github.run_id) }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
@@ -46,7 +53,13 @@ jobs:
           args=(--issue "$ISSUE" --request-id "$REQUEST_ID" --producer actions --output admission-envelope.json)
           if [[ -n "${OWNER:-}" ]]; then args+=(--owner "$OWNER"); fi
           if [[ -n "${EXPECTED_REVISION:-}" ]]; then args+=(--expected-revision "$EXPECTED_REVISION"); fi
+          if [[ "${GITHUB_ACTOR:-}" == 'github-actions[bot]' ]]; then
+            node automation/issue-admission-human-orchestrator.mjs fresh
+          fi
           node automation/issue-admission-preflight.mjs "${args[@]}"
+          if [[ "${GITHUB_ACTOR:-}" == 'github-actions[bot]' ]]; then
+            node automation/issue-admission-human-orchestrator.mjs fresh
+          fi
       - name: Upload immutable run-attempt evidence
         uses: actions/upload-artifact@v4
         with:

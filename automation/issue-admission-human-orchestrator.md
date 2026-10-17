@@ -22,6 +22,16 @@ The producer accepts GitHub Actions bot dispatch **only if** the existing
 the exact human `workflow_dispatch` run (path/ref/SHA/actor/triggering actor,
 attempt), artifact ID and GitHub archive digest, full request identity and
 revision, age, and the exact payload. A shared bot login alone is never enough.
+The human request has a strict original age of **less than 120 seconds**;
+the workflow checks it both before and after canonical admission.
+Duplicate dispatch is denied through GitHub's per-request serialized job
+concurrency and a complete authenticated producer run-history read: only
+the single current run on attempt 1 is accepted for the request ID.
+Incomplete history (>100 results, unreadable or missing current run)
+fails closed without new write permissions. This is a bounded read-only
+anti-replay gate based on GitHub Actions run serialization and run
+visibility; a persistent atomic claim would require a separately approved
+write capability outside this PR.
 The producer retains `contents: read` plus `actions: read`; canonical metadata
 reads still use existing `CHIPIN_DEV_READ_TOKEN`.
 
