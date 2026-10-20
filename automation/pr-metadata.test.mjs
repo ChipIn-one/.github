@@ -282,3 +282,73 @@ test("adapter read-back rejects a conflicting label added after write",async()=>
   await assert.rejects(ensureCategory(client,42,"implementation"),/LABEL_CONFLICT/);
   assert.equal(adds,1);assert.equal(reads,2);
 });
+
+// Issue #138: dependabot PRs are an explicit SKIP, never a BLOCK; everything
+// else without a single Task identity keeps failing closed.
+import {isDependabotPR} from "./pr-metadata.mjs";
+import {taskIdentitiesForPr} from "./issue-admission-pr.mjs";
+const feOnlyPolicy={repository:repo,project:5,ownerPolicy:{allowIssueOwner:true,allowAuthorFallback:false,
+  implementationOwner:"syllik",releaseOwner:"syllik"},reviewerPolicy:{implementation:[],release:[]}};
+function dependencyPR({login="dependabot[bot]",ref="dependabot/npm_and_yarn/dev/vitest-5.0.4",sha="c".repeat(40)}={}){
+  return {number:463,node_id:"PR_463",state:"open",body:"Bumps vitest from 4 to 5.",
+    user:{login,type:login.endsWith("[bot]")?"Bot":"User"},
+    head:{ref,sha,repo:{full_name:repo}},base:{ref:"dev",sha:"d".repeat(40),repo:{full_name:repo}},
+    requested_reviewers:[]};
+}
+function recordingClient(pr){
+  const calls=[];
+  return {calls,
+    async request(path,opts={}){calls.push({path,method:opts.method??"GET"});
+      if(path==="/repos/"+repo+"/pulls/"+pr.number)return pr;
+      throw new Error("unexpected REST request "+path);},
+    async listAll(path){calls.push({path,method:"LIST"});throw new Error("unexpected list "+path);},
+    async graphql(){calls.push({path:"graphql"});throw new Error("unexpected graphql");}};
+}
+test("isDependabotPR matches the bot author or a dependabot/** head branch only",()=>{
+  assert.equal(isDependabotPR(dependencyPR()),true);
+  assert.equal(isDependabotPR(dependencyPR({login:"human",ref:"dependabot/github_actions/dev/x"})),true);
+  assert.equal(isDependabotPR(dependencyPR({login:"dependabot[bot]",ref:"feat/issue-1-x"})),true);
+  assert.equal(isDependabotPR(dependencyPR({login:"human",ref:"feat/issue-1-x"})),false);
+  assert.equal(isDependabotPR(dependencyPR({login:"dependabot",ref:"feat/issue-1-x"})),false);
+  assert.equal(isDependabotPR(dependencyPR({login:"human",ref:"dependabot-fix/x"})),false);
+  assert.equal(isDependabotPR(dependencyPR({login:"human",ref:"feat/dependabot/x"})),false);
+  assert.equal(isDependabotPR(null),false);
+});
+test("dependabot PR is SKIPPED before admission, SHA check and any write",async()=>{
+  const pr=dependencyPR();
+  const client=recordingClient(pr);
+  let admissions=0;
+  const receipt=await reconcilePR(client,feOnlyPolicy,463,"e".repeat(40),{
+    admissionClient:client,admissionConfig:{},admit:async()=>{admissions++;throw new Error("must not admit");}});
+  assert.equal(receipt.status,"SKIPPED");
+  assert.equal(receipt.kind,"dependabot");
+  assert.equal(receipt.number,463);
+  assert.equal(receipt.headSha,pr.head.sha);
+  assert.match(receipt.reason,/dependabot/u);
+  assert.deepEqual(receipt.blockers,[]);
+  assert.equal(receipt.taskIdentity,null);
+  assert.equal(admissions,0);
+  assert.deepEqual(client.calls,[{path:"/repos/"+repo+"/pulls/463",method:"GET"}]);
+});
+test("a dependabot/** head branch with a non-bot author is also SKIPPED",async()=>{
+  const pr=dependencyPR({login:"human-rebaser",ref:"dependabot/npm_and_yarn/dev/x"});
+  const client=recordingClient(pr);
+  const receipt=await reconcilePR(client,feOnlyPolicy,463,pr.head.sha,{
+    admissionClient:client,admissionConfig:{},admit:async()=>{throw new Error("must not admit");}});
+  assert.equal(receipt.status,"SKIPPED");
+  assert.equal(client.calls.filter(x=>x.method!=="GET").length,0);
+});
+test("non-dependabot PR without a Task identity is still BLOCKED by admission",async()=>{
+  const pr=dependencyPR({login:"human",ref:"feat/issue-9-no-marker"});
+  const client=recordingClient(pr);
+  const admit=async({client:c,repository,number})=>{
+    taskIdentitiesForPr(repository,await c.request("/repos/"+repository+"/pulls/"+number));
+    return {status:"INTAKE_COMPLETE",receipts:[]};
+  };
+  await assert.rejects(reconcilePR(client,feOnlyPolicy,463,pr.head.sha,{
+    admissionClient:client,admissionConfig:{},admit}),/Missing or mismatched single Task identity in implementation PR/u);
+  assert.equal(client.calls.filter(x=>x.method!=="GET").length,0);
+  // The reconciler's own identity gate keeps blocking even if admission were stubbed open.
+  await assert.rejects(reconcilePR(client,feOnlyPolicy,463,pr.head.sha,{
+    admissionClient:client,admissionConfig:{},admit:async()=>({status:"INTAKE_COMPLETE",receipts:[]})}),/IDENTITY/u);
+});
