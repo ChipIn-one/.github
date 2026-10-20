@@ -15,6 +15,15 @@ const PROJECT_QUERY = 'query PRMembership($after:String){ organization(login:"Ch
 const PROJECT_ADD = 'mutation AddPR($project:ID!,$pr:ID!){addProjectV2ItemById(input:{projectId:$project,contentId:$pr}){item{id}}}';
 const FULL_REF = /^ChipIn-one\/chipin-frontend#([1-9]\d*)$/u;
 const PR_NATIVE_QUERY = 'query PRNativeIdentity($number:Int!,$after:String){repository(owner:"ChipIn-one",name:"chipin-frontend"){nameWithOwner pullRequest(number:$number){number closingIssuesReferences(first:100,after:$after,userLinkedOnly:true){totalCount pageInfo{hasNextPage endCursor} nodes{id number repository{nameWithOwner}}}}}}';
+// Issue #138: automated dependency PRs carry no Task identity by design. They are
+// an explicit SKIP (successful run, nothing reconciled), never a BLOCK. The skip
+// grants nothing: no pr:* label is written, so the org Project writer never admits
+// them, and human-only merge policy is unchanged.
+const DEPENDABOT_LOGIN = "dependabot[bot]";
+const DEPENDABOT_BRANCH = /^dependabot\//u;
+export function isDependabotPR(pr) {
+  return pr?.user?.login === DEPENDABOT_LOGIN || DEPENDABOT_BRANCH.test(pr?.head?.ref ?? "");
+}
 
 export function classifyPR(pr) {
   if (pr.base?.repo?.full_name !== REPO || pr.head?.repo?.full_name !== REPO) throw new Error("SCOPE: same-repo frontend PR only");
@@ -276,7 +285,15 @@ export async function reconcilePR(client,policy,number,expectedSha,{admissionCli
   if (!Number.isSafeInteger(n)||n<=0) throw new Error("PR: invalid PR number");
   const url=ROOT+"/pulls/"+n;
   const pr=await client.request(url);
-  if (pr?.number!==n || pr.state!=="open" || !pr.node_id || !pr.head?.sha) throw new Error("PR: unreadable or not open");
+  if (pr?.number!==n) throw new Error("PR: unreadable or not open");
+  // Before the SHA gate: a rebased dependabot PR must not turn into a SHA failure either.
+  if (isDependabotPR(pr)) {
+    return {number:n,kind:"dependabot",status:"SKIPPED",headSha:pr.head?.sha??null,
+      reason:"dependabot PR (author "+(pr.user?.login??"?")+", head "+(pr.head?.ref??"?")+
+        "): no Task identity contract; admission, Development link, labels, owner, reviewer and Project untouched",
+      taskIdentity:null,project:null,blockers:[],issueStateUnchanged:true};
+  }
+  if (pr.state!=="open" || !pr.node_id || !pr.head?.sha) throw new Error("PR: unreadable or not open");
   if (!expectedSha || pr.head.sha!==expectedSha) throw new Error("SHA: event head no longer matches PR");
   const kind=classifyPR(pr);
   // Org #53 is the canonical authority; PR metadata is never an alternative
@@ -371,6 +388,12 @@ async function main(){
   const admissionClient=new GitHubClient(process.env.CHIPIN_ADMISSION_READ_TOKEN);
   const receipt=await reconcilePR(client,policy,process.env.CHIPIN_PR_NUMBER,process.env.CHIPIN_PR_SHA,{admissionClient,admissionConfig});
   console.log(JSON.stringify(receipt,null,2));
+  if (receipt.status==="SKIPPED") {
+    const line="PR METADATA SKIPPED: PR #"+receipt.number+" is a "+receipt.reason;
+    console.log(line);
+    console.log("::notice title=PR metadata skipped::"+line);
+    return;
+  }
   if (receipt.blockers.length) process.exitCode=1;
 }
 if(process.argv[1]&&pathToFileURL(resolve(process.argv[1])).href===import.meta.url)
