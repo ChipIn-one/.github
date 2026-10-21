@@ -22,3 +22,7 @@ Org infrastructure is not an automatic FE/BE/KB intake exception. For this initi
 ## Read-only issue-based preflight routing (#119)
 
 Before FE/BE/KB task execution (even before a PR exists), use `automation/issue-admission-preflight.mjs --issue ChipIn-one/<repo>#<number>` as the shared read-only entry. It reuses canonical `readAdmission()`; with no injected `GITHUB_TOKEN`, it tries the already-authenticated `gh api` session without extracting credentials. KB requires an explicit `--owner`. For connector-only execution, only an authenticated trusted `.github` producer artifact with authoritative run/source/artifact read-back, original <120s timestamp and full canonical revision can be consumed; ordinary Issue GET and intake-bridge QUEUED are not admission. Reproduce and recheck at every controlled boundary. Executor must not dispatch Actions or repair GitHub metadata. See [automation/issue-intake.md](automation/issue-intake.md). This separate #119 governance approval does not expand the historical #53/PR #57 bootstrap.
+
+## Tests
+
+Run the automation suite with `node --test automation/*.test.mjs` (CI: `.github/workflows/automation-tests.yml`). The short form `node --test automation/` fails on Node 24 (the directory is treated as a module); do not use it in docs, briefs or PR descriptions.
