@@ -36,7 +36,8 @@ Repositories are audited on their **integration branch** (`branches.integration`
 | `PROTECTION_REGISTRY_STALE` | drift | registry says `unavailable` but the API now answers (plan upgraded) | create the ruleset and set `protection: ruleset` (#161) |
 | `PROTECTION_UNAVAILABLE` | note | `protection: unavailable` as recorded (Free plan + private); required checks are advisory | upgrade to Team (#161) |
 | `PROTECTION_MECHANISM` | note | enforced by classic protection while the registry says ruleset (or the reverse); the required checks are satisfied | align the registry or migrate |
-| `PROTECTION_UNVERIFIABLE` | note | the audit token cannot read branch protection | grant administration:read or verify by hand |
+| `PROTECTION_UNVERIFIABLE` | note | the audit token cannot read rulesets or classic protection, so required checks that were not found cannot be judged | grant administration:read or verify by hand |
+| `CHECKS_UNVERIFIABLE` | note | the audit token cannot read check runs, so merges past a red required check could not be verified (the rest of the audit is valid) | grant the token `checks: read` |
 | `PROJECT_HAS_PULL_REQUESTS` | drift | pull requests are items of Project #5 | remove them and disable the built-in workflows that add them (#157) |
 | `CLOSED_WITH_OPEN_PR` | drift | among the 100 most recently updated closed Issues, one has an open Development-linked PR | reopen the Issue or merge/close the PR; close only after the PR merged |
 | `MERGED_PAST_RED_CHECK` | drift | for `protection: unavailable` with `requiredChecks`: a PR merged into the integration branch in the last 14 days had a failed/cancelled required check on its head | fix forward; enforce the check after the plan upgrade |

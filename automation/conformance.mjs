@@ -159,6 +159,10 @@ export function checkProtection(profile, rules, classic) {
   }
   const findings = [];
   const missing = requiredChecks.filter(check => !enforced.has(check));
+  // The other mechanism may hide the enforcement: an unreadable answer is "unverifiable", never drift.
+  if (missing.length && (rules.state === 'unreadable' || classic.state === 'unreadable')) {
+    return [finding('PROTECTION_UNVERIFIABLE', 'note', `Required checks (${missing.join(', ')}) were not found, but the audit token cannot read ${rules.state === 'unreadable' ? 'rulesets' : 'classic branch protection'}.`, 'Grant the audit token administration:read or verify by hand.')];
+  }
   if (missing.length) findings.push(finding('REQUIRED_CHECKS_MISSING', 'drift', `Required checks not enforced on ${profile.branches.integration}: ${missing.join(', ')}.`, 'Add them to the ruleset / branch protection or fix requiredChecks in the registry.'));
   const mechanism = rules.state === 'ok' && (rules.rules?.length ?? 0) > 0 ? 'ruleset' : 'protection';
   if (mechanism !== protection) findings.push(finding('PROTECTION_MECHANISM', 'note', `Registry says ${protection} but ${profile.branches.integration} is enforced by ${mechanism}.`, 'Align the registry or migrate the protection to a ruleset.'));
@@ -216,14 +220,20 @@ export async function auditRepository(profile, source, shared) {
       ...checkClosedWithOpenPrs(await source.closedIssuesWithOpenPrs(profile.repository)),
     ];
     if (profile.protection === 'unavailable' && profile.requiredChecks.length) {
-      const since = new Date(Date.now() - PERIOD_DAYS * 86_400_000).toISOString();
-      const merged = await source.mergedPullRequests(profile.repository, ref, since);
-      const rows = [];
-      for (const pr of merged) {
-        const runs = await source.checkRuns(profile.repository, pr.headSha);
-        rows.push({ number: pr.number, failed: profile.requiredChecks.filter(name => runs.some(r => r.name === name && ['failure', 'timed_out', 'cancelled', 'action_required'].includes(r.conclusion))) });
+      try {
+        const since = new Date(Date.now() - PERIOD_DAYS * 86_400_000).toISOString();
+        const merged = await source.mergedPullRequests(profile.repository, ref, since);
+        const rows = [];
+        for (const pr of merged) {
+          const runs = await source.checkRuns(profile.repository, pr.headSha);
+          rows.push({ number: pr.number, failed: profile.requiredChecks.filter(name => runs.some(r => r.name === name && ['failure', 'timed_out', 'cancelled', 'action_required'].includes(r.conclusion))) });
+        }
+        findings.push(...checkMergedPastRed(profile, rows));
+      } catch (error) {
+        // A token without checks:read cannot judge this one check; the rest of the audit stays valid.
+        if (!/\b403\b/.test(String(error?.message))) throw error;
+        findings.push(finding('CHECKS_UNVERIFIABLE', 'note', 'The audit token cannot read check runs, so merges past a red required check could not be verified.', 'Grant the audit token checks:read (and pull requests: read).'));
       }
-      findings.push(...checkMergedPastRed(profile, rows));
     }
     result.findings = findings.filter(f => f.severity === 'drift');
     result.notes = findings.filter(f => f.severity !== 'drift');
