@@ -21,6 +21,7 @@ repositories:
     completion: production-merge       # production-merge | integration-merge | deployment-receipt | manual
     protection: ruleset                # ruleset | protection | unavailable (Free + private)
     requiredChecks: [frontend-ci]
+    release: { strategy: semver-by-impact, trigger: promotion-merge, tagPrefix: v }   # tag + GitHub Release after a human merge of dev -> main
     capabilities:
       admission: required       # required | advisory | off
       developmentLink: required
@@ -39,6 +40,7 @@ repositories:
     completion: manual                  # until the backend completion decision (#156)
     protection: unavailable             # until the Team upgrade (#161)
     requiredChecks: [Unit and integration tests]
+    release: { strategy: deploy-tag, trigger: production-deploy, tagPrefix: v }       # tag + GitHub Release after every successful Deploy Production
     capabilities: { admission: advisory, developmentLink: required, prMetadata: required, relationships: required, completion: manual, milestones: enabled, dependabot: required, agentRouting: required }
   - repository: ChipIn-one/chipin-knowledge-base
     kind: docs
@@ -49,6 +51,7 @@ repositories:
     completion: manual
     protection: unavailable
     requiredChecks: []
+    release: { strategy: none }                                                        # documents: no versions, no releases
     capabilities: { admission: advisory, developmentLink: required, prMetadata: off, relationships: required, completion: manual, milestones: off, dependabot: required, agentRouting: required }
   - repository: ChipIn-one/.github
     kind: meta
@@ -59,4 +62,17 @@ repositories:
     completion: integration-merge
     protection: ruleset
     requiredChecks: [evaluate-fixtures]
+    release: { strategy: semver-by-impact, trigger: integration-merge, tagPrefix: v }  # tag + GitHub Release after a merge that changes automation, workflows or the registry
     capabilities: { admission: advisory, developmentLink: required, prMetadata: off, relationships: required, completion: manual, milestones: off, dependabot: required, agentRouting: required }
+  - repository: ChipIn-one/chipin-notifications
+    kind: docs
+    visibility: private
+    owner: null
+    branches: { default: master, integration: master }
+    deploymentProfile: none
+    completion: manual
+    protection: unavailable
+    requiredChecks: []
+    release: { strategy: none }                                                        # design documents: no versions, no releases
+    # Registered for the release policy only; every other capability is off until the owner opts in.
+    capabilities: { admission: off, developmentLink: off, prMetadata: off, relationships: off, completion: manual, milestones: off, dependabot: off, agentRouting: off }

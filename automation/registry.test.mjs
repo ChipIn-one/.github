@@ -16,11 +16,14 @@ const FE = 'ChipIn-one/chipin-frontend';
 const BE = 'ChipIn-one/chipin-backend';
 const KB = 'ChipIn-one/chipin-knowledge-base';
 const META = 'ChipIn-one/.github';
+const NOTIF = 'ChipIn-one/chipin-notifications';
+const PY = 'ChipIn-one/chipin-backend-python';
+const SLACK = 'ChipIn-one/slack-rofls';
 
 const record = (overrides = {}) => ({
   repository: 'ChipIn-one/example', kind: 'code', visibility: 'public', owner: 'syllik',
   branches: { default: 'main', integration: 'main' }, deploymentProfile: 'none',
-  completion: 'production-merge', protection: 'unavailable', requiredChecks: [], ...overrides,
+  completion: 'production-merge', protection: 'unavailable', requiredChecks: [], release: { strategy: 'none' }, ...overrides,
 });
 const document = (repositories = [record()]) => ({
   schemaVersion: 1, standardVersion: 'v1', project: { number: 5, statuses: ['Backlog', 'Done'] }, repositories,
@@ -70,13 +73,14 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
   assert.equal(registry.schemaVersion, 1);
   assert.equal(registry.standardVersion, 'v1');
   assert.deepEqual(registry.project, { number: 5, statuses: ['Backlog', 'Todo', 'In Progress', 'Done'] });
-  assert.deepEqual(registry.repositories.map(profile => profile.repository), [FE, BE, KB, META]);
+  assert.deepEqual(registry.repositories.map(profile => profile.repository), [FE, BE, KB, META, NOTIF]);
 
   assert.deepEqual(getRepositoryProfile(FE), {
     repository: FE, kind: 'code', visibility: 'public', owner: 'syllik',
     branches: { default: 'main', integration: 'dev', promotion: 'main' },
     deploymentProfile: 'production', completion: 'production-merge', protection: 'ruleset',
     requiredChecks: ['frontend-ci'],
+    release: { strategy: 'semver-by-impact', trigger: 'promotion-merge', tagPrefix: 'v' },
     capabilities: { admission: 'required', developmentLink: 'required', prMetadata: 'required',
       relationships: 'required', completion: 'automatic', milestones: 'enabled',
       dependabot: 'required', agentRouting: 'required' },
@@ -86,6 +90,7 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
     branches: { default: 'develop', integration: 'develop', promotion: null },
     deploymentProfile: 'production', completion: 'manual', protection: 'unavailable',
     requiredChecks: ['Unit and integration tests'],
+    release: { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v' },
     capabilities: { admission: 'advisory', developmentLink: 'required', prMetadata: 'required',
       relationships: 'required', completion: 'manual', milestones: 'enabled',
       dependabot: 'required', agentRouting: 'required' },
@@ -94,6 +99,7 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
     repository: KB, kind: 'docs', visibility: 'private', owner: null,
     branches: { default: 'master', integration: 'master', promotion: null },
     deploymentProfile: 'none', completion: 'manual', protection: 'unavailable', requiredChecks: [],
+    release: { strategy: 'none', trigger: null, tagPrefix: 'v' },
     capabilities: { admission: 'advisory', developmentLink: 'required', prMetadata: 'off',
       relationships: 'required', completion: 'manual', milestones: 'off',
       dependabot: 'required', agentRouting: 'required' },
@@ -103,10 +109,23 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
     branches: { default: 'master', integration: 'master', promotion: null },
     deploymentProfile: 'none', completion: 'integration-merge', protection: 'ruleset',
     requiredChecks: ['evaluate-fixtures'],
+    release: { strategy: 'semver-by-impact', trigger: 'integration-merge', tagPrefix: 'v' },
     capabilities: { admission: 'advisory', developmentLink: 'required', prMetadata: 'off',
       relationships: 'required', completion: 'manual', milestones: 'off',
       dependabot: 'required', agentRouting: 'required' },
   });
+  assert.deepEqual(getRepositoryProfile(NOTIF), {
+    repository: NOTIF, kind: 'docs', visibility: 'private', owner: null,
+    branches: { default: 'master', integration: 'master', promotion: null },
+    deploymentProfile: 'none', completion: 'manual', protection: 'unavailable', requiredChecks: [],
+    release: { strategy: 'none', trigger: null, tagPrefix: 'v' },
+    capabilities: { admission: 'off', developmentLink: 'off', prMetadata: 'off',
+      relationships: 'off', completion: 'manual', milestones: 'off',
+      dependabot: 'off', agentRouting: 'off' },
+  });
+  // Owner decision 2026-10-21: these two stay outside the standard.
+  assert.equal(getRepositoryProfile(PY), null);
+  assert.equal(getRepositoryProfile(SLACK), null);
 });
 
 test('loaded registry is immutable and cached for the default path', () => {
@@ -118,10 +137,10 @@ test('loaded registry is immutable and cached for the default path', () => {
 });
 
 test('unknown repository is null for lookup and fail-closed for require', () => {
-  assert.equal(getRepositoryProfile('ChipIn-one/chipin-notifications'), null);
+  assert.equal(getRepositoryProfile(PY), null);
   assert.equal(getRepositoryProfile(undefined), null);
-  rejects(() => requireRepositoryProfile('ChipIn-one/chipin-notifications'), 'UNKNOWN_REPOSITORY');
-  rejects(() => integrationBranch('ChipIn-one/chipin-notifications'), 'UNKNOWN_REPOSITORY');
+  rejects(() => requireRepositoryProfile(SLACK), 'UNKNOWN_REPOSITORY');
+  rejects(() => integrationBranch(PY), 'UNKNOWN_REPOSITORY');
   assert.equal(getRepositoryProfile('chipin-one/CHIPIN-FRONTEND').repository, FE);
 });
 
@@ -196,10 +215,12 @@ test('listRepositories filters by kind and capability', () => {
 });
 
 test('registry drift guard: allowlists elsewhere still agree with the registry', async () => {
-  const taskRepositories = listRepositories({ kinds: ['code', 'docs'] });
+  const taskRepositories = listRepositories({ kinds: ['code', 'docs'], capability: 'developmentLink' });
   assert.deepEqual([...SUPPORTED_REPOSITORIES], taskRepositories);
+  assert.deepEqual(taskRepositories, [FE, BE, KB], 'chipin-notifications is registered with every task capability off');
   for (const repository of taskRepositories) assert.equal(isSupportedIntakeRepository(repository), true);
   assert.equal(isSupportedIntakeRepository(META), false);
+  assert.equal(isSupportedIntakeRepository(NOTIF), false);
 
   // issue-admission.mjs still carries its own owner table; it must agree with the registry.
   for (const repository of taskRepositories) {
@@ -230,7 +251,7 @@ test('CLI validates the real registry and fails closed on a broken file', async 
   const stdout = { write: text => out.push(text) };
   const stderr = { write: text => err.push(text) };
   assert.equal(main(['--validate'], stdout, stderr), 0);
-  assert.match(out.join(''), /^REGISTRY OK: 4 repositories, standard v1/);
+  assert.match(out.join(''), /^REGISTRY OK: 5 repositories, standard v1/);
 
   const dir = await mkdtemp(join(tmpdir(), 'registry-test-'));
   const broken = join(dir, 'broken.yaml');
@@ -242,4 +263,34 @@ test('CLI validates the real registry and fails closed on a broken file', async 
   assert.equal(main([], stdout, stderr), 2);
   assert.equal(main(['--validate', '--file'], stdout, stderr), 2);
   assert.equal(main(['--validate', '--bogus'], stdout, stderr), 2);
+});
+
+test('release block: strategy and trigger must agree and fit the repository', () => {
+  const ok = (release, extra = {}) => validateRegistry(document([record({ branches: { default: 'main', integration: 'dev', promotion: 'main' }, deploymentProfile: 'production', release, ...extra })])).repositories[0].release;
+  assert.deepEqual(ok({ strategy: 'semver-by-impact', trigger: 'promotion-merge' }), { strategy: 'semver-by-impact', trigger: 'promotion-merge', tagPrefix: 'v' });
+  assert.deepEqual(ok({ strategy: 'semver-by-impact', trigger: 'integration-merge', tagPrefix: 'rel' }), { strategy: 'semver-by-impact', trigger: 'integration-merge', tagPrefix: 'rel' });
+  assert.deepEqual(ok({ strategy: 'deploy-tag', trigger: 'production-deploy' }), { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v' });
+  assert.deepEqual(ok({ strategy: 'none' }), { strategy: 'none', trigger: null, tagPrefix: 'v' });
+  rejects(() => ok({ strategy: 'none', trigger: 'promotion-merge' }), 'REGISTRY_VALUE');
+  rejects(() => ok({ strategy: 'deploy-tag', trigger: 'promotion-merge' }), 'REGISTRY_VALUE');
+  rejects(() => ok({ strategy: 'semver-by-impact', trigger: 'production-deploy' }), 'REGISTRY_VALUE');
+  rejects(() => ok({ strategy: 'semver-by-impact' }), 'REGISTRY_VALUE');
+  rejects(() => ok({ strategy: 'calver', trigger: 'promotion-merge' }), 'REGISTRY_VALUE');
+  rejects(() => ok({ strategy: 'semver-by-impact', trigger: 'promotion-merge', tagPrefix: 'V1' }), 'REGISTRY_VALUE');
+  rejects(() => ok({ strategy: 'none', surprise: 1 }), 'REGISTRY_SCHEMA');
+  rejects(() => validateRegistry(document([record({ release: undefined })])), 'REGISTRY_SCHEMA');
+  const { release, ...withoutRelease } = record();
+  rejects(() => validateRegistry(document([withoutRelease])), 'REGISTRY_SCHEMA');
+  rejects(() => ok({ strategy: 'semver-by-impact', trigger: 'promotion-merge' }, { branches: { default: 'main', integration: 'main' } }), 'REGISTRY_VALUE');
+  rejects(() => ok({ strategy: 'deploy-tag', trigger: 'production-deploy' }, { deploymentProfile: 'staging' }), 'REGISTRY_VALUE');
+});
+
+test('release decisions of 2026-10-21 are recorded for every registered repository', () => {
+  const by = Object.fromEntries(loadRegistry().repositories.map(p => [p.repository, p.release]));
+  assert.deepEqual(by[FE], { strategy: 'semver-by-impact', trigger: 'promotion-merge', tagPrefix: 'v' });
+  assert.deepEqual(by[BE], { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v' });
+  assert.deepEqual(by[META], { strategy: 'semver-by-impact', trigger: 'integration-merge', tagPrefix: 'v' });
+  assert.equal(by[KB].strategy, 'none');
+  assert.equal(by[NOTIF].strategy, 'none');
+  assert.deepEqual(listRepositories({ kinds: ['docs'] }), [KB, NOTIF]);
 });

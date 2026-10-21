@@ -206,6 +206,10 @@ const VISIBILITY = ['public', 'private'];
 const DEPLOYMENT_PROFILES = ['none', 'staging', 'production'];
 const COMPLETION = ['production-merge', 'integration-merge', 'deployment-receipt', 'manual'];
 const PROTECTION = ['ruleset', 'protection', 'unavailable'];
+const RELEASE_STRATEGIES = ['semver-by-impact', 'deploy-tag', 'none'];
+const RELEASE_TRIGGERS = ['promotion-merge', 'integration-merge', 'production-deploy'];
+// strategy -> allowed triggers; `none` has no trigger.
+const RELEASE_TRIGGERS_BY_STRATEGY = { 'semver-by-impact': ['promotion-merge', 'integration-merge'], 'deploy-tag': ['production-deploy'], none: [] };
 
 export const CAPABILITY_VALUES = Object.freeze({
   admission: ['required', 'advisory', 'off'],
@@ -255,7 +259,7 @@ function assertString(where, value, pattern) {
 function normalizeRepository(record, index) {
   const where = `repositories[${index}]`;
   assertKeys(where, record,
-    ['repository', 'kind', 'visibility', 'owner', 'branches', 'deploymentProfile', 'completion', 'protection', 'requiredChecks'],
+    ['repository', 'kind', 'visibility', 'owner', 'branches', 'deploymentProfile', 'completion', 'protection', 'requiredChecks', 'release'],
     ['capabilities']);
   assertString(`${where}.repository`, record.repository, REPOSITORY);
   assertEnum(`${where}.kind`, record.kind, KINDS);
@@ -275,6 +279,22 @@ function normalizeRepository(record, index) {
   if (new Set(record.requiredChecks).size !== record.requiredChecks.length) {
     fail('REGISTRY_VALUE', `${where}.requiredChecks: duplicate check name`);
   }
+
+  assertKeys(`${where}.release`, record.release, ['strategy'], ['trigger', 'tagPrefix']);
+  assertEnum(`${where}.release.strategy`, record.release.strategy, RELEASE_STRATEGIES);
+  const trigger = record.release.trigger ?? null;
+  if (record.release.strategy === 'none') {
+    if (trigger !== null) fail('REGISTRY_VALUE', `${where}.release: strategy none must not have a trigger`);
+  } else {
+    assertEnum(`${where}.release.trigger`, trigger, RELEASE_TRIGGERS);
+    if (!RELEASE_TRIGGERS_BY_STRATEGY[record.release.strategy].includes(trigger)) {
+      fail('REGISTRY_VALUE', `${where}.release: strategy ${record.release.strategy} cannot use trigger ${trigger}`);
+    }
+    if (trigger === 'promotion-merge' && !record.branches.promotion) fail('REGISTRY_VALUE', `${where}.release: promotion-merge needs branches.promotion`);
+    if (trigger === 'production-deploy' && record.deploymentProfile !== 'production') fail('REGISTRY_VALUE', `${where}.release: production-deploy needs deploymentProfile production`);
+  }
+  const tagPrefix = record.release.tagPrefix ?? 'v';
+  if (typeof tagPrefix !== 'string' || !/^[a-z]{0,8}$/.test(tagPrefix)) fail('REGISTRY_VALUE', `${where}.release.tagPrefix: invalid value ${JSON.stringify(tagPrefix)}`);
 
   const declared = record.capabilities ?? {};
   assertKeys(`${where}.capabilities`, declared, [], Object.keys(CAPABILITY_VALUES));
@@ -301,6 +321,7 @@ function normalizeRepository(record, index) {
     completion: record.completion,
     protection: record.protection,
     requiredChecks: deepFreeze([...record.requiredChecks]),
+    release: deepFreeze({ strategy: record.release.strategy, trigger, tagPrefix }),
     capabilities: deepFreeze(capabilities),
   });
 }
