@@ -199,7 +199,7 @@ export function pendingQueueItems(issue, comments) {
   for (const comment of comments ?? []) {
     if (comment?.user?.login !== QUEUE_COMMENT_AUTHOR) continue;
     const result = parseResultComment(comment.body);
-    if (result) resultIds.add(result.queueCommentId);
+    if (result && result.status !== 'pending') resultIds.add(result.queueCommentId);
     const request = parseQueueComment(comment.body);
     if (request) queued.push({ id: comment.id, request });
   }
@@ -366,11 +366,7 @@ export async function applyCommand({
     const intake = await intakeRunner(buildIntakeArgs(request, intakeOutput), env);
     receipt.intake = intake;
     receipt.blockers.push(...(intake?.blockers ?? []));
-    if (intake?.action === 'complete' && intake?.receipt?.status === 'INTAKE_COMPLETE' && intake?.issue === request.target && receipt.blockers.length === 0) {
-      receipt.status = 'complete';
-    } else if (receipt.blockers.length === 0) {
-      receipt.blockers.push(`Canonical intake returned action ${intake?.action ?? 'unreadable'}, expected complete.`);
-    }
+    receipt.status = intakeStatus(intake, request.target, receipt.blockers);
   } catch (error) {
     receipt.blockers.push(`Canonical intake execution failed: ${error.message}`);
   } finally {
@@ -381,16 +377,35 @@ export async function applyCommand({
   return receipt;
 }
 
+/**
+ * Map a canonical intake result to the bridge status: `complete` only on a fresh INTAKE_COMPLETE for the
+ * exact target, `pending` when the writer reports a retryable read-back lag (`pending-readback`, no
+ * blockers; the next drain re-runs the same idempotent reconcile), otherwise `blocked`.
+ */
+export function intakeStatus(intake, target, blockers) {
+  if (intake?.action === 'complete' && intake?.receipt?.status === 'INTAKE_COMPLETE' && intake?.issue === target && blockers.length === 0) {
+    return 'complete';
+  }
+  if (intake?.action === 'pending-readback' && intake?.issue === target && blockers.length === 0 && intake?.pending?.code) {
+    return 'pending';
+  }
+  if (blockers.length === 0) {
+    blockers.push('Canonical intake returned action ' + (intake?.action ?? 'unreadable') + ', expected complete.');
+  }
+  return 'blocked';
+}
+
 function field(receipt, name) {
   return receipt?.intake?.receipt?.fields?.[name] ?? null;
 }
 
 export function renderReceiptComment(receipt, queueCommentId = null) {
   const complete = receipt?.status === 'complete';
+  const pending = receipt?.status === 'pending';
   const lines = [
     '### Canonical issue intake',
     '',
-    `- Outcome: **${complete ? 'COMPLETE' : 'BLOCKED'}**`,
+    `- Outcome: **${complete ? 'COMPLETE' : pending ? 'PENDING' : 'BLOCKED'}**`,
   ];
   if (receipt?.request?.target) lines.push(`- Target: \`${receipt.request.target}\``);
   if (receipt?.request) {
@@ -409,18 +424,21 @@ export function renderReceiptComment(receipt, queueCommentId = null) {
   if (receipt?.intake?.applied?.length) {
     lines.push(`- Applied: ${receipt.intake.applied.map((item) => `\`${item}\``).join(', ')}`);
   }
+  if (pending && receipt?.pending?.detail) lines.push(`- Pending: \`${receipt.pending.code}\` — ${receipt.pending.detail}`);
   if (receipt?.blockers?.length) {
     lines.push('', 'Blockers:');
     for (const blocker of receipt.blockers) lines.push(`- ${blocker}`);
   }
   lines.push('', complete
     ? 'Raw connector issue creation has been completed through the canonical intake path.'
-    : 'No successful canonical completion is claimed. Fix the request or blocker and edit/reopen this request to retry.');
+    : pending
+      ? 'The writes succeeded but the Project read-back has not caught up yet. This request stays queued and the next drain retries it automatically (idempotent, nothing is re-added); no edit or reopen is needed.'
+      : 'No successful canonical completion is claimed. Fix the request or blocker and edit/reopen this request to retry.');
   if (Number.isInteger(queueCommentId)) {
     lines.push(
       '',
       '<!-- ' + RESULT_MARKER,
-      JSON.stringify({ queueCommentId, status: complete ? 'complete' : 'blocked', intake: complete ? receipt.intake?.receipt : null }),
+      JSON.stringify({ queueCommentId, status: complete ? 'complete' : pending ? 'pending' : 'blocked', intake: complete ? receipt.intake?.receipt : null }),
       '-->',
     );
   }
@@ -433,9 +451,11 @@ export async function drainQueue({
   writeToken,
   intakeRunner = runIntake,
   outputPrefix = 'issue-intake-drain',
+  state = 'all',
 }) {
   if (!writeToken) throw new Error('CHIPIN_CANONICAL_WRITE_TOKEN is required for canonical queue drain.');
-  const issues = await queueClient.listAll('/repos/ChipIn-one/.github/issues?state=all&sort=created&direction=asc');
+  if (state !== 'all' && state !== 'open') throw new Error('Drain state must be all or open.');
+  const issues = await queueClient.listAll('/repos/ChipIn-one/.github/issues?state=' + state + '&sort=created&direction=asc');
   const summary = {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -475,11 +495,8 @@ export async function drainQueue({
           );
           receipt.intake = intake;
           receipt.blockers.push(...(intake?.blockers ?? []));
-          if (intake?.action === 'complete' && intake?.receipt?.status === 'INTAKE_COMPLETE' && intake?.issue === checked.request.target && receipt.blockers.length === 0) {
-            receipt.status = 'complete';
-          } else if (receipt.blockers.length === 0) {
-            receipt.blockers.push('Canonical intake returned action ' + (intake?.action ?? 'unreadable') + ', expected complete.');
-          }
+          receipt.status = intakeStatus(intake, checked.request.target, receipt.blockers);
+          if (receipt.status === 'pending') receipt.pending = intake.pending;
         } catch (error) {
           receipt.blockers.push('Canonical intake execution failed: ' + error.message);
         } finally {
@@ -500,13 +517,20 @@ export async function drainQueue({
       });
     }
 
-    await queueClient.request('/repos/ChipIn-one/.github/issues/' + issue.number, {
-      method: 'PATCH',
-      body: { state: 'closed' },
-    });
+    // A request with a pending read-back stays open so that the scheduled retry drain (open
+    // control Issues only) finds it again; every other request is closed as before.
+    const stillPending = summary.entries.some((entry) => entry.requestIssue === issue.number && entry.status === 'pending');
+    if (!stillPending) {
+      await queueClient.request('/repos/ChipIn-one/.github/issues/' + issue.number, {
+        method: 'PATCH',
+        body: { state: 'closed' },
+      });
+    }
   }
 
-  summary.outcome = summary.entries.some((entry) => entry.status !== 'complete') ? 'attention-required' : 'complete';
+  summary.outcome = summary.entries.some((entry) => entry.status === 'blocked')
+    ? 'attention-required'
+    : summary.entries.some((entry) => entry.status === 'pending') ? 'pending' : 'complete';
   return summary;
 }
 
@@ -546,9 +570,12 @@ async function main(argv = process.argv.slice(2)) {
       queueClient,
       writeToken: process.env.CHIPIN_CANONICAL_WRITE_TOKEN,
       outputPrefix: args['output-prefix'] ?? 'issue-intake-drain',
+      state: args.state ?? 'all',
     });
     if (args['summary-output']) await writeJson(args['summary-output'], summary);
-    if (summary.outcome !== 'complete') process.exitCode = 2;
+    // attention-required (a blocked request) exits 2; pending (read-back lag, retried by the next
+    // drain) and complete exit 0 so a transient lag does not turn the run red.
+    if (summary.outcome === 'attention-required') process.exitCode = 2;
     return;
   }
   if (args.command === 'apply') {

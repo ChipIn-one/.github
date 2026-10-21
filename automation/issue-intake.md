@@ -67,6 +67,15 @@ Validated requests are durably queued before the shared serialized drain. Manual
 
 Result comments include canonical read-back for Issue Type, Priority, Severity, native Milestone, Project #5 membership and Status. Milestone is release targeting only; it is not workflow or completion authority.
 
+### Read-back lag, pending retry and the manual requeue path (#182)
+
+On 2026-10-20 seven requests ended BLOCKED although every write succeeded: the Project #5 items listing showed the new membership only after more than a minute (six cases), and in one case the item set grew while the pages were read (`read 191 of 190`). Both are consistency races of the read-back, handled as follows:
+
+- `readProjectSnapshot` re-reads the Project from the first page (up to two more times) when `items.length > totalCount`; `items.length < totalCount` still fails.
+- Before adding a membership the writer reads the Issue's own `projectItems`; an item already visible there is never added again (`project-membership:already-present`), two items are a duplicate and block.
+- The membership wait is a time budget (4 minutes, 2 s between full Project reads). If the listing has still not caught up, the writer returns `action: pending-readback` with `pending.code = PROJECT_MEMBERSHIP_READBACK_PENDING` and no blockers (exit 2 for the CLI). It is a distinct, retryable state: the bridge/finalizer post a **PENDING** result comment, the control Issue stays open, the drain summary outcome is `pending` (exit 0, not `attention-required`), and `.github/workflows/issue-intake-drain-retry.yml` re-runs the drain for open control Issues every 30 minutes with the same `canonical-issue-intake-writes` concurrency group. The retry runs the same idempotent reconcile: metadata and assignee are already canonical, the add is skipped once the membership is visible, Status is initialised only when absent, and the control Issue is closed after `INTAKE_COMPLETE`.
+- Manual requeue (still valid for a genuinely BLOCKED request): edit or reopen the control Issue; the bridge re-validates and enqueues a fresh request snapshot. A PENDING request needs no manual action; editing it only adds a second queue entry for the same target, which the drain processes in order.
+
 ## API / agent create path
 
 Example:

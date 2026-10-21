@@ -149,7 +149,62 @@ query MetadataProject($org: String!, $number: Int!, $itemsAfter: String, $fields
   }
 }`;
 
+const ISSUE_PROJECT_ITEMS_QUERY = `
+query MetadataIssueProjectItems($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issue(number: $number) {
+      number
+      projectItems(first: 50, includeArchived: true) {
+        totalCount
+        nodes {
+          id
+          project { number }
+          fieldValueByName(name: "Status") {
+            __typename
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/**
+ * Issue-side read of the Project memberships of one Issue. The organization Project items listing
+ * (readProjectSnapshot) can lag behind a fresh addProjectV2ItemById for more than a minute; the
+ * Issue's own projectItems connection is a second, independent view used to avoid a duplicate add.
+ */
+export async function readIssueProjectItems(client, repository, number, projectNumber) {
+  const [owner, repo] = repository.split("/");
+  const data = await client.graphql(ISSUE_PROJECT_ITEMS_QUERY, { owner, repo, number });
+  const issue = data?.repository?.issue;
+  const connection = issue?.projectItems;
+  if (issue?.number !== number || !Number.isInteger(connection?.totalCount) || !Array.isArray(connection.nodes)) {
+    throw new Error(`Issue ${repository}#${number} Project items are unreadable`);
+  }
+  if (connection.nodes.length !== connection.totalCount) {
+    throw new Error(`Issue ${repository}#${number} Project items are incomplete: read ${connection.nodes.length} of ${connection.totalCount}`);
+  }
+  return connection.nodes
+    .filter((item) => item?.project?.number === projectNumber)
+    .map((item) => ({ id: item.id, repository, number, status: item.fieldValueByName?.name ?? null }));
+}
+
+const PROJECT_GROWTH_REREADS = 2;
+
 export async function readProjectSnapshot(client, config) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await readProjectSnapshotOnce(client, config);
+    } catch (error) {
+      // Items added while the pages were read make items.length exceed the totalCount of the
+      // first page. Growth is re-read from the first page; a short read still fails closed.
+      if (error?.code !== "PROJECT_ITEMS_GREW" || attempt >= PROJECT_GROWTH_REREADS) throw error;
+    }
+  }
+}
+
+async function readProjectSnapshotOnce(client, config) {
   const items = [];
   const fields = [];
   let itemsAfter = null;
@@ -203,6 +258,11 @@ export async function readProjectSnapshot(client, config) {
 
   if (Number.isInteger(fieldTotalCount) && fields.length !== fieldTotalCount) {
     throw new Error(`Project fields pagination is incomplete: read ${fields.length} of ${fieldTotalCount}`);
+  }
+  if (Number.isInteger(totalCount) && items.length > totalCount) {
+    const error = new Error(`Project items grew during pagination: read ${items.length} of ${totalCount}`);
+    error.code = "PROJECT_ITEMS_GREW";
+    throw error;
   }
   if (Number.isInteger(totalCount) && items.length !== totalCount) {
     throw new Error(`Project items pagination is incomplete: read ${items.length} of ${totalCount}`);

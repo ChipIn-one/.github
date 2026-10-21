@@ -1,0 +1,55 @@
+name: Issue intake drain retry
+
+# Scheduled retry for intake requests whose Project #5 read-back was still pending after the
+# finalizer or connector-bridge drain (.github#182). A pending request keeps its control Issue
+# open with a PENDING result comment; this drain re-runs the same idempotent canonical reconcile
+# for open control Issues only (nothing is re-added while the Issue already shows the item) and
+# closes the control Issue once the read-back is complete. No new metadata writer is introduced.
+on:
+  schedule:
+    - cron: "11,41 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: canonical-issue-intake-writes
+  cancel-in-progress: false
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      CHIPIN_CANONICAL_WRITE_TOKEN: ${{ secrets.CHIPIN_ISSUE_WRITE_TOKEN }}
+      SUMMARY_PATH: issue-intake-drain-summary.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.21.0'
+
+      - name: Drain pending intake requests (open control Issues only)
+        run: |
+          set -euo pipefail
+          node automation/issue-intake-request.mjs drain --state open --config automation/metadata-migration.config.json --summary-output "$SUMMARY_PATH"
+
+      - name: Upload drain summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-intake-drain-retry-${{ github.run_id }}
+          path: |
+            issue-intake-drain-summary.json
+            issue-intake-drain-*.json
+          if-no-files-found: ignore
+          retention-days: 30

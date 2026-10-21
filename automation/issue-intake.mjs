@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   GitHubClient,
+  readIssueProjectItems,
   readIssueSnapshot,
   readProjectSnapshot,
   verifyOrgSchema,
@@ -16,6 +17,9 @@ import { GitHubNativeStore, appendDeclarations, declare, parseIssueRef as parseR
 const APPLY_ACTIVATION = 'issue-intake-v1';
 const APPLY_ENV = 'CHIPIN_ISSUE_WRITE';
 const INITIAL_STATUS = 'Backlog';
+const MEMBERSHIP_READ_ATTEMPTS = 60;
+const MEMBERSHIP_READ_BUDGET_MS = 240000;
+export const PENDING_READBACK_CODE = 'PROJECT_MEMBERSHIP_READBACK_PENDING';
 const SUPPORTED = new Set([
   'ChipIn-one/chipin-frontend',
   'ChipIn-one/chipin-backend',
@@ -512,21 +516,51 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             let memberships = projectItemsFor(project, target.repository, target.number);
             if (memberships.length > 1) throw new Error('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items).');
 
-            const membershipAttempts = overrides.projectMembershipReadAttempts ?? 16;
+            const membershipAttempts = overrides.projectMembershipReadAttempts ?? MEMBERSHIP_READ_ATTEMPTS;
+            const membershipBudgetMs = overrides.projectMembershipReadBudgetMs ?? MEMBERSHIP_READ_BUDGET_MS;
             const statusAttempts = overrides.projectStatusReadAttempts ?? 6;
             const delayMs = overrides.projectMembershipReadDelayMs ?? 2000;
             const sleep = overrides.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+            const now = overrides.now || (() => Date.now());
+            const readIssueItems = overrides.readIssueProjectItems || readIssueProjectItems;
             let statusInitialized = false;
 
             if (!memberships.length) {
-              await (overrides.addProjectMembership || addProjectMembership)(client, project, snapshot);
-              result.applied.push('project-membership');
+              // The Project items listing can lag behind an earlier add (2026-10-20: more than 60 s).
+              // The Issue's own projectItems view is read first so a retry never adds a second item.
+              const issueSide = await readIssueItems(client, target.repository, target.number, config.project.number);
+              if (issueSide.length > 1) throw new Error('Project #' + config.project.number + ' has duplicate membership (' + issueSide.length + ' items on the Issue).');
+              if (!issueSide.length) {
+                await (overrides.addProjectMembership || addProjectMembership)(client, project, snapshot);
+                result.applied.push('project-membership');
+              } else {
+                result.applied.push('project-membership:already-present');
+              }
 
+              const startedAt = now();
               for (let attempt = 0; attempt < membershipAttempts; attempt += 1) {
                 project = await readProject(client, config);
                 memberships = projectItemsFor(project, target.repository, target.number);
                 if (memberships.length !== 0) break;
-                if (attempt + 1 < membershipAttempts) await sleep(delayMs);
+                if (attempt + 1 >= membershipAttempts || now() - startedAt + delayMs > membershipBudgetMs) break;
+                await sleep(delayMs);
+              }
+
+              if (!memberships.length) {
+                // The add succeeded (or was already present on the Issue) but the Project listing has not
+                // caught up within the budget. This is retryable, not a blocker: the next drain re-runs
+                // the same idempotent reconcile and skips the add once the membership is visible.
+                const stillOnIssue = await readIssueItems(client, target.repository, target.number, config.project.number);
+                result.pending = {
+                  code: PENDING_READBACK_CODE,
+                  detail: 'Project #' + config.project.number + ' membership for ' + key(target.repository, target.number)
+                    + ' is not visible in the Project items listing after ' + Math.round((now() - startedAt) / 1000)
+                    + ' s (' + stillOnIssue.length + ' item(s) visible on the Issue side). Retry the same intake later; nothing is re-added while the Issue shows the item.',
+                };
+                result.action = 'pending-readback';
+                await emit(result, args.output, persist);
+                process.exitCode = 2;
+                return result;
               }
             }
 

@@ -122,6 +122,7 @@ test('fully explicit intake writes missing metadata, membership and Status, then
     },
     readProjectSnapshot: async () => projects[Math.min(projectReads++, projects.length - 1)],
     writeIssueMetadata: async () => { metadataWrites += 1; },
+    readIssueProjectItems: async () => [],
     addProjectMembership: async () => { membershipWrites += 1; return 'ITEM'; },
     initializeProjectStatus: async () => { statusWrites += 1; },
     projectMembershipReadDelayMs: 0,
@@ -164,6 +165,7 @@ test('project read-back tolerates indexing beyond the legacy six-read window and
     },
     readProjectSnapshot: async () => projects[Math.min(projectReads++, projects.length - 1)],
     writeIssueMetadata: async () => {},
+    readIssueProjectItems: async () => [],
     addProjectMembership: async () => { membershipWrites += 1; return 'ITEM'; },
     initializeProjectStatus: async (_client, _config, _project, itemId) => {
       statusWrites += 1;
@@ -206,6 +208,7 @@ test('late Status initialization gets its own read-back after the final membersh
     },
     readProjectSnapshot: async () => projects[Math.min(projectReads++, projects.length - 1)],
     writeIssueMetadata: async () => {},
+    readIssueProjectItems: async () => [],
     addProjectMembership: async () => 'ITEM',
     initializeProjectStatus: async () => { statusWrites += 1; },
     projectMembershipReadAttempts: 3,
@@ -244,6 +247,7 @@ test('stale Project snapshot never overwrites an existing human-owned Status', a
     },
     readProjectSnapshot: async () => projects[Math.min(projectReads++, projects.length - 1)],
     writeIssueMetadata: async () => {},
+    readIssueProjectItems: async () => [],
     addProjectMembership: async () => { membershipWrites += 1; return 'ITEM'; },
     initializeProjectStatus: async () => { statusWrites += 1; },
     projectMembershipReadDelayMs: 0,
@@ -563,6 +567,7 @@ test('API permission failure yields incomplete receipt and does not continue to 
     readGlobalContext: async () => ({ project: project(), blockers: [] }),
     readIssueSnapshot: async () => issueSnapshot(),
     writeIssueMetadata: async () => { throw new Error('403 Forbidden'); },
+    readIssueProjectItems: async () => [],
     addProjectMembership: async () => { projectWrites += 1; },
     initializeProjectStatus: async () => { projectWrites += 1; },
     writeFile: async () => {},
@@ -749,3 +754,120 @@ test('Issue body drift after final Project read cannot admit older revision', as
   assert.equal(result.receipt.status, 'BLOCKED');
   assert.ok(result.blockers.some(message => message.includes('STALE: native Issue/metadata/Project')));
 });
+
+function pendingOverrides({ projects, issueSide = [], onAdd, now, extra = {} } = {}) {
+  let issueReads = 0;
+  let projectReads = 0;
+  return {
+    config,
+    client: {},
+    readGlobalContext: async () => ({ project: project(), blockers: [] }),
+    readIssueSnapshot: async () => {
+      issueReads += 1;
+      return issueReads === 1 ? issueSnapshot() : fullIssue();
+    },
+    readProjectSnapshot: async () => projects[Math.min(projectReads++, projects.length - 1)],
+    readIssueProjectItems: async () => issueSide,
+    writeIssueMetadata: async () => {},
+    addProjectMembership: async () => { onAdd?.(); return 'ITEM'; },
+    initializeProjectStatus: async () => {},
+    projectMembershipReadDelayMs: 2000,
+    sleep: async () => {},
+    now,
+    writeFile: async () => {},
+    ...extra,
+  };
+}
+
+test('2026-10-20 replay: membership add succeeds but the Project listing lags past the budget -> pending-readback, not BLOCKED', async () => {
+  let adds = 0;
+  let clock = 0;
+  const projects = [project()];
+  const result = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, pendingOverrides({
+    projects,
+    onAdd: () => { adds += 1; },
+    now: () => { clock += 20000; return clock; },
+    extra: { projectMembershipReadBudgetMs: 100000 },
+  })));
+
+  assert.equal(result.action, 'pending-readback');
+  assert.deepEqual(result.blockers, []);
+  assert.equal(result.receipt, null);
+  assert.equal(result.pending.code, 'PROJECT_MEMBERSHIP_READBACK_PENDING');
+  assert.match(result.pending.detail, /not visible in the Project items listing/u);
+  assert.equal(adds, 1);
+  assert.deepEqual(result.applied, ['issue-metadata', 'project-membership']);
+
+  // next drain: the listing has caught up -> the add is skipped and the intake completes
+  let laterAdds = 0;
+  const later = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, pendingOverrides({
+    projects: [
+      project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: null }] }),
+      project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Backlog' }] }),
+    ],
+    onAdd: () => { laterAdds += 1; },
+  })));
+  assert.equal(later.action, 'complete');
+  assert.equal(laterAdds, 0);
+  assert.deepEqual(later.applied, ['issue-metadata', 'status:Backlog']);
+});
+
+test('the Issue-side Project view prevents a second add while the listing lags, and duplicates stay rejected', async () => {
+  let adds = 0;
+  const projects = [
+    project(),
+    project(),
+    project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: null }] }),
+    project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Backlog' }] }),
+  ];
+  const result = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, pendingOverrides({
+    projects,
+    issueSide: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: null }],
+    onAdd: () => { adds += 1; },
+  })));
+  assert.equal(result.action, 'complete');
+  assert.equal(adds, 0);
+  assert.ok(result.applied.includes('project-membership:already-present'));
+
+  const duplicate = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, pendingOverrides({
+    projects: [project()],
+    issueSide: [
+      { id: 'A', repository: 'ChipIn-one/chipin-frontend', number: 999, status: null },
+      { id: 'B', repository: 'ChipIn-one/chipin-frontend', number: 999, status: null },
+    ],
+    onAdd: () => { adds += 1; },
+  })));
+  assert.equal(duplicate.action, 'incomplete');
+  assert.match(duplicate.blockers.join(' '), /duplicate membership \(2 items on the Issue\)/u);
+  assert.equal(adds, 0);
+});
+
+test('membership wait is a time budget: reads stop when the next delay would exceed it, and succeed within it', async () => {
+  let clock = 0;
+  let reads = 0;
+  const projects = [project()];
+  const counting = pendingOverrides({
+    projects,
+    now: () => { clock += 30000; return clock; },
+    extra: { projectMembershipReadBudgetMs: 240000, projectMembershipReadAttempts: 1000 },
+  });
+  const originalRead = counting.readProjectSnapshot;
+  counting.readProjectSnapshot = async (...args) => { reads += 1; return originalRead(...args); };
+  const result = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, counting));
+  assert.equal(result.action, 'pending-readback');
+  // 1 initial read + reads inside the budget (each now() call advances 30 s)
+  assert.ok(reads >= 4 && reads <= 9, 'reads=' + reads);
+
+  let fixedClock = 0;
+  const within = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, pendingOverrides({
+    projects: [
+      project(),
+      ...Array.from({ length: 20 }, () => project()),
+      project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: null }] }),
+      project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Backlog' }] }),
+    ],
+    now: () => { fixedClock += 5000; return fixedClock; },
+  })));
+  assert.equal(within.action, 'complete');
+});
+

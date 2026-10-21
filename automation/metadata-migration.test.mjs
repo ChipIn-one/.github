@@ -11,6 +11,7 @@ import {
   verifyOrgSchema,
   verifyProjectSnapshot,
 } from "./metadata-migration.mjs";
+import { readIssueProjectItems } from "./github-metadata.mjs";
 
 const config = {
   project: { number: 5, statusField: "Status", statusValues: ["Backlog", "Todo", "In Progress"] },
@@ -341,3 +342,68 @@ test("partial cleanup failure never checkpoints completion", async () => {
   assert.deepEqual(state.issues, {});
   assert.equal(issueReads, 2);
 });
+
+test("project items that grow during pagination are re-read; a short read still fails", async () => {
+  const page = (numbers, totalCount, next = null) => ({
+    totalCount,
+    pageInfo: { hasNextPage: next !== null, endCursor: next },
+    nodes: numbers.map((number) => ({ id: "I" + number, content: { __typename: "Issue", number, repository: { nameWithOwner: "ChipIn-one/chipin-frontend" } }, fieldValueByName: null })),
+  });
+  const fields = { totalCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] };
+  let pass = 0;
+  const growing = {
+    graphql: async (_query, variables) => {
+      if (variables.itemsAfter === null) pass += 1;
+      const items = pass === 1
+        ? (variables.itemsAfter === null ? page([1, 2], 2, "c1") : page([3], 2))      // 3 read of 2: grew
+        : (variables.itemsAfter === null ? page([1, 2], 3, "c1") : page([3], 3));     // consistent
+      return { organization: { projectV2: { id: "P", fields, items } } };
+    },
+  };
+  const snapshot = await readProjectSnapshot(growing, { organization: "ChipIn-one", project: { number: 5 } });
+  assert.equal(pass, 2);
+  assert.deepEqual(snapshot.items.map((item) => item.number), [1, 2, 3]);
+  assert.equal(snapshot.totalCount, 3);
+
+  let passes = 0;
+  const alwaysGrowing = {
+    graphql: async (_query, variables) => {
+      if (variables.itemsAfter === null) passes += 1;
+      const items = variables.itemsAfter === null ? page([1, 2], 2, "c1") : page([3], 2);
+      return { organization: { projectV2: { id: "P", fields, items } } };
+    },
+  };
+  await assert.rejects(readProjectSnapshot(alwaysGrowing, { organization: "ChipIn-one", project: { number: 5 } }), /grew during pagination: read 3 of 2/);
+  assert.equal(passes, 3);
+
+  let shortPasses = 0;
+  const short = {
+    graphql: async (_query, variables) => {
+      if (variables.itemsAfter === null) shortPasses += 1;
+      return { organization: { projectV2: { id: "P", fields, items: page([1], 2) } } };
+    },
+  };
+  await assert.rejects(readProjectSnapshot(short, { organization: "ChipIn-one", project: { number: 5 } }), /incomplete: read 1 of 2/);
+  assert.equal(shortPasses, 1);
+});
+
+test("issue-side Project items are read for one Project and fail closed when incomplete", async () => {
+  const client = {
+    graphql: async (query, variables) => {
+      assert.match(query, /MetadataIssueProjectItems/);
+      assert.deepEqual(variables, { owner: "ChipIn-one", repo: "chipin-frontend", number: 466 });
+      return { repository: { issue: { number: 466, projectItems: { totalCount: 2, nodes: [
+        { id: "PVTI_5", project: { number: 5 }, fieldValueByName: { name: "Todo" } },
+        { id: "PVTI_9", project: { number: 9 }, fieldValueByName: null },
+      ] } } } };
+    },
+  };
+  assert.deepEqual(await readIssueProjectItems(client, "ChipIn-one/chipin-frontend", 466, 5), [
+    { id: "PVTI_5", repository: "ChipIn-one/chipin-frontend", number: 466, status: "Todo" },
+  ]);
+  const incomplete = { graphql: async () => ({ repository: { issue: { number: 466, projectItems: { totalCount: 3, nodes: [] } } } }) };
+  await assert.rejects(readIssueProjectItems(incomplete, "ChipIn-one/chipin-frontend", 466, 5), /incomplete: read 0 of 3/);
+  const wrong = { graphql: async () => ({ repository: { issue: null } }) };
+  await assert.rejects(readIssueProjectItems(wrong, "ChipIn-one/chipin-frontend", 466, 5), /unreadable/);
+});
+
