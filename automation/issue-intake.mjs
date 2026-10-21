@@ -10,20 +10,15 @@ import {
   verifyProjectSnapshot,
 } from './github-metadata.mjs';
 import { createHash } from 'node:crypto';
-import { requiredOwner, validateBody, verifyAdmission, ADMISSION_CONTRACT } from './issue-admission.mjs';
+import { isAdmissionRepository, requiredOwner, validateBody, verifyAdmission, ADMISSION_CONTRACT } from './issue-admission.mjs';
 import { GitHubNativeStore, appendDeclarations, declare, parseIssueRef as parseRelationshipRef, renderDeclaration } from './relationships.mjs';
 
 const APPLY_ACTIVATION = 'issue-intake-v1';
 const APPLY_ENV = 'CHIPIN_ISSUE_WRITE';
 const INITIAL_STATUS = 'Backlog';
-const SUPPORTED = new Set([
-  'ChipIn-one/chipin-frontend',
-  'ChipIn-one/chipin-backend',
-  'ChipIn-one/chipin-knowledge-base',
-]);
-
+// Intake scope is the admission scope of the registry (#183): FE, BE, KB and .github today.
 export function isSupportedIntakeRepository(repository) {
-  return SUPPORTED.has(repository);
+  return isAdmissionRepository(repository);
 }
 const ADD_ITEM = [
   'mutation AddIssue($projectId: ID!, $contentId: ID!) {',
@@ -127,7 +122,7 @@ export function buildReconcilePlan({ config, repository, number, classification,
   const validState = state === 'open' || (state === 'closed' && reason === 'completed');
   if (!validState) blockers.push('Native Issue is not open or closed/completed; refusing all intake mutations.');
   const writable = validIdentity && validState;
-  if (!SUPPORTED.has(repository)) blockers.push('Repository is outside ChipIn intake scope: ' + repository + '.');
+  if (!isSupportedIntakeRepository(repository)) blockers.push('Repository is outside ChipIn intake scope: ' + repository + '.');
   const observed = observedMetadata(config, snapshot);
   blockers.push(...observed.blockers);
   blockers.push(...validateBody(snapshot?.issue?.title, snapshot?.issue?.body));
@@ -411,7 +406,7 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
   if (!result.blockers.length && args.operation === 'reconcile') target = parseIssueRef(args.target);
 
   if (!result.blockers.length && args.operation === 'create') {
-    if (!SUPPORTED.has(args.target)) result.blockers.push('Repository is outside ChipIn intake scope: ' + args.target + '.');
+    if (!isSupportedIntakeRepository(args.target)) result.blockers.push('Repository is outside ChipIn intake scope: ' + args.target + '.');
     if (!args.title) result.blockers.push('Create requires --title.');
     let suppliedBody = args.body || '';
     try { if (args.bodyFile) suppliedBody = await (overrides.readFile || readFile)(resolve(args.bodyFile), 'utf8'); }

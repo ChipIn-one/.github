@@ -5,17 +5,14 @@ import { resolve } from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { GitHubClient } from './github-metadata.mjs';
-import { readAdmission, assertFreshReceipt } from './issue-admission.mjs';
+import { admissionProfile, readAdmission, assertFreshReceipt, requiresExplicitOwner } from './issue-admission.mjs';
 import { readTaskIdentityMarker, readKBTaskOwnerMarker } from './development-link.mjs';
 
-const BRANCHES = new Map([
-  ['ChipIn-one/chipin-frontend', 'dev'],
-  ['ChipIn-one/chipin-backend', 'develop'],
-  ['ChipIn-one/chipin-knowledge-base', 'master'],
-]);
 export function taskIdentitiesForPr(repository, pr) {
-  const integration = BRANCHES.get(repository);
-  if (!integration) throw new Error('Unsupported PR admission repository ' + repository);
+  const profile = admissionProfile(repository);
+  if (!profile) throw new Error('Unsupported PR admission repository ' + repository);
+  const integration = profile.branches.integration;
+  const promotion = profile.branches.promotion;
   if (pr?.head?.repo?.full_name !== repository || pr?.base?.repo?.full_name !== repository) throw new Error('Untrusted fork/cross-repository PR.');
   const head = pr.head.ref, base = pr.base.ref;
   if (base === integration && head !== integration) {
@@ -23,11 +20,12 @@ export function taskIdentitiesForPr(repository, pr) {
     if (!marker || marker.repository !== repository) throw new Error('Missing or mismatched single Task identity in implementation PR.');
     return [marker];
   }
-  if (repository === 'ChipIn-one/chipin-frontend' && base === 'main' && head === 'dev') {
+  if (promotion && base === promotion && head === integration) {
     const matches = String(pr.body ?? '').match(/^Included Issues:\s*(.*)$/gm);
     if (matches?.length !== 1) throw new Error('Release PR must have one exact Included Issues line.');
     const ids = matches[0].slice('Included Issues:'.length).split(',').map(s => s.trim());
-    if (!ids.length || ids.length > 30 || ids.some(x => !/^ChipIn-one\/chipin-frontend#[1-9]\d*$/.test(x)) || new Set(ids).size !== ids.length) {
+    const own = new RegExp('^' + repository.replace(/[.]/g, '\\.') + '#[1-9]\\d*$');
+    if (!ids.length || ids.length > 30 || ids.some(x => !own.test(x)) || new Set(ids).size !== ids.length) {
       throw new Error('Invalid or duplicate release Included Issues identity.');
     }
     return ids.map(id => ({ canonical: id, repository, issueNumber: Number(id.split('#')[1]) }));
@@ -36,7 +34,7 @@ export function taskIdentitiesForPr(repository, pr) {
 }
 
 export function selectedOwnerForPr(repository, body) {
-  if (repository !== 'ChipIn-one/chipin-knowledge-base') return null;
+  if (!requiresExplicitOwner(repository)) return null;
   return readKBTaskOwnerMarker(body);
 }
 

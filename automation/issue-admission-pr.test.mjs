@@ -20,6 +20,18 @@ test('implementation needs one exact same-repository identity before PR handoff'
   const fork = pr(); fork.head.repo.full_name = 'other/fork';
   assert.throws(() => taskIdentitiesForPr(FE, fork), /Untrusted fork/);
 });
+test('.github implementation PRs are admitted against master; repositories outside admission scope are rejected', () => {
+  const META = 'ChipIn-one/.github';
+  // .github is inside admission scope (no "Unsupported PR admission repository"); the implementation-PR
+  // identity marker itself stays limited to the development-link scope (code/docs repositories), which
+  // is the documented boundary until a .github PR caller exists (#153).
+  assert.throws(() => taskIdentitiesForPr(META, pr(META, 'master', 'feat/issue-183', 'Task identity: ' + META + '#183')), /Task identity must be exactly/);
+  assert.equal(selectedOwnerForPr(META, 'Task identity: ' + META + '#183'), null);
+  assert.throws(() => taskIdentitiesForPr('ChipIn-one/chipin-notifications', pr('ChipIn-one/chipin-notifications', 'main')), /Unsupported PR admission repository/);
+  assert.throws(() => taskIdentitiesForPr('ChipIn-one/slack-rofls', pr('ChipIn-one/slack-rofls', 'main')), /Unsupported PR admission repository/);
+  // only a repository with a promotion branch has a release inventory path
+  assert.throws(() => taskIdentitiesForPr(BE, pr(BE, 'main', 'develop', 'Included Issues: ' + BE + '#1')), /Unsupported PR branch transition/);
+});
 test('FE release requires one unambiguous non-closing Issue inventory', () => {
   const body = 'Included Issues: ' + FE + '#71, ' + FE + '#72';
   assert.deepEqual(taskIdentitiesForPr(FE, pr(FE, 'main', 'dev', body)).map(x => x.issueNumber), [71, 72]);

@@ -21,6 +21,7 @@ The standard is specified in full; implementation lands task by task. Statements
 | Part | State | Tracked in |
 | --- | --- | --- |
 | Registry `workflow-registry.yaml` + loader `automation/registry.mjs` | implemented | [#150](https://github.com/ChipIn-one/.github/issues/150) |
+| Admission and intake scope from the registry (`.github` admitted, owner per record) | implemented | [#183](https://github.com/ChipIn-one/.github/issues/183) |
 | Release tags and SHA pins, Dependabot in all repositories | planned | [#151](https://github.com/ChipIn-one/.github/issues/151) |
 | Native relationships reconciler and blocker gate | implemented; scheduled runs plan only until live acceptance | [#136](https://github.com/ChipIn-one/.github/issues/136), [#152](https://github.com/ChipIn-one/.github/issues/152) |
 | Reusable `pr-gate` / `issue-gate` | planned | [#153](https://github.com/ChipIn-one/.github/issues/153) |
@@ -78,8 +79,7 @@ Repositories outside the registry are not managed by the standard. The conforman
 
 Consumers that used to hardcode repository names read the registry: the Development-link allowlist, task-identity pattern and integration-branch check
 (`development-link.mjs`), the milestone allowlist (`create-milestone.mjs`), and the PR-metadata owner, branches and Project number (`pr-metadata.mjs`).
-The admission/intake modules (`issue-admission.mjs`, `issue-admission-pr.mjs`, `issue-intake.mjs`, `issue-admission-preflight.mjs`) still carry their own literals;
-`automation/registry.test.mjs` fails if they drift from the registry.
+The admission/intake modules (`issue-admission.mjs`, `issue-admission-pr.mjs`, `issue-intake.mjs`, `issue-admission-preflight.mjs`, the evidence and human-orchestrator checks) read their scope from the registry too ([#183](https://github.com/ChipIn-one/.github/issues/183)): every repository with `admission` not `off`, owner from the record.
 
 ## 3. Reusable workflows and callers
 

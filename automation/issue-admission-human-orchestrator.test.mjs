@@ -28,7 +28,9 @@ function fixture() {
 test('manual request requires exact owner, Issue, SHA and trusted human',()=>{
   assert.equal(buildRequest(env,{issue},now,id).orchestrator_actor,'syllik');
   assert.equal(validateInputs({issue:'ChipIn-one/chipin-knowledge-base#35',owner:'syllik'}).owner,'syllik');
-  for(const data of [{issue:'ChipIn-one/.github#119'}, {issue:'ChipIn-one/chipin-knowledge-base#35'},
+  assert.equal(validateInputs({issue:'ChipIn-one/.github#119'}).issue,'ChipIn-one/.github#119');
+  for(const data of [{issue:'ChipIn-one/chipin-notifications#1'}, {issue:'ChipIn-one/slack-rofls#1'},
+    {issue:'ChipIn-one/.github#119',owner:'somebody'}, {issue:'ChipIn-one/chipin-knowledge-base#35'},
     {issue,owner:'somebody'}, {issue,expected_revision:'short'}]) {
     assert.throws(()=>validateInputs(data),/UNTRUSTED_ORCHESTRATOR_REQUEST/);
   }

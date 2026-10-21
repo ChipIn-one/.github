@@ -6,11 +6,11 @@ on:
   workflow_dispatch:
     inputs:
       issue:
-        description: Exact FE/BE/KB Issue identity (ChipIn-one/repository#number)
+        description: Exact Issue identity in a registry repository with admission on (ChipIn-one/repository#number)
         required: true
         type: string
       owner:
-        description: Explicit KB owner only (empty for FE/BE)
+        description: Explicit owner only for a repository whose registry owner is null (KB); empty otherwise
         required: false
         type: string
       expected_revision:

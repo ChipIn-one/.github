@@ -1,12 +1,11 @@
 // Trust-boundary verification. Caller must supply authoritative GitHub API read-back
 // and the SHA-256 of the *downloaded artifact archive*, not a claimed digest.
 import { createHash } from 'node:crypto';
-import { ADMISSION_CONTRACT, ADMISSION_MAX_AGE_MS } from './issue-admission.mjs';
+import { ADMISSION_CONTRACT, ADMISSION_MAX_AGE_MS, parseAdmissionIssue } from './issue-admission.mjs';
 import { PreflightError } from './issue-admission-transport.mjs';
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const SHA40 = /^[a-f0-9]{40}$/;
-const ISSUE = /^ChipIn-one\/(chipin-frontend|chipin-backend|chipin-knowledge-base)#[1-9]\d*$/;
 const REQUEST = /^[a-zA-Z0-9][a-zA-Z0-9_-]{15,127}$/;
 const ROOT = 'ChipIn-one/.github';
 const WORKFLOW = '.github/workflows/issue-admission-preflight.yml';
@@ -17,7 +16,7 @@ function block(code, remedy) {
     capability: 'signed-origin-equivalent authoritative evidence read-back', remedy });
 }
 export function assertCanonicalReceipt(receipt, { issue, revision, now = Date.now() }) {
-  if (!ISSUE.test(issue) || receipt?.contractVersion !== ADMISSION_CONTRACT || receipt?.issue !== issue ||
+  if (!parseAdmissionIssue(issue) || receipt?.contractVersion !== ADMISSION_CONTRACT || receipt?.issue !== issue ||
     receipt?.status !== 'INTAKE_COMPLETE' || !Array.isArray(receipt?.blockers) || receipt.blockers.length || !SHA256.test(receipt?.revision ?? '') ||
     !SHA256.test(revision ?? '') || receipt.revision !== revision) block('INVALID_RECEIPT', 'Obtain full canonical admission for exact issue/revision.');
   if (typeof receipt.checkedAt !== 'string' || !/Z$/.test(receipt.checkedAt)) block('INVALID_RECEIPT', 'Use canonical UTC checkedAt.');

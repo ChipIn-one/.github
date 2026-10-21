@@ -214,20 +214,22 @@ test('listRepositories filters by kind and capability', () => {
   rejects(() => listRepositories({ capability: 'nope' }), 'REGISTRY_VALUE');
 });
 
-test('registry drift guard: allowlists elsewhere still agree with the registry', async () => {
+test('admission and intake scope is the registry: every repository with admission on, owner from its record', async () => {
   const taskRepositories = listRepositories({ kinds: ['code', 'docs'], capability: 'developmentLink' });
   assert.deepEqual([...SUPPORTED_REPOSITORIES], taskRepositories);
   assert.deepEqual(taskRepositories, [FE, BE, KB], 'chipin-notifications is registered with every task capability off');
-  for (const repository of taskRepositories) assert.equal(isSupportedIntakeRepository(repository), true);
-  assert.equal(isSupportedIntakeRepository(META), false);
-  assert.equal(isSupportedIntakeRepository(NOTIF), false);
+  assert.deepEqual(listRepositories({ capability: 'admission' }), [FE, BE, KB, META]);
+  for (const repository of [FE, BE, KB, META]) assert.equal(isSupportedIntakeRepository(repository), true);
+  assert.equal(isSupportedIntakeRepository(NOTIF), false, 'admission off');
+  assert.equal(isSupportedIntakeRepository('ChipIn-one/slack-rofls'), false, 'unregistered');
 
-  // issue-admission.mjs still carries its own owner table; it must agree with the registry.
-  for (const repository of taskRepositories) {
+  for (const repository of [FE, BE, KB, META]) {
     const { owner } = getRepositoryProfile(repository);
     assert.equal(requiredOwner(repository, owner === null ? 'syllik' : null), owner ?? 'syllik');
   }
-  assert.throws(() => requiredOwner(META), /Unsupported admission repository/);
+  assert.equal(requiredOwner(META), 'syllik');
+  assert.throws(() => requiredOwner(NOTIF), /Unsupported admission repository/);
+  assert.throws(() => requiredOwner('ChipIn-one/slack-rofls'), /Unsupported admission repository/);
 
   const migration = JSON.parse(await readFile(new URL('./metadata-migration.config.json', import.meta.url), 'utf8'));
   assert.equal(migration.project.number, loadRegistry().project.number);
