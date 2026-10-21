@@ -460,9 +460,23 @@ export class GitHubConformanceSource {
     const prs = await this.client.request(`/repos/${repository}/pulls?state=closed&base=${encodeURIComponent(base)}&sort=updated&direction=desc&per_page=100`);
     return prs.filter(p => p.merged_at && p.merged_at >= since).map(p => ({ number: p.number, mergedAt: p.merged_at, headSha: p.head.sha }));
   }
+  // Fine-grained personal access tokens have no "Checks" permission (GitHub Apps only), so the check-runs
+  // endpoint answers 403 for them. Jobs of Actions runs for the same SHA carry the same names and
+  // conclusions and need only "Actions: Read-only". A required check that is not an Actions job is unverifiable.
   async checkRuns(repository, sha) {
-    const data = await this.client.request(`/repos/${repository}/commits/${sha}/check-runs?per_page=100`);
-    return (data.check_runs ?? []).map(r => ({ name: r.name, conclusion: r.conclusion }));
+    try {
+      const data = await this.client.request(`/repos/${repository}/commits/${sha}/check-runs?per_page=100`);
+      return (data.check_runs ?? []).map(r => ({ name: r.name, conclusion: r.conclusion }));
+    } catch (error) {
+      if (!/\b403\b/.test(String(error?.message))) throw error;
+    }
+    const runs = await this.client.request(`/repos/${repository}/actions/runs?head_sha=${sha}&per_page=100`);
+    const jobs = [];
+    for (const run of runs.workflow_runs ?? []) {
+      const page = await this.client.request(`/repos/${repository}/actions/runs/${run.id}/jobs?per_page=100`);
+      jobs.push(...(page.jobs ?? []).map(j => ({ name: j.name, conclusion: j.conclusion })));
+    }
+    return jobs;
   }
   async orgRepositories() { return (await this.client.listAll('/orgs/ChipIn-one/repos?type=all')).map(r => ({ fullName: r.full_name, archived: r.archived })); }
 }

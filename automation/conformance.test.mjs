@@ -287,6 +287,29 @@ test('GitHubConformanceSource maps API answers and classifies protection errors'
   assert.deepEqual(await src.classicProtection('R', 'b'), { state: 'ok', requiredChecks: ['a', 'b'] });
 });
 
+test('GitHubConformanceSource.checkRuns falls back to Actions jobs when a PAT cannot read check runs', async () => {
+  const calls = [];
+  const client = {
+    request: async path => {
+      calls.push(path);
+      if (path.includes('/check-runs')) throw new Error('GET x -> 403: {"message":"Resource not accessible by personal access token"}');
+      if (path.includes('/actions/runs?head_sha=abc')) return { workflow_runs: [{ id: 1 }, { id: 2 }] };
+      if (path.includes('/actions/runs/1/jobs')) return { jobs: [{ name: 'Unit and integration tests', conclusion: 'failure' }] };
+      if (path.includes('/actions/runs/2/jobs')) return { jobs: [{ name: 'reconcile', conclusion: 'success' }] };
+      throw new Error(`unexpected ${path}`);
+    },
+  };
+  assert.deepEqual(await new GitHubConformanceSource(client).checkRuns('R', 'abc'), [
+    { name: 'Unit and integration tests', conclusion: 'failure' }, { name: 'reconcile', conclusion: 'success' }]);
+  assert.equal(calls.length, 4);
+  const ok = new GitHubConformanceSource({ request: async () => ({ check_runs: [{ name: 'a', conclusion: 'success' }] }) });
+  assert.deepEqual(await ok.checkRuns('R', 'abc'), [{ name: 'a', conclusion: 'success' }]);
+  const broken = new GitHubConformanceSource({ request: async () => { throw new Error('GET x -> 500: boom'); } });
+  await assert.rejects(broken.checkRuns('R', 'abc'), /500/);
+  const denied = new GitHubConformanceSource({ request: async () => { throw new Error('GET x -> 403: nope'); } });
+  await assert.rejects(denied.checkRuns('R', 'abc'), /403/);
+});
+
 test('GitHubConformanceStore: creates Task/P2 with Project Backlog; closes completed with Project Done', async () => {
   const calls = [];
   const client = {
