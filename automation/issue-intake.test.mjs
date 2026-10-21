@@ -247,7 +247,8 @@ test('stale Project snapshot never overwrites an existing human-owned Status', a
     },
     readProjectSnapshot: async () => projects[Math.min(projectReads++, projects.length - 1)],
     writeIssueMetadata: async () => {},
-    readIssueProjectItems: async () => [],
+    // the global snapshot is stale: the Issue side already shows the item with a human Status
+    readIssueProjectItems: async () => [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'In Progress' }],
     addProjectMembership: async () => { membershipWrites += 1; return 'ITEM'; },
     initializeProjectStatus: async () => { statusWrites += 1; },
     projectMembershipReadDelayMs: 0,
@@ -257,8 +258,9 @@ test('stale Project snapshot never overwrites an existing human-owned Status', a
 
   assert.equal(result.action, 'complete');
   assert.deepEqual(result.blockers, []);
-  assert.equal(membershipWrites, 1);
+  assert.equal(membershipWrites, 0);
   assert.equal(statusWrites, 0);
+  assert.ok(result.applied.includes('project-membership:already-present'));
   assert.equal(result.receipt.project.membershipCount, 1);
   assert.equal(result.receipt.project.status, 'In Progress');
 });
@@ -796,7 +798,8 @@ test('2026-10-20 replay: membership add succeeds but the Project listing lags pa
   assert.equal(result.pending.code, 'PROJECT_MEMBERSHIP_READBACK_PENDING');
   assert.match(result.pending.detail, /not visible in the Project items listing/u);
   assert.equal(adds, 1);
-  assert.deepEqual(result.applied, ['issue-metadata', 'project-membership']);
+  // Status is initialised on the returned item id before the listing wait
+  assert.deepEqual(result.applied, ['issue-metadata', 'project-membership', 'status:Backlog']);
 
   // next drain: the listing has caught up -> the add is skipped and the intake completes
   let laterAdds = 0;
@@ -869,4 +872,43 @@ test('membership wait is a time budget: reads stop when the next delay would exc
     now: () => { fixedClock += 5000; return fixedClock; },
   })));
   assert.equal(within.action, 'complete');
+});
+
+test('Status is set on the known item id right after the add; a lagging Status read-back is pending, not BLOCKED', async () => {
+  const statusCalls = [];
+  const complete = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, pendingOverrides({
+    projects: [
+      project(),
+      project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: null }] }),
+      project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Backlog' }] }),
+    ],
+    extra: { initializeProjectStatus: async (_client, _config, _project, itemId) => { statusCalls.push(itemId); } },
+  })));
+  assert.equal(complete.action, 'complete');
+  assert.deepEqual(statusCalls, ['ITEM'], 'exactly one Status write, on the id returned by the add');
+
+  const lagging = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, pendingOverrides({
+    projects: [
+      project(),
+      project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: null }] }),
+    ],
+    extra: { projectStatusReadAttempts: 2 },
+  })));
+  assert.equal(lagging.action, 'pending-readback');
+  assert.equal(lagging.pending.code, 'PROJECT_STATUS_READBACK_PENDING');
+  assert.deepEqual(lagging.blockers, []);
+
+  // without a prior Status write of ours a missing Status is still a blocker
+  let writes = 0;
+  const notOurs = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, pendingOverrides({
+    projects: [
+      project(),
+      project({ items: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: null }] }),
+    ],
+    issueSide: [{ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status: 'Todo' }],
+    extra: { initializeProjectStatus: async () => { writes += 1; }, projectStatusReadAttempts: 1 },
+  })));
+  assert.equal(writes, 0, 'Issue side shows a human Status: nothing is initialised');
+  assert.equal(notOurs.action, 'pending-readback', 'a listing that lags on a human Status is retried, never overwritten');
+  assert.equal(notOurs.pending.code, 'PROJECT_STATUS_READBACK_PENDING');
 });

@@ -18,6 +18,9 @@ const REQUEST_MARKER = 'chipin-issue-intake-request:v1';
 const QUEUE_MARKER = 'chipin-issue-intake-queued:v1';
 const RESULT_MARKER = 'chipin-issue-intake-result:v1';
 const QUEUE_COMMENT_AUTHOR = 'github-actions[bot]';
+// A request whose read-back is still pending after this many PENDING results (about 3 hours with the
+// 30-minute retry drain) is reported BLOCKED so a permanent divergence reaches a human.
+export const MAX_PENDING_RETRIES = 6;
 const TRUSTED_ACTORS = new Set(['syllik', QUEUE_COMMENT_AUTHOR]);
 const ALLOWED_REQUEST_KEYS = new Set([
   'target',
@@ -195,16 +198,19 @@ export function parseResultComment(body) {
 
 export function pendingQueueItems(issue, comments) {
   const resultIds = new Set();
+  const pendingResults = new Map();
   const queued = [];
   for (const comment of comments ?? []) {
     if (comment?.user?.login !== QUEUE_COMMENT_AUTHOR) continue;
     const result = parseResultComment(comment.body);
     if (result && result.status !== 'pending') resultIds.add(result.queueCommentId);
+    else if (result) pendingResults.set(result.queueCommentId, (pendingResults.get(result.queueCommentId) ?? 0) + 1);
     const request = parseQueueComment(comment.body);
     if (request) queued.push({ id: comment.id, request });
   }
   return queued
     .filter((entry) => !resultIds.has(entry.id) && entry.request.requestIssue === issue?.number)
+    .map((entry) => ({ ...entry, pendingRetries: pendingResults.get(entry.id) ?? 0 }))
     .sort((a, b) => a.id - b.id);
 }
 
@@ -367,6 +373,7 @@ export async function applyCommand({
     receipt.intake = intake;
     receipt.blockers.push(...(intake?.blockers ?? []));
     receipt.status = intakeStatus(intake, request.target, receipt.blockers);
+    if (receipt.status === 'pending') receipt.pending = intake.pending;
   } catch (error) {
     receipt.blockers.push(`Canonical intake execution failed: ${error.message}`);
   } finally {
@@ -496,7 +503,13 @@ export async function drainQueue({
           receipt.intake = intake;
           receipt.blockers.push(...(intake?.blockers ?? []));
           receipt.status = intakeStatus(intake, checked.request.target, receipt.blockers);
-          if (receipt.status === 'pending') receipt.pending = intake.pending;
+          if (receipt.status === 'pending' && queued.pendingRetries >= MAX_PENDING_RETRIES) {
+            receipt.blockers.push('Read-back still pending after ' + queued.pendingRetries + ' retries ('
+              + (intake.pending?.code ?? 'unknown') + '); the Project listing never caught up. Check Project #5 by hand, then edit/reopen this request to retry.');
+            receipt.status = 'blocked';
+          } else if (receipt.status === 'pending') {
+            receipt.pending = intake.pending;
+          }
         } catch (error) {
           receipt.blockers.push('Canonical intake execution failed: ' + error.message);
         } finally {
