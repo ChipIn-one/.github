@@ -108,6 +108,24 @@ test('protection: unavailable is a note, stale registry is drift, checks must be
   assert.deepEqual(checkProtection(profile(META), na, na).map(f => f.check), ['PROTECTION_MISSING']);
 });
 
+test('protection: an unreadable mechanism turns missing required checks into a note, not drift', () => {
+  const empty = { state: 'ok', rules: [], requiredChecks: [] };
+  const fe = checkProtection(profile(FE), empty, { state: 'unreadable' });
+  assert.deepEqual(fe.map(f => [f.check, f.severity]), [['PROTECTION_UNVERIFIABLE', 'note']]);
+  assert.match(fe[0].message, /classic branch protection/);
+  assert.deepEqual(checkProtection(profile(FE), { state: 'unreadable' }, { state: 'ok', requiredChecks: [] }).map(f => f.check), ['PROTECTION_UNVERIFIABLE']);
+  assert.deepEqual(checkProtection(profile(FE), empty, { state: 'ok', requiredChecks: [] }).map(f => f.check), ['REQUIRED_CHECKS_MISSING', 'PROTECTION_MECHANISM'], 'both readable and still missing: real drift');
+});
+
+test('audit: a token without checks:read downgrades only the red-check verification, other read failures stay UNREADABLE', async () => {
+  const denied = await audit({ source: fakeSource({ checkRuns: async () => { throw new Error('GET x -> 403: {"message":"Resource not accessible by personal access token"}'); } }), repositories: [BE] });
+  assert.equal(denied.repositories[0].status, 'DRIFT');
+  assert.ok(denied.repositories[0].notes.some(n => n.check === 'CHECKS_UNVERIFIABLE'));
+  assert.ok(!checks(denied.repositories[0].findings).includes('MERGED_PAST_RED_CHECK'));
+  const broken = await audit({ source: fakeSource({ checkRuns: async () => { throw new Error('GET x -> 500: boom'); } }), repositories: [BE] });
+  assert.equal(broken.repositories[0].status, 'UNREADABLE');
+});
+
 test('project pull requests, intake gaps (note only), closed with open PRs, merged past red', () => {
   assert.deepEqual(checkProjectPullRequests(profile(FE), [{ repository: BE, number: 1 }]), []);
   const prs = checkProjectPullRequests(profile(FE), Array.from({ length: 12 }, (_, i) => ({ repository: FE, number: i + 1 })));
