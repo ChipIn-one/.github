@@ -406,4 +406,3 @@ test("issue-side Project items are read for one Project and fail closed when inc
   const wrong = { graphql: async () => ({ repository: { issue: null } }) };
   await assert.rejects(readIssueProjectItems(wrong, "ChipIn-one/chipin-frontend", 466, 5), /unreadable/);
 });
-

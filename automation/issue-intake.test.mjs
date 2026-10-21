@@ -870,4 +870,3 @@ test('membership wait is a time budget: reads stop when the next delay would exc
   })));
   assert.equal(within.action, 'complete');
 });
-

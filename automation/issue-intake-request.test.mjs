@@ -403,4 +403,3 @@ test('scheduled retry drain exists, is serialized with the writers and scans ope
   assert.match(workflow, /--state open/);
   assert.doesNotMatch(workflow, /issue-intake\.mjs apply/);
 });
-
