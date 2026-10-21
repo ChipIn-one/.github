@@ -281,8 +281,11 @@ export async function evaluateIssueForCompletion(issue, {
   const hasFreshImplementationEvidence = freshness.floor === null
     || mergedAtValues.some((mergedAt) => isAfter(mergedAt, freshness.floor));
   if (!hasFreshImplementationEvidence) {
+    // every change after the last merge, not only the latest one
+    const lastMergedAt = latestTimestamp(...mergedAtValues);
     const reasons = (freshness.reasons ?? [])
-      .filter((reason) => !isAfter(freshness.floor, reason.at))
+      .filter((reason) => lastMergedAt === null || isAfter(reason.at, lastMergedAt))
+      .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
       .map((reason) => reason.kind + " at " + reason.at);
     return leaveOpen(
       "scope-changed-after-implementation",

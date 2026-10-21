@@ -135,7 +135,7 @@ export async function readRequiredRelationships(client, repository, number) {
   };
 }
 
-function normalizeTimeline(connection) {
+export function normalizeTimeline(connection) {
   const nodes = Array.isArray(connection?.nodes) ? connection.nodes.filter(Boolean) : null;
   if (!nodes || !Number.isInteger(connection?.totalCount)) {
     return { readable: false, detail: "Issue timeline (closed/reopened/renamed events) is unreadable." };
