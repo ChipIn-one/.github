@@ -858,8 +858,9 @@ test('membership wait is a time budget: reads stop when the next delay would exc
   counting.readProjectSnapshot = async (...args) => { reads += 1; return originalRead(...args); };
   const result = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, counting));
   assert.equal(result.action, 'pending-readback');
-  // 1 initial read + reads inside the budget (each now() call advances 30 s)
-  assert.ok(reads >= 4 && reads <= 9, 'reads=' + reads);
+  // 1 initial read, then one read per loop iteration; now() advances 30 s per call (startedAt, then
+  // one check per iteration), so the 8th iteration sees 242 s > 240 s and stops: 1 + 8 reads.
+  assert.equal(reads, 9);
 
   let fixedClock = 0;
   const within = await withoutExitLeak(() => run(argsFor(), { CHIPIN_ISSUE_WRITE: '1' }, pendingOverrides({
