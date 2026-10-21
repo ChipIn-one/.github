@@ -230,7 +230,14 @@ test("plan: a commit outside the release branch, an unreachable tag and a missin
   devAhead.branches.dev = sha("e");
   await assert.rejects(
     planRelease(fakeStore(devAhead), { repository: FE, profile: feProfile, ref: "dev" }),
-    (error) => error.code === "COMMIT_NOT_ON_RELEASE_BRANCH" && /main/u.test(error.message),
+    (error) => error.code === "COMMIT_NOT_ON_RELEASE_BRANCH" && /diverged/u.test(error.message),
+  );
+  // a commit that is a descendant of the branch head (not yet on the branch) compares as "behind"
+  const beyondHead = frontendHistory();
+  beyondHead.graph[sha("f")] = [sha("3")];
+  await assert.rejects(
+    planRelease(fakeStore(beyondHead), { repository: FE, profile: feProfile, ref: sha("f") }),
+    (error) => error.code === "COMMIT_NOT_ON_RELEASE_BRANCH" && /behind/u.test(error.message),
   );
 
   const unreachable = frontendHistory();
@@ -526,6 +533,10 @@ test("release-action, reusable workflow and caller templates: plan by default, a
 
   const workflow = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
   assert.match(workflow, /^  workflow_call:$/mu);
+  // every action is pinned by SHA with its version comment
+  for (const uses of workflow.match(/uses: [^\n]+/gu).filter((line) => !line.includes("./chipin-workflow"))) {
+    assert.match(uses, /@[0-9a-f]{40} # v\d+\.\d+\.\d+$/u, uses);
+  }
   assert.doesNotMatch(workflow, /^  push:$/mu);
   // the called workflow's own SHA/repository come from the job context, never from github.* (caller)
   assert.match(workflow, /ref: \$\{\{ job\.workflow_sha \}\}/u);
