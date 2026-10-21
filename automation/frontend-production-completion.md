@@ -16,6 +16,8 @@ Scope changes are read from native history (`.github#178`), not guessed from `la
 - a **body edit** counts only when the text changed beyond `- [ ]` / `- [x]` checkbox toggles, compared revision by revision through the Issue edit history (`userContentEdits`);
 - a **title change** always counts.
 
+Boundary rule: a close in the same second as the last merge (the shape a closing keyword produces) still counts as "after the merge", so the reopen that reverts it is ignored; a merge in the same second as a reopen counts as merged before the reopen and does not refresh evidence. The edit history must contain the original body (`includesCreatedEdit`, earliest revision at `createdAt`); otherwise it is unreadable.
+
 The timeline (closed, reopened, renamed events) is read with the candidate list; the edit history is read only for an edited Issue whose implementation evidence is otherwise complete. A truncated timeline, a deleted or missing revision, a revision set that does not match `lastEditedAt`, or an edit made while the sweep runs leaves the Issue open with `scope-history-unreadable`.
 
 Before writing, the runner re-reads the Issue and abandons the terminal mutation if state or update time changed. The only Issue terminal mutation is `state=closed` with `state_reason=completed`; it never reopens manually closed Issues. When an Issue remains open but Project #5 still shows derived `Done`, the runner re-reads that project item and normalizes it to the documented deterministic fallback `In Progress`. Project Status is never used as completion evidence.

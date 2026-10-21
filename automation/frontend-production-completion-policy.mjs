@@ -71,7 +71,11 @@ function validTimestamps(values) {
 const CHECKBOX_PATTERN = /^([ \t]*(?:[-*+]|\d+[.)])[ \t]+)\[[ xX]\]/gmu;
 
 export function normalizeCheckboxes(text) {
-  return String(text ?? "").replace(CHECKBOX_PATTERN, "$1[ ]");
+  return String(text ?? "").replace(/\r\n/gu, "\n").replace(CHECKBOX_PATTERN, "$1[ ]");
+}
+
+function hasInvalidTimestamp(values) {
+  return (values ?? []).some((value) => typeof value !== "string" || !Number.isFinite(Date.parse(value)));
 }
 
 function scopeHistoryUnreadable(detail) {
@@ -101,8 +105,14 @@ export function resolveScopeFreshnessFloor(issue, mergedAtValues = []) {
   if (history === undefined) {
     return { floor: latestTimestamp(issue.lastEditedAt, issue.reopenedAt), blocker: null, reasons: [] };
   }
-  if (!history || history.readable !== true) {
+  if (!history || typeof history !== "object" || history.readable !== true) {
     return scopeHistoryUnreadable(history?.detail ?? "no readable scope history was provided.");
+  }
+  if (hasInvalidTimestamp(history.closedAt) || hasInvalidTimestamp(history.reopenedAt) || hasInvalidTimestamp(history.renamedAt)) {
+    return scopeHistoryUnreadable("a timeline event has no readable timestamp.");
+  }
+  if (hasInvalidTimestamp(mergedAtValues)) {
+    return scopeHistoryUnreadable("a linked pull request has no readable mergedAt.");
   }
 
   const merges = validTimestamps(mergedAtValues);
@@ -134,6 +144,12 @@ export function resolveScopeFreshnessFloor(issue, mergedAtValues = []) {
       }
     }
     const ordered = [...revisions].sort((a, b) => Date.parse(a.editedAt) - Date.parse(b.editedAt));
+    // The earliest revision must be the original body (its editedAt equals the Issue createdAt);
+    // otherwise the first real edit cannot be compared and a scope change could be missed.
+    if (issue.createdAt && Date.parse(ordered[0].editedAt) !== Date.parse(issue.createdAt)) {
+      return scopeHistoryUnreadable("the earliest body revision (" + ordered[0].editedAt
+        + ") is not the original body (createdAt " + issue.createdAt + ").");
+    }
     if (Date.parse(ordered.at(-1).editedAt) !== Date.parse(issue.lastEditedAt)) {
       return scopeHistoryUnreadable("the latest body revision (" + ordered.at(-1).editedAt
         + ") does not match lastEditedAt (" + issue.lastEditedAt + ").");
@@ -256,7 +272,8 @@ export async function evaluateIssueForCompletion(issue, {
   }
 
   if (issue.scopeHistory === undefined && typeof readScopeHistory === "function") {
-    issue = { ...issue, scopeHistory: await readScopeHistory(issue) };
+    const history = await readScopeHistory(issue);
+    issue = { ...issue, scopeHistory: history && typeof history === "object" ? history : null };
   }
   const freshness = resolveScopeFreshnessFloor(issue, mergedAtValues);
   if (freshness.blocker) return freshness.blocker;

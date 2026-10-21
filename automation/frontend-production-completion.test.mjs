@@ -870,7 +870,7 @@ test("body revision reads paginate, reject deleted revisions and detect concurre
     graphql: async (query, variables) => {
       assert.match(query, /query FrontendCompletionBodyRevisions/u);
       cursors.push(variables.after);
-      return { repository: { issue: { number: 1, lastEditedAt: "2026-10-03T10:00:00Z", userContentEdits: pages.shift() } } };
+      return { repository: { issue: { number: 1, lastEditedAt: "2026-10-03T10:00:00Z", createdAt: "2026-09-20T10:00:00Z", includesCreatedEdit: true, userContentEdits: pages.shift() } } };
     },
   };
   const result = await readIssueBodyRevisions(client, repository, 1);
@@ -881,7 +881,7 @@ test("body revision reads paginate, reject deleted revisions and detect concurre
   ]);
 
   const deletedClient = {
-    graphql: async () => ({ repository: { issue: { number: 1, lastEditedAt: "2026-10-03T10:00:00Z", userContentEdits: {
+    graphql: async () => ({ repository: { issue: { number: 1, lastEditedAt: "2026-10-03T10:00:00Z", includesCreatedEdit: true, userContentEdits: {
       totalCount: 2,
       pageInfo: { hasNextPage: false, endCursor: null },
       nodes: [{ editedAt: "2026-10-03T10:00:00Z", deletedAt: "2026-10-04T10:00:00Z", diff: null }, { editedAt: "2026-09-20T10:00:00Z", deletedAt: null, diff: BODY_V1 }],
@@ -890,7 +890,7 @@ test("body revision reads paginate, reject deleted revisions and detect concurre
   await assert.rejects(readIssueBodyRevisions(deletedClient, repository, 1), /deleted or unreadable body revision/u);
 
   const incompleteClient = {
-    graphql: async () => ({ repository: { issue: { number: 1, lastEditedAt: "2026-10-03T10:00:00Z", userContentEdits: {
+    graphql: async () => ({ repository: { issue: { number: 1, lastEditedAt: "2026-10-03T10:00:00Z", includesCreatedEdit: true, userContentEdits: {
       totalCount: 3,
       pageInfo: { hasNextPage: false, endCursor: null },
       nodes: [{ editedAt: "2026-10-03T10:00:00Z", deletedAt: null, diff: BODY_V1 }],
@@ -899,7 +899,7 @@ test("body revision reads paginate, reject deleted revisions and detect concurre
   await assert.rejects(readIssueBodyRevisions(incompleteClient, repository, 1), /incomplete: read 1 of 3/u);
 
   const concurrentClient = {
-    graphql: async () => ({ repository: { issue: { number: 1, lastEditedAt: "2026-10-05T10:00:00Z", userContentEdits: {
+    graphql: async () => ({ repository: { issue: { number: 1, lastEditedAt: "2026-10-05T10:00:00Z", includesCreatedEdit: true, userContentEdits: {
       totalCount: 2,
       pageInfo: { hasNextPage: false, endCursor: null },
       nodes: [{ editedAt: "2026-10-05T10:00:00Z", deletedAt: null, diff: BODY_V2 }, { editedAt: "2026-09-20T10:00:00Z", deletedAt: null, diff: BODY_V1 }],
@@ -982,7 +982,7 @@ test("the sweep replays FE#464 end to end and leaves an Issue with a truncated t
         } } };
       }
       if (query.includes("query FrontendCompletionBodyRevisions")) {
-        return { repository: { issue: { number: 464, lastEditedAt: "2026-10-20T14:04:16Z", userContentEdits: {
+        return { repository: { issue: { number: 464, lastEditedAt: "2026-10-20T14:04:16Z", createdAt: "2026-10-20T14:03:58Z", includesCreatedEdit: true, userContentEdits: {
           totalCount: 2,
           pageInfo: { hasNextPage: false, endCursor: null },
           nodes: [
@@ -1023,4 +1023,44 @@ test("the sweep replays FE#464 end to end and leaves an Issue with a truncated t
   ]);
   assert.match(results[1].decision.detail, /read 1 of 101/u);
   assert.deepEqual(patched, ["/repos/ChipIn-one/chipin-frontend/issues/464"]);
+});
+
+test("a history without the original body revision, invalid timestamps or a non-object callback result fail closed", async () => {
+  const merges = ["2026-10-01T10:00:00Z"];
+  const noOriginal = resolveScopeFreshnessFloor(issue({
+    lastEditedAt: "2026-10-03T10:00:00Z",
+    scopeHistory: scopeHistory({ bodyRevisions: [
+      { editedAt: "2026-10-02T10:00:00Z", body: "- [ ] a\n- [ ] NEW SCOPE" },
+      { editedAt: "2026-10-03T10:00:00Z", body: "- [x] a\n- [ ] NEW SCOPE" },
+    ] }),
+  }), merges);
+  assert.equal(noOriginal.blocker, null, "without createdAt the earliest revision cannot be checked and legacy comparison applies");
+  const withCreatedAt = resolveScopeFreshnessFloor({ ...issue({
+    lastEditedAt: "2026-10-03T10:00:00Z",
+    scopeHistory: scopeHistory({ bodyRevisions: [
+      { editedAt: "2026-10-02T10:00:00Z", body: "- [ ] a\n- [ ] NEW SCOPE" },
+      { editedAt: "2026-10-03T10:00:00Z", body: "- [x] a\n- [ ] NEW SCOPE" },
+    ] }),
+  }), createdAt: "2026-09-20T10:00:00Z" }, merges);
+  assert.equal(withCreatedAt.blocker.code, "scope-history-unreadable");
+  assert.match(withCreatedAt.blocker.detail, /not the original body/u);
+
+  assert.equal(resolveScopeFreshnessFloor(issue({ scopeHistory: scopeHistory({ reopenedAt: ["garbage"] }) }), merges).blocker.code, "scope-history-unreadable");
+  assert.equal(resolveScopeFreshnessFloor(issue({ scopeHistory: scopeHistory({ closedAt: ["2026-10-02T10:00:00Z"], reopenedAt: ["2026-10-05T10:00:00Z"] }) }), ["not-a-date"]).blocker.code, "scope-history-unreadable");
+
+  const undefinedCallback = await evaluateIssueForCompletion(issue(), {
+    repository,
+    releases: [release({ number: 20, mergedAt: "2026-10-06T10:00:00Z" })],
+    containsCommit: async () => true,
+    readScopeHistory: async () => undefined,
+  });
+  assert.equal(undefinedCallback.code, "scope-history-unreadable");
+
+  const noCreatedEdit = {
+    graphql: async () => ({ repository: { issue: { number: 1, lastEditedAt: "2026-10-03T10:00:00Z", includesCreatedEdit: false, userContentEdits: {
+      totalCount: 1, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ editedAt: "2026-10-03T10:00:00Z", deletedAt: null, diff: BODY_V1 }],
+    } } } }),
+  };
+  await assert.rejects(readIssueBodyRevisions(noCreatedEdit, repository, 1), /does not include the original revision/u);
+  assert.equal(normalizeCheckboxes("- [x] a\r\n"), "- [ ] a\n");
 });

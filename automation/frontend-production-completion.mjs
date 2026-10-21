@@ -49,7 +49,7 @@ const BODY_REVISIONS_QUERY = [
   "query FrontendCompletionBodyRevisions($owner: String!, $repo: String!, $number: Int!, $after: String) {",
   "  repository(owner: $owner, name: $repo) {",
   "    issue(number: $number) {",
-  "      number lastEditedAt",
+  "      number createdAt lastEditedAt includesCreatedEdit",
   "      userContentEdits(first: 100, after: $after) {",
   "        totalCount",
   "        pageInfo { hasNextPage endCursor }",
@@ -220,6 +220,7 @@ export async function readIssueBodyRevisions(client, repository, number) {
   let after = null;
   let totalCount = null;
   let lastEditedAt = null;
+  let createdAt = null;
 
   for (;;) {
     const data = await client.graphql(BODY_REVISIONS_QUERY, { owner, repo, number, after });
@@ -228,8 +229,14 @@ export async function readIssueBodyRevisions(client, repository, number) {
     if (issue?.number !== number || !connection?.pageInfo || !Array.isArray(connection.nodes)) {
       throw new Error("Issue #" + number + " edit history is unreadable");
     }
+    // The original body must be part of the history, otherwise the first edit cannot be compared
+    // against it and a scope change could be missed (fail closed instead).
+    if (issue.includesCreatedEdit !== true) {
+      throw new Error("Issue #" + number + " edit history does not include the original revision");
+    }
     totalCount ??= connection.totalCount;
     lastEditedAt ??= issue.lastEditedAt ?? null;
+    createdAt ??= issue.createdAt ?? null;
     for (const node of connection.nodes.filter(Boolean)) {
       if (node.deletedAt || typeof node.diff !== "string") {
         throw new Error("Issue #" + number + " has a deleted or unreadable body revision at "
@@ -248,7 +255,7 @@ export async function readIssueBodyRevisions(client, repository, number) {
     throw new Error("Issue #" + number + " edit history is incomplete: read "
       + revisions.length + " of " + (totalCount ?? "unknown"));
   }
-  return { lastEditedAt, revisions };
+  return { lastEditedAt, createdAt, revisions };
 }
 
 export async function readScopeHistory(client, repository, issue) {
@@ -265,7 +272,10 @@ export async function readScopeHistory(client, repository, issue) {
   if (!issue.lastEditedAt) return history;
 
   try {
-    const { lastEditedAt, revisions } = await readIssueBodyRevisions(client, repository, issue.number);
+    const { lastEditedAt, createdAt, revisions } = await readIssueBodyRevisions(client, repository, issue.number);
+    if (issue.createdAt && createdAt !== issue.createdAt) {
+      return { readable: false, detail: "Issue #" + issue.number + " createdAt differs between reads (" + issue.createdAt + " vs " + createdAt + ")." };
+    }
     if (lastEditedAt !== issue.lastEditedAt) {
       return {
         readable: false,
