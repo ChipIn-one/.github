@@ -17,7 +17,9 @@ const ISSUE_REF = /^(ChipIn-one\/[A-Za-z0-9_.-]+)#([1-9]\d*)$/;
 // `off`, with the required owner from its record (`owner: null` means an explicit --owner).
 export function admissionProfile(repository) {
   const profile = getRepositoryProfile(repository);
-  if (!profile || profile.capabilities.admission === 'off') return null;
+  // Exact spelling only: the registry lookup is case-insensitive, but GitHub resolves mis-cased
+  // repository names too, so a mis-cased target must be rejected before any write, as before.
+  if (!profile || profile.repository !== repository || profile.capabilities.admission === 'off') return null;
   return profile;
 }
 export function isAdmissionRepository(repository) { return admissionProfile(repository) !== null; }

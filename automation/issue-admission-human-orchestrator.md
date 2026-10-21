@@ -10,8 +10,8 @@ only `workflow_dispatch` from `syllik` on the exact protected `master` ref
 only to send `repository_dispatch` from the job-scoped ephemeral `GITHUB_TOKEN`.
 It never checks out a PR or other untrusted branch and does not persist credentials.
 
-The manually submitted FE/BE/KB Issue is validated before a random one-use
-request ID is generated. KB alone requires an explicit owner; a pinned 64-hex
+The manually submitted Issue (any registry repository with admission on: FE/BE/KB/`.github`) is validated before a random one-use
+request ID is generated. Only a repository with registry `owner: null` (KB) requires an explicit owner; a pinned 64-hex
 revision is optional for initial binding, mandatory at subsequent boundaries.
 The orchestrator first uploads an immutable run-attempt-bound request artifact;
 only then does it send `chipin-admission-preflight-v1` with its artifact ID.

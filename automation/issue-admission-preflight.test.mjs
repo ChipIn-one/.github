@@ -55,7 +55,7 @@ test('KB owner explicit passed to canonical reader', async () => {
 });
 test('exact Issue identity and stale expectedRevision parse fail closed', () => {
   assert.equal(parsePreflightArgs(['--issue', 'ChipIn-one/.github#119']).repository, 'ChipIn-one/.github');
-  for (const outside of ['ChipIn-one/chipin-notifications#1', 'ChipIn-one/slack-rofls#1', 'ChipIn-one/chipin-backend-python#1', 'other/repo#1']) {
+  for (const outside of ['ChipIn-one/chipin-notifications#1', 'ChipIn-one/slack-rofls#1', 'ChipIn-one/chipin-backend-python#1', 'other/repo#1', 'ChipIn-one/.GitHub#119', 'ChipIn-one/Chipin-Frontend#1']) {
     assert.throws(() => parsePreflightArgs(['--issue', outside]), { code: 'INVALID_REQUEST' });
   }
   assert.throws(() => parsePreflightArgs(['--issue', issue, '--expected-revision', 'sha-not-hash']), { code: 'INVALID_REQUEST' });

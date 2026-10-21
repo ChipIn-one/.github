@@ -71,7 +71,7 @@ test('.github tasks are admitted from the registry; repositories with admission 
   assert.equal(receipt.status, 'INTAKE_COMPLETE');
   assertFreshReceipt(receipt, { issue: META + '#71', revision: receipt.revision });
   assert.match(check(META, snapshot(META, 'Task', ['another-human']), project(META)).blockers.join('\n'), /syllik is missing/);
-  for (const repo of ['ChipIn-one/chipin-notifications', 'ChipIn-one/slack-rofls', 'ChipIn-one/chipin-backend-python', 'other/repo']) {
+  for (const repo of ['ChipIn-one/chipin-notifications', 'ChipIn-one/slack-rofls', 'ChipIn-one/chipin-backend-python', 'other/repo', 'ChipIn-one/.GitHub', 'ChipIn-one/Chipin-Frontend', 'chipin-one/chipin-frontend']) {
     assert.throws(() => requiredOwner(repo), /Unsupported admission repository/);
     assert.match(check(repo, snapshot(repo, 'Task', ['syllik']), project(repo)).blockers.join('\n'), /Unsupported admission repository/);
   }

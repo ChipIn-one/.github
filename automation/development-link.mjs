@@ -7,8 +7,9 @@ import { GitHubClient } from "./github-metadata.mjs";
 import { readAdmission, assertFreshReceipt } from "./issue-admission.mjs";
 import { getRepositoryProfile, integrationBranch, listRepositories } from "./registry.mjs";
 
-// Task repositories come from workflow-registry.yaml. Meta repositories host the shared
-// automation; their Issues are not Task-admitted (the admission allowlists are code/docs only).
+// Development-link repositories come from workflow-registry.yaml (code/docs kinds). Meta repositories
+// host the shared automation; their Issues are admitted (#183) but their PRs are not Development-linked
+// by this reconciler until a .github PR caller exists (#153).
 export const SUPPORTED_REPOSITORIES = new Set(
   listRepositories({ kinds: ["code", "docs"], capability: "developmentLink" }),
 );

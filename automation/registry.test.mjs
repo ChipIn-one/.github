@@ -221,6 +221,7 @@ test('admission and intake scope is the registry: every repository with admissio
   assert.deepEqual(listRepositories({ capability: 'admission' }), [FE, BE, KB, META]);
   for (const repository of [FE, BE, KB, META]) assert.equal(isSupportedIntakeRepository(repository), true);
   assert.equal(isSupportedIntakeRepository(NOTIF), false, 'admission off');
+  assert.equal(isSupportedIntakeRepository('ChipIn-one/Chipin-Frontend'), false, 'exact spelling only (GitHub would resolve the mis-cased name)');
   assert.equal(isSupportedIntakeRepository('ChipIn-one/slack-rofls'), false, 'unregistered');
 
   for (const repository of [FE, BE, KB, META]) {

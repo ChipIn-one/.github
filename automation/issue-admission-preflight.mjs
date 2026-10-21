@@ -30,7 +30,9 @@ export function parsePreflightArgs(argv) {
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 function metadataSha(path) {
-  // Safe in trusted Actions producer only. No task-controlled checkout or ref.
+  // Safe in trusted Actions producer only. No task-controlled checkout or ref. Note: the admission scope
+  // and owner policy live in workflow-registry.yaml/registry.mjs (#183); their integrity is covered by
+  // sourceSha (the whole trusted tree), readerBlobSha pins the reader module only.
   return execFileSync('git', ['rev-parse', `HEAD:${path}`], { encoding: 'utf8', timeout: 5000 }).trim();
 }
 function producerContext(env, configBytes) {

@@ -1,10 +1,11 @@
 # Canonical issue intake
 
-This tooling completes or reconciles canonical ChipIn issue metadata for:
+This tooling completes or reconciles canonical ChipIn issue metadata for every repository of `workflow-registry.yaml` whose `admission` capability is not `off` (#183), today:
 
-- `ChipIn-one/chipin-frontend`
-- `ChipIn-one/chipin-backend`
-- `ChipIn-one/chipin-knowledge-base`
+- `ChipIn-one/chipin-frontend` (owner `syllik`)
+- `ChipIn-one/chipin-backend` (owner `olegbal`)
+- `ChipIn-one/chipin-knowledge-base` (explicit `--owner`)
+- `ChipIn-one/.github` (owner `syllik`)
 
 Active schema configuration is in `metadata-migration.config.json`; shared GitHub transport/schema/readers are in `github-metadata.mjs`. The old backend #117 mapping is retained only under `historicalMigration`.
 
@@ -55,7 +56,7 @@ Body:
 
 Rules:
 
-- `target` is the exact existing FE/BE/KB issue identity;
+- `target` is the exact existing issue identity in a registry repository with admission on (FE/BE/KB/`.github`), canonical spelling;
 - `issueType`, `priority`, and applicable `severity` are explicit;
 - `"severity":"none"` is used when not applicable;
 - retired `releaseScope` is rejected as an unsupported request key;
