@@ -1,0 +1,62 @@
+name: ChipIn release
+description: Derive the version from the Version impact of the pull requests merged since the previous tag, then create the tag and the GitHub Release (docs/workflow/release.md).
+inputs:
+  repository:
+    description: Registry repository to release (owner/name); defaults to the calling repository.
+    required: false
+    default: ${{ github.repository }}
+  ref:
+    description: Release commit (SHA or branch); defaults to the event SHA. The commit must be on the release branch of the registry strategy.
+    required: false
+    default: ${{ github.sha }}
+  token:
+    description: Token for the target repository. plan needs contents read; apply needs contents write (tags and Releases).
+    required: true
+  initial-version:
+    description: First version (X.Y.Z) for a repository without tags; invalid once a tag exists.
+    required: false
+    default: ""
+  apply:
+    description: "true creates the tag and the Release; anything else prints the plan only."
+    required: false
+    default: "false"
+  output:
+    description: Path of the JSON receipt.
+    required: false
+    default: release-receipt.json
+outputs:
+  outcome:
+    description: PLANNED, NO_RELEASE, ALREADY_RELEASED, RELEASE_MISSING, RELEASED or BLOCKED.
+    value: ${{ steps.release.outputs.outcome }}
+  tag:
+    description: Tag of the release (empty for NO_RELEASE or BLOCKED).
+    value: ${{ steps.release.outputs.tag }}
+  version:
+    description: Version without the prefix.
+    value: ${{ steps.release.outputs.version }}
+  sha:
+    description: Release commit.
+    value: ${{ steps.release.outputs.sha }}
+runs:
+  using: composite
+  steps:
+    - name: Plan or apply the release
+      id: release
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        RELEASE_REPOSITORY: ${{ inputs.repository }}
+        RELEASE_REF: ${{ inputs.ref }}
+        RELEASE_INITIAL_VERSION: ${{ inputs.initial-version }}
+        RELEASE_APPLY: ${{ inputs.apply }}
+        RELEASE_OUTPUT: ${{ inputs.output }}
+      run: |
+        set -euo pipefail
+        if [[ -z "${GITHUB_TOKEN:-}" ]]; then echo "::error::input token is empty"; exit 1; fi
+        args=(--repository "$RELEASE_REPOSITORY" --ref "$RELEASE_REF" --output "$RELEASE_OUTPUT")
+        if [[ -n "$RELEASE_INITIAL_VERSION" ]]; then args+=(--initial-version "$RELEASE_INITIAL_VERSION"); fi
+        if [[ "$RELEASE_APPLY" == "true" ]]; then
+          CHIPIN_RELEASE_WRITE=1 node "$GITHUB_ACTION_PATH/../release.mjs" apply "${args[@]}" --activate release-v1
+        else
+          node "$GITHUB_ACTION_PATH/../release.mjs" plan "${args[@]}"
+        fi
