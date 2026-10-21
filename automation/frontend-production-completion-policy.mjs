@@ -62,6 +62,108 @@ function isAfter(left, right) {
   return Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime > rightTime;
 }
 
+function validTimestamps(values) {
+  return (values ?? [])
+    .filter((value) => typeof value === "string" && Number.isFinite(Date.parse(value)))
+    .sort((a, b) => Date.parse(a) - Date.parse(b));
+}
+
+const CHECKBOX_PATTERN = /^([ \t]*(?:[-*+]|\d+[.)])[ \t]+)\[[ xX]\]/gmu;
+
+export function normalizeCheckboxes(text) {
+  return String(text ?? "").replace(/\r\n/gu, "\n").replace(CHECKBOX_PATTERN, "$1[ ]");
+}
+
+function hasInvalidTimestamp(values) {
+  return (values ?? []).some((value) => typeof value !== "string" || !Number.isFinite(Date.parse(value)));
+}
+
+function scopeHistoryUnreadable(detail) {
+  return {
+    floor: null,
+    blocker: leaveOpen(
+      "scope-history-unreadable",
+      "Issue timeline or edit history is unreadable; leave the Issue open and rerun: " + detail,
+    ),
+  };
+}
+
+/**
+ * Resolve the moment after which fresh implementation evidence is required.
+ *
+ * Without `scopeHistory` the legacy rule applies: any body edit (`lastEditedAt`) or reopen (`reopenedAt`)
+ * after the last merge is a scope change. With `scopeHistory` (timeline closes/reopens/renames and the
+ * body edit history) the rule is refined:
+ * - a reopen is ignored when the close it reverts happened after every PR merged before that reopen
+ *   (an early manual close after the implementation merged, undone to let automation finish);
+ * - a body edit counts only when the text changed beyond `- [ ]` / `- [x]` toggles;
+ * - a title rename always counts.
+ * Unreadable history fails closed.
+ */
+export function resolveScopeFreshnessFloor(issue, mergedAtValues = []) {
+  const history = issue.scopeHistory;
+  if (history === undefined) {
+    return { floor: latestTimestamp(issue.lastEditedAt, issue.reopenedAt), blocker: null, reasons: [] };
+  }
+  if (!history || typeof history !== "object" || history.readable !== true) {
+    return scopeHistoryUnreadable(history?.detail ?? "no readable scope history was provided.");
+  }
+  if (hasInvalidTimestamp(history.closedAt) || hasInvalidTimestamp(history.reopenedAt) || hasInvalidTimestamp(history.renamedAt)) {
+    return scopeHistoryUnreadable("a timeline event has no readable timestamp.");
+  }
+  if (hasInvalidTimestamp(mergedAtValues)) {
+    return scopeHistoryUnreadable("a linked pull request has no readable mergedAt.");
+  }
+
+  const merges = validTimestamps(mergedAtValues);
+  const closes = validTimestamps(history.closedAt);
+  const reasons = [];
+
+  for (const reopenedAt of validTimestamps(history.reopenedAt)) {
+    const precedingClose = closes.filter((closedAt) => !isAfter(closedAt, reopenedAt)).at(-1) ?? null;
+    const mergedBetween = precedingClose !== null && merges.some((mergedAt) => (
+      isAfter(mergedAt, precedingClose) && !isAfter(mergedAt, reopenedAt)
+    ));
+    if (precedingClose !== null && !mergedBetween) continue;
+    reasons.push({ at: reopenedAt, kind: "reopened" });
+  }
+
+  for (const renamedAt of validTimestamps(history.renamedAt)) {
+    reasons.push({ at: renamedAt, kind: "title changed" });
+  }
+
+  const revisions = Array.isArray(history.bodyRevisions) ? history.bodyRevisions : [];
+  if (issue.lastEditedAt) {
+    if (revisions.length < 2) {
+      return scopeHistoryUnreadable("the Issue was edited (" + issue.lastEditedAt
+        + ") but fewer than two body revisions are available.");
+    }
+    for (const revision of revisions) {
+      if (typeof revision?.body !== "string" || !Number.isFinite(Date.parse(revision?.editedAt ?? ""))) {
+        return scopeHistoryUnreadable("a body revision has no readable text or timestamp.");
+      }
+    }
+    const ordered = [...revisions].sort((a, b) => Date.parse(a.editedAt) - Date.parse(b.editedAt));
+    // The earliest revision must be the original body (its editedAt equals the Issue createdAt);
+    // otherwise the first real edit cannot be compared and a scope change could be missed.
+    if (issue.createdAt && Date.parse(ordered[0].editedAt) !== Date.parse(issue.createdAt)) {
+      return scopeHistoryUnreadable("the earliest body revision (" + ordered[0].editedAt
+        + ") is not the original body (createdAt " + issue.createdAt + ").");
+    }
+    if (Date.parse(ordered.at(-1).editedAt) !== Date.parse(issue.lastEditedAt)) {
+      return scopeHistoryUnreadable("the latest body revision (" + ordered.at(-1).editedAt
+        + ") does not match lastEditedAt (" + issue.lastEditedAt + ").");
+    }
+    for (let index = 1; index < ordered.length; index += 1) {
+      if (normalizeCheckboxes(ordered[index - 1].body) === normalizeCheckboxes(ordered[index].body)) continue;
+      reasons.push({ at: ordered[index].editedAt, kind: "text edited" });
+    }
+  }
+
+  const floor = latestTimestamp(...reasons.map((reason) => reason.at));
+  return { floor, blocker: null, reasons };
+}
+
 async function findProductionRelease(pullRequest, releases, containsCommit) {
   for (const release of releases) {
     if (Date.parse(release.mergedAt) < Date.parse(pullRequest.mergedAt)) continue;
@@ -74,6 +176,7 @@ export async function evaluateIssueForCompletion(issue, {
   repository = FRONTEND_REPOSITORY,
   releases = [],
   containsCommit,
+  readScopeHistory,
 } = {}) {
   if (issue.state !== "OPEN") {
     return leaveOpen("already-closed", "Issue is already closed; automation never reopens it.");
@@ -106,8 +209,7 @@ export async function evaluateIssueForCompletion(issue, {
   }
 
   const identities = new Set();
-  const scopeFreshnessFloor = latestTimestamp(issue.lastEditedAt, issue.reopenedAt);
-  let hasFreshImplementationEvidence = scopeFreshnessFloor === null;
+  const mergedAtValues = [];
   const productionReceipts = [];
 
   for (const pullRequest of issue.linkedPullRequests) {
@@ -131,9 +233,7 @@ export async function evaluateIssueForCompletion(issue, {
       );
     }
 
-    if (isAfter(pullRequest.mergedAt, scopeFreshnessFloor)) {
-      hasFreshImplementationEvidence = true;
-    }
+    mergedAtValues.push(pullRequest.mergedAt);
 
     if (pullRequest.baseRefName === PRODUCTION_BRANCH) {
       if (pullRequest.headRefName !== INTEGRATION_BRANCH || pullRequest.headRepository !== repository) {
@@ -171,10 +271,27 @@ export async function evaluateIssueForCompletion(issue, {
     productionReceipts.push("PR #" + pullRequest.number + " reached main via release PR #" + release.number + ".");
   }
 
+  if (issue.scopeHistory === undefined && typeof readScopeHistory === "function") {
+    const history = await readScopeHistory(issue);
+    issue = { ...issue, scopeHistory: history && typeof history === "object" ? history : null };
+  }
+  const freshness = resolveScopeFreshnessFloor(issue, mergedAtValues);
+  if (freshness.blocker) return freshness.blocker;
+
+  const hasFreshImplementationEvidence = freshness.floor === null
+    || mergedAtValues.some((mergedAt) => isAfter(mergedAt, freshness.floor));
   if (!hasFreshImplementationEvidence) {
+    // every change after the last merge, not only the latest one
+    const lastMergedAt = latestTimestamp(...mergedAtValues);
+    const reasons = (freshness.reasons ?? [])
+      .filter((reason) => lastMergedAt === null || isAfter(reason.at, lastMergedAt))
+      .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+      .map((reason) => reason.kind + " at " + reason.at);
     return leaveOpen(
       "scope-changed-after-implementation",
-      "The Issue was edited or reopened after all currently linked implementation PRs merged. Link and merge fresh required implementation evidence before automatic completion.",
+      "The Issue was edited or reopened after all currently linked implementation PRs merged"
+        + (reasons.length > 0 ? " (" + reasons.join(", ") + ")" : "")
+        + ". Link and merge fresh required implementation evidence before automatic completion.",
     );
   }
 

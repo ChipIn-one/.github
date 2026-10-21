@@ -2,12 +2,19 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { evaluateIssueForCompletion } from "./frontend-production-completion-policy.mjs";
+import {
+  evaluateIssueForCompletion,
+  normalizeCheckboxes,
+  resolveScopeFreshnessFloor,
+} from "./frontend-production-completion-policy.mjs";
 import {
   closeIssueAsCompleted,
   compareContainsCommit,
+  normalizeTimeline,
+  readIssueBodyRevisions,
   readProductionReleases,
   readRequiredRelationships,
+  readScopeHistory,
   reconcileOpenDoneProjectStatus,
   runCompletionSweep,
 } from "./frontend-production-completion.mjs";
@@ -48,8 +55,9 @@ function issue({
   blockedBy = [],
   subIssues = [],
   milestone = null,
+  scopeHistory,
 } = {}) {
-  return {
+  const value = {
     number,
     state,
     updatedAt,
@@ -63,7 +71,26 @@ function issue({
     subIssues,
     milestone,
   };
+  if (scopeHistory !== undefined) value.scopeHistory = scopeHistory;
+  return value;
 }
+
+function scopeHistory({
+  readable = true,
+  closedAt = [],
+  reopenedAt = [],
+  renamedAt = [],
+  bodyRevisions = [],
+  detail,
+} = {}) {
+  return readable
+    ? { readable, closedAt, reopenedAt, renamedAt, bodyRevisions }
+    : { readable, detail: detail ?? "test: unreadable" };
+}
+
+const BODY_V1 = "## Acceptance\n\n- [ ] first\n- [ ] second\n";
+const BODY_V1_TICKED = "## Acceptance\n\n- [x] first\n- [X] second\n";
+const BODY_V2 = "## Acceptance\n\n- [x] first\n- [x] second\n- [ ] third\n";
 
 function release({
   number = 20,
@@ -492,7 +519,7 @@ test("repository-local completion skips Project access and still closes producti
               updatedAt: "2026-10-07T10:00:00Z",
               lastEditedAt: null,
               linkedBranches: { totalCount: 0 },
-              timelineItems: { nodes: [] },
+              timelineItems: { totalCount: 0, nodes: [] },
               closedByPullRequestsReferences: {
                 totalCount: 1,
                 nodes: [{
@@ -619,4 +646,523 @@ test("commit containment accepts only an ancestor comparison", async () => {
     }),
   };
   assert.equal(await compareContainsCommit(rejectedClient, repository, commit, head), false);
+});
+
+test("checkbox normalization ignores only list checkbox toggles", () => {
+  assert.equal(normalizeCheckboxes("- [x] a\n* [X] b\n+ [ ] c\n1. [x] d\n  - [x] e"), "- [ ] a\n* [ ] b\n+ [ ] c\n1. [ ] d\n  - [ ] e");
+  assert.equal(normalizeCheckboxes("text [x] inline"), "text [x] inline");
+  assert.equal(normalizeCheckboxes(BODY_V1), normalizeCheckboxes(BODY_V1_TICKED));
+  assert.notEqual(normalizeCheckboxes(BODY_V1), normalizeCheckboxes(BODY_V2));
+});
+
+test("FE#464 sequence: an early manual close after the merge, reopened before the release, completes", async () => {
+  // PR #465 merged to dev 2026-10-20T17:04:51Z; closed by hand 17:05:25Z; reopened 2026-10-21T08:06:53Z;
+  // release PR #474 merged to main 08:14:29Z.
+  const implementation = linkedPr({ number: 465, mergedAt: "2026-10-20T17:04:51Z" });
+  const target = issue({
+    number: 464,
+    lastEditedAt: null,
+    reopenedAt: "2026-10-21T08:06:53Z",
+    linkedPullRequests: [implementation],
+    scopeHistory: scopeHistory({
+      closedAt: ["2026-10-20T17:05:25Z"],
+      reopenedAt: ["2026-10-21T08:06:53Z"],
+    }),
+  });
+  const options = {
+    repository,
+    releases: [release({ number: 474, mergedAt: "2026-10-21T08:14:29Z" })],
+    containsCommit: async () => true,
+  };
+
+  const decision = await evaluateIssueForCompletion(target, options);
+  assert.equal(decision.action, "close-completed");
+  assert.match(decision.detail, /release PR #474/u);
+
+  const legacy = await evaluateIssueForCompletion(issue({
+    number: 464,
+    reopenedAt: "2026-10-21T08:06:53Z",
+    linkedPullRequests: [implementation],
+  }), options);
+  assert.equal(legacy.code, "scope-changed-after-implementation");
+});
+
+test("a reopen whose preceding close was before the merge, or with a merge in between, still blocks", async () => {
+  const options = {
+    repository,
+    releases: [release({ number: 20, mergedAt: "2026-10-06T10:00:00Z" })],
+    containsCommit: async () => true,
+  };
+
+  const closedBeforeMerge = await evaluateIssueForCompletion(issue({
+    reopenedAt: "2026-10-05T10:00:00Z",
+    linkedPullRequests: [linkedPr({ mergedAt: "2026-10-01T10:00:00Z" })],
+    scopeHistory: scopeHistory({ closedAt: ["2026-09-30T10:00:00Z"], reopenedAt: ["2026-10-05T10:00:00Z"] }),
+  }), options);
+  assert.equal(closedBeforeMerge.code, "scope-changed-after-implementation");
+  assert.match(closedBeforeMerge.detail, /reopened at 2026-10-05T10:00:00Z/u);
+
+  const mergeBetweenCloseAndReopen = await evaluateIssueForCompletion(issue({
+    reopenedAt: "2026-10-05T10:00:00Z",
+    linkedPullRequests: [
+      linkedPr({ number: 10, mergedAt: "2026-10-01T10:00:00Z" }),
+      linkedPr({ number: 11, mergedAt: "2026-10-03T10:00:00Z", mergeCommitSha: "2222222222222222222222222222222222222222" }),
+    ],
+    scopeHistory: scopeHistory({ closedAt: ["2026-10-02T10:00:00Z"], reopenedAt: ["2026-10-05T10:00:00Z"] }),
+  }), options);
+  assert.equal(mergeBetweenCloseAndReopen.code, "scope-changed-after-implementation");
+
+  const reopenWithoutClose = await evaluateIssueForCompletion(issue({
+    reopenedAt: "2026-10-05T10:00:00Z",
+    linkedPullRequests: [linkedPr({ mergedAt: "2026-10-01T10:00:00Z" })],
+    scopeHistory: scopeHistory({ reopenedAt: ["2026-10-05T10:00:00Z"] }),
+  }), options);
+  assert.equal(reopenWithoutClose.code, "scope-changed-after-implementation");
+
+  const freshAfterReopen = await evaluateIssueForCompletion(issue({
+    reopenedAt: "2026-10-05T10:00:00Z",
+    linkedPullRequests: [
+      linkedPr({ number: 10, mergedAt: "2026-10-01T10:00:00Z" }),
+      linkedPr({ number: 12, mergedAt: "2026-10-05T12:00:00Z", mergeCommitSha: "3333333333333333333333333333333333333333" }),
+    ],
+    scopeHistory: scopeHistory({ closedAt: ["2026-09-30T10:00:00Z"], reopenedAt: ["2026-10-05T10:00:00Z"] }),
+  }), options);
+  assert.equal(freshAfterReopen.action, "close-completed");
+});
+
+test("checkbox-only edits are ignored; text edits and title changes after the merge block", async () => {
+  const options = {
+    repository,
+    releases: [release({ number: 20, mergedAt: "2026-10-06T10:00:00Z" })],
+    containsCommit: async () => true,
+  };
+  const merged = [linkedPr({ mergedAt: "2026-10-01T10:00:00Z" })];
+  const original = { editedAt: "2026-09-20T10:00:00Z", body: BODY_V1 };
+
+  const ticked = await evaluateIssueForCompletion(issue({
+    lastEditedAt: "2026-10-03T10:00:00Z",
+    linkedPullRequests: merged,
+    scopeHistory: scopeHistory({ bodyRevisions: [{ editedAt: "2026-10-03T10:00:00Z", body: BODY_V1_TICKED }, original] }),
+  }), options);
+  assert.equal(ticked.action, "close-completed");
+
+  const textChanged = await evaluateIssueForCompletion(issue({
+    lastEditedAt: "2026-10-03T10:00:00Z",
+    linkedPullRequests: merged,
+    scopeHistory: scopeHistory({ bodyRevisions: [original, { editedAt: "2026-10-03T10:00:00Z", body: BODY_V2 }] }),
+  }), options);
+  assert.equal(textChanged.code, "scope-changed-after-implementation");
+  assert.match(textChanged.detail, /text edited at 2026-10-03T10:00:00Z/u);
+
+  // every post-merge change is listed, in order
+  const several = await evaluateIssueForCompletion(issue({
+    lastEditedAt: "2026-10-04T10:00:00Z",
+    linkedPullRequests: merged,
+    scopeHistory: scopeHistory({
+      renamedAt: ["2026-10-02T10:00:00Z"],
+      bodyRevisions: [original, { editedAt: "2026-10-03T10:00:00Z", body: BODY_V2 }, { editedAt: "2026-10-04T10:00:00Z", body: BODY_V2 + "more\n" }],
+    }),
+  }), options);
+  assert.match(several.detail, /title changed at 2026-10-02T10:00:00Z, text edited at 2026-10-03T10:00:00Z, text edited at 2026-10-04T10:00:00Z/u);
+
+  const textChangedBeforeMerge = await evaluateIssueForCompletion(issue({
+    lastEditedAt: "2026-10-03T10:00:00Z",
+    linkedPullRequests: merged,
+    scopeHistory: scopeHistory({ bodyRevisions: [
+      original,
+      { editedAt: "2026-09-25T10:00:00Z", body: BODY_V2 },
+      { editedAt: "2026-10-03T10:00:00Z", body: BODY_V2.replace("- [ ] third", "- [x] third") },
+    ] }),
+  }), options);
+  assert.equal(textChangedBeforeMerge.action, "close-completed");
+
+  const renamed = await evaluateIssueForCompletion(issue({
+    linkedPullRequests: merged,
+    scopeHistory: scopeHistory({ renamedAt: ["2026-10-04T10:00:00Z"] }),
+  }), options);
+  assert.equal(renamed.code, "scope-changed-after-implementation");
+  assert.match(renamed.detail, /title changed at 2026-10-04T10:00:00Z/u);
+
+  const untouched = await evaluateIssueForCompletion(issue({
+    linkedPullRequests: merged,
+    scopeHistory: scopeHistory(),
+  }), options);
+  assert.equal(untouched.action, "close-completed");
+});
+
+test("unreadable timeline or edit history fails closed", () => {
+  const merges = ["2026-10-01T10:00:00Z"];
+
+  assert.equal(resolveScopeFreshnessFloor(issue({ scopeHistory: scopeHistory({ readable: false }) }), merges).blocker.code,
+    "scope-history-unreadable");
+  assert.equal(resolveScopeFreshnessFloor(issue({ scopeHistory: null }), merges).blocker.code, "scope-history-unreadable");
+
+  const tooFewRevisions = resolveScopeFreshnessFloor(issue({
+    lastEditedAt: "2026-10-03T10:00:00Z",
+    scopeHistory: scopeHistory({ bodyRevisions: [{ editedAt: "2026-10-03T10:00:00Z", body: BODY_V1 }] }),
+  }), merges);
+  assert.equal(tooFewRevisions.blocker.code, "scope-history-unreadable");
+  assert.match(tooFewRevisions.blocker.detail, /fewer than two/u);
+
+  const mismatch = resolveScopeFreshnessFloor(issue({
+    lastEditedAt: "2026-10-03T10:00:00Z",
+    scopeHistory: scopeHistory({ bodyRevisions: [
+      { editedAt: "2026-09-20T10:00:00Z", body: BODY_V1 },
+      { editedAt: "2026-10-02T10:00:00Z", body: BODY_V1_TICKED },
+    ] }),
+  }), merges);
+  assert.equal(mismatch.blocker.code, "scope-history-unreadable");
+  assert.match(mismatch.blocker.detail, /does not match lastEditedAt/u);
+
+  const missingBody = resolveScopeFreshnessFloor(issue({
+    lastEditedAt: "2026-10-03T10:00:00Z",
+    scopeHistory: scopeHistory({ bodyRevisions: [
+      { editedAt: "2026-09-20T10:00:00Z", body: null },
+      { editedAt: "2026-10-03T10:00:00Z", body: BODY_V1 },
+    ] }),
+  }), merges);
+  assert.equal(missingBody.blocker.code, "scope-history-unreadable");
+
+  const legacy = resolveScopeFreshnessFloor(issue({ lastEditedAt: "2026-10-03T10:00:00Z" }), merges);
+  assert.equal(legacy.blocker, null);
+  assert.equal(legacy.floor, "2026-10-03T10:00:00Z");
+});
+
+test("scope history is read lazily and only for Issues whose implementation evidence is otherwise complete", async () => {
+  let reads = 0;
+  const readScopeHistoryStub = async () => {
+    reads += 1;
+    return scopeHistory();
+  };
+  const options = {
+    repository,
+    releases: [release({ number: 20, mergedAt: "2026-10-06T10:00:00Z" })],
+    containsCommit: async () => true,
+    readScopeHistory: readScopeHistoryStub,
+  };
+
+  const awaiting = await evaluateIssueForCompletion(issue({ linkedPullRequests: [linkedPr()] }), {
+    ...options,
+    containsCommit: async () => false,
+  });
+  assert.equal(awaiting.code, "awaiting-production");
+  assert.equal(reads, 0);
+
+  const missing = await evaluateIssueForCompletion(issue({ linkedPullRequests: [], linkedPullRequestTotalCount: 0 }), options);
+  assert.equal(missing.code, "missing-development");
+  assert.equal(reads, 0);
+
+  const complete = await evaluateIssueForCompletion(issue({ reopenedAt: "2026-10-05T10:00:00Z" }), options);
+  assert.equal(complete.action, "close-completed");
+  assert.equal(reads, 1);
+
+  const unreadable = await evaluateIssueForCompletion(issue(), {
+    ...options,
+    readScopeHistory: async () => scopeHistory({ readable: false, detail: "timeline incomplete" }),
+  });
+  assert.equal(unreadable.code, "scope-history-unreadable");
+  assert.match(unreadable.detail, /timeline incomplete/u);
+});
+
+test("body revision reads paginate, reject deleted revisions and detect concurrent edits", async () => {
+  const pages = [
+    {
+      totalCount: 3,
+      pageInfo: { hasNextPage: true, endCursor: "c1" },
+      nodes: [{ editedAt: "2026-10-03T10:00:00Z", deletedAt: null, diff: BODY_V2 }, { editedAt: "2026-09-25T10:00:00Z", deletedAt: null, diff: BODY_V1_TICKED }],
+    },
+    {
+      totalCount: 3,
+      pageInfo: { hasNextPage: false, endCursor: null },
+      nodes: [{ editedAt: "2026-09-20T10:00:00Z", deletedAt: null, diff: BODY_V1 }],
+    },
+  ];
+  const cursors = [];
+  const client = {
+    graphql: async (query, variables) => {
+      assert.match(query, /query FrontendCompletionBodyRevisions/u);
+      cursors.push(variables.after);
+      return { repository: { issue: { number: 1, lastEditedAt: "2026-10-03T10:00:00Z", createdAt: "2026-09-20T10:00:00Z", includesCreatedEdit: true, userContentEdits: pages.shift() } } };
+    },
+  };
+  const result = await readIssueBodyRevisions(client, repository, 1);
+  assert.deepEqual(cursors, [null, "c1"]);
+  assert.equal(result.lastEditedAt, "2026-10-03T10:00:00Z");
+  assert.deepEqual(result.revisions.map((revision) => revision.editedAt), [
+    "2026-10-03T10:00:00Z", "2026-09-25T10:00:00Z", "2026-09-20T10:00:00Z",
+  ]);
+
+  const deletedClient = {
+    graphql: async () => ({ repository: { issue: { number: 1, lastEditedAt: "2026-10-03T10:00:00Z", includesCreatedEdit: true, userContentEdits: {
+      totalCount: 2,
+      pageInfo: { hasNextPage: false, endCursor: null },
+      nodes: [{ editedAt: "2026-10-03T10:00:00Z", deletedAt: "2026-10-04T10:00:00Z", diff: null }, { editedAt: "2026-09-20T10:00:00Z", deletedAt: null, diff: BODY_V1 }],
+    } } } }),
+  };
+  await assert.rejects(readIssueBodyRevisions(deletedClient, repository, 1), /deleted or unreadable body revision/u);
+
+  const incompleteClient = {
+    graphql: async () => ({ repository: { issue: { number: 1, lastEditedAt: "2026-10-03T10:00:00Z", includesCreatedEdit: true, userContentEdits: {
+      totalCount: 3,
+      pageInfo: { hasNextPage: false, endCursor: null },
+      nodes: [{ editedAt: "2026-10-03T10:00:00Z", deletedAt: null, diff: BODY_V1 }],
+    } } } }),
+  };
+  await assert.rejects(readIssueBodyRevisions(incompleteClient, repository, 1), /incomplete: read 1 of 3/u);
+
+  const concurrentClient = {
+    graphql: async () => ({ repository: { issue: { number: 1, lastEditedAt: "2026-10-05T10:00:00Z", includesCreatedEdit: true, userContentEdits: {
+      totalCount: 2,
+      pageInfo: { hasNextPage: false, endCursor: null },
+      nodes: [{ editedAt: "2026-10-05T10:00:00Z", deletedAt: null, diff: BODY_V2 }, { editedAt: "2026-09-20T10:00:00Z", deletedAt: null, diff: BODY_V1 }],
+    } } } }),
+  };
+  const concurrent = await readScopeHistory(concurrentClient, repository, {
+    number: 1,
+    lastEditedAt: "2026-10-03T10:00:00Z",
+    timeline: { readable: true, closedAt: [], reopenedAt: [], renamedAt: [] },
+  });
+  assert.equal(concurrent.readable, false);
+  assert.match(concurrent.detail, /edited while the sweep ran/u);
+
+  const unedited = await readScopeHistory({ graphql: async () => { throw new Error("must not query"); } }, repository, {
+    number: 1,
+    lastEditedAt: null,
+    timeline: { readable: true, closedAt: ["2026-10-02T10:00:00Z"], reopenedAt: ["2026-10-03T10:00:00Z"], renamedAt: [] },
+  });
+  assert.deepEqual(unedited, {
+    readable: true,
+    closedAt: ["2026-10-02T10:00:00Z"],
+    reopenedAt: ["2026-10-03T10:00:00Z"],
+    renamedAt: [],
+    bodyRevisions: [],
+  });
+
+  const unreadableTimeline = await readScopeHistory({}, repository, {
+    number: 1,
+    lastEditedAt: null,
+    timeline: { readable: false, detail: "Issue timeline is incomplete: read 100 of 120 closed/reopened/renamed events." },
+  });
+  assert.equal(unreadableTimeline.readable, false);
+  assert.match(unreadableTimeline.detail, /read 100 of 120/u);
+});
+
+test("the sweep replays FE#464 end to end and leaves an Issue with a truncated timeline open", async () => {
+  const mergeCommitSha = "1111111111111111111111111111111111111111";
+  const releaseHeadSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const patched = [];
+  const linked = {
+    totalCount: 1,
+    nodes: [{
+      number: 465,
+      state: "MERGED",
+      mergedAt: "2026-10-20T17:04:51Z",
+      baseRefName: "dev",
+      headRefName: "chore/issue-464",
+      headRefOid: "2222222222222222222222222222222222222222",
+      repository: { nameWithOwner: repository },
+      headRepository: { nameWithOwner: repository },
+      mergeCommit: { oid: mergeCommitSha },
+    }],
+  };
+  const client = {
+    graphql: async (query) => {
+      if (query.includes("query FrontendCompletionCandidates")) {
+        return { repository: { issues: {
+          totalCount: 2,
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [
+            {
+              number: 464, title: "FE#464", url: "https://github.com/ChipIn-one/chipin-frontend/issues/464", state: "OPEN",
+              createdAt: "2026-10-20T14:03:58Z", updatedAt: "2026-10-21T08:06:53Z", lastEditedAt: "2026-10-20T14:04:16Z",
+              linkedBranches: { totalCount: 0 },
+              timelineItems: { totalCount: 3, nodes: [
+                { __typename: "RenamedTitleEvent", createdAt: "2026-10-20T14:04:16Z" },
+                { __typename: "ClosedEvent", createdAt: "2026-10-20T17:05:25Z" },
+                { __typename: "ReopenedEvent", createdAt: "2026-10-21T08:06:53Z" },
+              ] },
+              closedByPullRequestsReferences: linked,
+            },
+            {
+              number: 2, title: "truncated", url: "https://github.com/ChipIn-one/chipin-frontend/issues/2", state: "OPEN",
+              createdAt: "2026-10-20T14:03:58Z", updatedAt: "2026-10-21T08:06:53Z", lastEditedAt: null,
+              linkedBranches: { totalCount: 0 },
+              timelineItems: { totalCount: 101, nodes: [{ __typename: "ReopenedEvent", createdAt: "2026-10-21T08:06:53Z" }] },
+              closedByPullRequestsReferences: linked,
+            },
+          ],
+        } } };
+      }
+      if (query.includes("query FrontendCompletionBodyRevisions")) {
+        return { repository: { issue: { number: 464, lastEditedAt: "2026-10-20T14:04:16Z", createdAt: "2026-10-20T14:03:58Z", includesCreatedEdit: true, userContentEdits: {
+          totalCount: 2,
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [
+            { editedAt: "2026-10-20T14:04:16Z", deletedAt: null, diff: BODY_V2 },
+            { editedAt: "2026-10-20T14:03:58Z", deletedAt: null, diff: BODY_V1 },
+          ],
+        } } } };
+      }
+      throw new Error("unexpected GraphQL operation");
+    },
+    listAll: async (path) => {
+      if (path.includes("/pulls?state=closed&base=main")) {
+        return [{
+          number: 474,
+          merged_at: "2026-10-21T08:14:29Z",
+          base: { ref: "main" },
+          head: { ref: "dev", sha: releaseHeadSha, repo: { full_name: repository } },
+        }];
+      }
+      if (path.endsWith("/dependencies/blocked_by") || path.endsWith("/sub_issues")) return [];
+      throw new Error("Unexpected list path: " + path);
+    },
+    request: async (path, options = {}) => {
+      if (path.includes("/compare/")) return { status: "ahead", merge_base_commit: { sha: mergeCommitSha } };
+      if ((options.method ?? "GET") === "GET") return { state: "open", updated_at: "2026-10-21T08:06:53Z" };
+      if (options.method === "PATCH") {
+        patched.push(path);
+        return { state: "closed", state_reason: "completed" };
+      }
+      throw new Error("Unexpected request path: " + path);
+    },
+  };
+
+  const results = await runCompletionSweep(client, repository, { reconcileProjectStatus: false });
+  assert.deepEqual(results.map((result) => [result.issue.number, result.decision.code]), [
+    [464, "closed-completed"],
+    [2, "scope-history-unreadable"],
+  ]);
+  assert.match(results[1].decision.detail, /read 1 of 101/u);
+  assert.deepEqual(patched, ["/repos/ChipIn-one/chipin-frontend/issues/464"]);
+});
+
+test("a history without the original body revision, invalid timestamps or a non-object callback result fail closed", async () => {
+  const merges = ["2026-10-01T10:00:00Z"];
+  const noOriginal = resolveScopeFreshnessFloor(issue({
+    lastEditedAt: "2026-10-03T10:00:00Z",
+    scopeHistory: scopeHistory({ bodyRevisions: [
+      { editedAt: "2026-10-02T10:00:00Z", body: "- [ ] a\n- [ ] NEW SCOPE" },
+      { editedAt: "2026-10-03T10:00:00Z", body: "- [x] a\n- [ ] NEW SCOPE" },
+    ] }),
+  }), merges);
+  assert.equal(noOriginal.blocker, null, "without createdAt the earliest revision cannot be checked and legacy comparison applies");
+  const withCreatedAt = resolveScopeFreshnessFloor({ ...issue({
+    lastEditedAt: "2026-10-03T10:00:00Z",
+    scopeHistory: scopeHistory({ bodyRevisions: [
+      { editedAt: "2026-10-02T10:00:00Z", body: "- [ ] a\n- [ ] NEW SCOPE" },
+      { editedAt: "2026-10-03T10:00:00Z", body: "- [x] a\n- [ ] NEW SCOPE" },
+    ] }),
+  }), createdAt: "2026-09-20T10:00:00Z" }, merges);
+  assert.equal(withCreatedAt.blocker.code, "scope-history-unreadable");
+  assert.match(withCreatedAt.blocker.detail, /not the original body/u);
+
+  assert.equal(resolveScopeFreshnessFloor(issue({ scopeHistory: scopeHistory({ reopenedAt: ["garbage"] }) }), merges).blocker.code, "scope-history-unreadable");
+  assert.equal(resolveScopeFreshnessFloor(issue({ scopeHistory: scopeHistory({ closedAt: ["2026-10-02T10:00:00Z"], reopenedAt: ["2026-10-05T10:00:00Z"] }) }), ["not-a-date"]).blocker.code, "scope-history-unreadable");
+
+  const undefinedCallback = await evaluateIssueForCompletion(issue(), {
+    repository,
+    releases: [release({ number: 20, mergedAt: "2026-10-06T10:00:00Z" })],
+    containsCommit: async () => true,
+    readScopeHistory: async () => undefined,
+  });
+  assert.equal(undefinedCallback.code, "scope-history-unreadable");
+
+  const noCreatedEdit = {
+    graphql: async () => ({ repository: { issue: { number: 1, lastEditedAt: "2026-10-03T10:00:00Z", includesCreatedEdit: false, userContentEdits: {
+      totalCount: 1, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ editedAt: "2026-10-03T10:00:00Z", deletedAt: null, diff: BODY_V1 }],
+    } } } }),
+  };
+  await assert.rejects(readIssueBodyRevisions(noCreatedEdit, repository, 1), /does not include the original revision/u);
+  assert.equal(normalizeCheckboxes("- [x] a\r\n"), "- [ ] a\n");
+});
+
+test("timeline normalization fails closed on malformed connections", () => {
+  assert.equal(normalizeTimeline(undefined).readable, false);
+  assert.equal(normalizeTimeline({ nodes: [] }).readable, false, "missing totalCount");
+  assert.equal(normalizeTimeline({ totalCount: "1", nodes: [] }).readable, false, "non-integer totalCount");
+  assert.match(normalizeTimeline({ totalCount: 2, nodes: [{ __typename: "ClosedEvent", createdAt: "2026-10-02T10:00:00Z" }] }).detail, /read 1 of 2/u);
+  assert.match(normalizeTimeline({ totalCount: 1, nodes: [{ __typename: "ReopenedEvent", createdAt: "yesterday" }] }).detail, /no readable timestamp/u);
+  assert.match(normalizeTimeline({ totalCount: 1, nodes: [{ __typename: "ClosedEvent" }] }).detail, /no readable timestamp/u);
+  const ok = normalizeTimeline({ totalCount: 3, nodes: [
+    null,
+    { __typename: "ClosedEvent", createdAt: "2026-10-02T10:00:00Z" },
+    { __typename: "ReopenedEvent", createdAt: "2026-10-03T10:00:00Z" },
+    { __typename: "RenamedTitleEvent", createdAt: "2026-10-04T10:00:00Z" },
+  ] });
+  assert.deepEqual(ok, { readable: true, closedAt: ["2026-10-02T10:00:00Z"], reopenedAt: ["2026-10-03T10:00:00Z"], renamedAt: ["2026-10-04T10:00:00Z"] });
+});
+
+test("multiple close/reopen pairs and equal-second boundaries", async () => {
+  const options = { repository, releases: [release({ number: 20, mergedAt: "2026-10-06T10:00:00Z" })], containsCommit: async () => true };
+  const merged = [linkedPr({ mergedAt: "2026-10-01T10:00:00Z" })];
+
+  // close/reopen twice after the merge: both pairs are early manual closes -> completes
+  const twice = await evaluateIssueForCompletion(issue({
+    linkedPullRequests: merged,
+    scopeHistory: scopeHistory({ closedAt: ["2026-10-02T10:00:00Z", "2026-10-04T10:00:00Z"], reopenedAt: ["2026-10-03T10:00:00Z", "2026-10-05T10:00:00Z"] }),
+  }), options);
+  assert.equal(twice.action, "close-completed");
+
+  // first pair before the merge (blocks), second after: the first reopen still counts
+  const mixed = await evaluateIssueForCompletion(issue({
+    linkedPullRequests: [linkedPr({ mergedAt: "2026-10-03T12:00:00Z" })],
+    scopeHistory: scopeHistory({ closedAt: ["2026-09-30T10:00:00Z", "2026-10-04T10:00:00Z"], reopenedAt: ["2026-10-03T13:00:00Z", "2026-10-05T10:00:00Z"] }),
+  }), options);
+  assert.equal(mixed.code, "scope-changed-after-implementation");
+
+  // a close in the same second as the merge (closing-keyword shape) counts as after the merge
+  const sameSecondClose = await evaluateIssueForCompletion(issue({
+    linkedPullRequests: merged,
+    scopeHistory: scopeHistory({ closedAt: ["2026-10-01T10:00:00Z"], reopenedAt: ["2026-10-02T10:00:00Z"] }),
+  }), options);
+  assert.equal(sameSecondClose.action, "close-completed");
+
+  // a merge in the same second as the reopen does not refresh evidence
+  const sameSecondReopen = await evaluateIssueForCompletion(issue({
+    linkedPullRequests: [linkedPr({ mergedAt: "2026-10-05T10:00:00Z" })],
+    scopeHistory: scopeHistory({ reopenedAt: ["2026-10-05T10:00:00Z"] }),
+  }), options);
+  assert.equal(sameSecondReopen.code, "scope-changed-after-implementation");
+});
+
+test("body revision reads reject a missing Issue or a mismatched number", async () => {
+  await assert.rejects(readIssueBodyRevisions({ graphql: async () => ({ repository: { issue: null } }) }, repository, 1), /unreadable/u);
+  await assert.rejects(readIssueBodyRevisions({ graphql: async () => ({ repository: { issue: { number: 2, includesCreatedEdit: true, userContentEdits: { totalCount: 0, pageInfo: { hasNextPage: false }, nodes: [] } } } }) }, repository, 1), /unreadable/u);
+});
+
+test("the sweep leaves an Issue open whose text was edited after the merge, through the real history read", async () => {
+  const mergeCommitSha = "1111111111111111111111111111111111111111";
+  const releaseHeadSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const client = {
+    graphql: async (query) => {
+      if (query.includes("query FrontendCompletionCandidates")) {
+        return { repository: { issues: { totalCount: 1, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{
+          number: 7, title: "edited", url: "u", state: "OPEN", createdAt: "2026-09-20T10:00:00Z", updatedAt: "2026-10-03T10:00:00Z", lastEditedAt: "2026-10-03T10:00:00Z",
+          linkedBranches: { totalCount: 0 },
+          timelineItems: { totalCount: 0, nodes: [] },
+          closedByPullRequestsReferences: { totalCount: 1, nodes: [{
+            number: 10, state: "MERGED", mergedAt: "2026-10-01T10:00:00Z", baseRefName: "dev", headRefName: "feat/issue-7", headRefOid: "2222222222222222222222222222222222222222",
+            repository: { nameWithOwner: repository }, headRepository: { nameWithOwner: repository }, mergeCommit: { oid: mergeCommitSha },
+          }] },
+        }] } } };
+      }
+      return { repository: { issue: { number: 7, createdAt: "2026-09-20T10:00:00Z", lastEditedAt: "2026-10-03T10:00:00Z", includesCreatedEdit: true, userContentEdits: {
+        totalCount: 2, pageInfo: { hasNextPage: false, endCursor: null },
+        nodes: [{ editedAt: "2026-10-03T10:00:00Z", deletedAt: null, diff: BODY_V2 }, { editedAt: "2026-09-20T10:00:00Z", deletedAt: null, diff: BODY_V1 }],
+      } } } };
+    },
+    listAll: async (path) => {
+      if (path.includes("/pulls?state=closed&base=main")) return [{ number: 20, merged_at: "2026-10-02T10:00:00Z", base: { ref: "main" }, head: { ref: "dev", sha: releaseHeadSha, repo: { full_name: repository } } }];
+      return [];
+    },
+    request: async (path, options = {}) => {
+      if (path.includes("/compare/")) return { status: "ahead", merge_base_commit: { sha: mergeCommitSha } };
+      if (options.method === "PATCH") throw new Error("must not close");
+      return { state: "open", updated_at: "2026-10-03T10:00:00Z" };
+    },
+  };
+  const results = await runCompletionSweep(client, repository, { reconcileProjectStatus: false });
+  assert.deepEqual(results.map((result) => result.decision.code), ["scope-changed-after-implementation"]);
+  assert.match(results[0].decision.detail, /text edited at 2026-10-03T10:00:00Z/u);
 });
