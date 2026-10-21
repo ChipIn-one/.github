@@ -35,7 +35,7 @@ on:
           - Major
           - Minor
       owner:
-        description: "Explicit native owner GitHub login (mandatory for KB; FE/BE use fixed policy)"
+        description: "Explicit native owner GitHub login (mandatory for KB; FE/BE/.github use the registry owner)"
         required: false
         default: ''
         type: string

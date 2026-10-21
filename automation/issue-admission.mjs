@@ -6,14 +6,30 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { GitHubClient, readIssueSnapshot, readProjectSnapshot, verifyOrgSchema, verifyProjectSnapshot } from './github-metadata.mjs';
 import { dependencyBlockers } from './relationships.mjs';
+import { getRepositoryProfile, listRepositories } from './registry.mjs';
 
 export const ADMISSION_CONTRACT = 'chipin-issue-admission/v1';
 export const ADMISSION_MAX_AGE_MS = 120_000;
-const REQUIRED = new Map([
-  ['ChipIn-one/chipin-frontend', 'syllik'],
-  ['ChipIn-one/chipin-backend', 'olegbal'],
-]);
-const REPOSITORIES = new Set([...REQUIRED.keys(), 'ChipIn-one/chipin-knowledge-base']);
+const LOGIN = /^[a-z\d](?:[a-z\d-]{0,37})$/i;
+const ISSUE_REF = /^(ChipIn-one\/[A-Za-z0-9_.-]+)#([1-9]\d*)$/;
+
+// Admission scope is the registry (#183): every repository whose `admission` capability is not
+// `off`, with the required owner from its record (`owner: null` means an explicit --owner).
+export function admissionProfile(repository) {
+  const profile = getRepositoryProfile(repository);
+  // Exact spelling only: the registry lookup is case-insensitive, but GitHub resolves mis-cased
+  // repository names too, so a mis-cased target must be rejected before any write, as before.
+  if (!profile || profile.repository !== repository || profile.capabilities.admission === 'off') return null;
+  return profile;
+}
+export function isAdmissionRepository(repository) { return admissionProfile(repository) !== null; }
+export function admissionRepositories() { return listRepositories({ capability: 'admission' }); }
+export function requiresExplicitOwner(repository) { return admissionProfile(repository)?.owner === null; }
+export function parseAdmissionIssue(value) {
+  const match = ISSUE_REF.exec(String(value ?? ''));
+  if (!match || !isAdmissionRepository(match[1])) return null;
+  return { canonical: match[1] + '#' + match[2], repository: match[1], number: Number(match[2]) };
+}
 const PLACEHOLDER = /^(?:tbd|todo|n\/a|none|placeholder|coming soon|\.\.\.|-)\s*[.!]?$/i;
 
 export function validateBody(title, body) {
@@ -38,11 +54,12 @@ export function validateBody(title, body) {
 }
 
 export function requiredOwner(repository, selectedOwner = null) {
-  if (!REPOSITORIES.has(repository)) throw new Error('Unsupported admission repository: ' + repository);
-  const fixed = REQUIRED.get(repository);
+  const profile = admissionProfile(repository);
+  if (!profile) throw new Error('Unsupported admission repository: ' + repository);
+  const fixed = profile.owner;
   if (fixed && selectedOwner && selectedOwner !== fixed) throw new Error('Owner policy conflict: ' + repository + ' requires ' + fixed + '.');
   if (fixed) return fixed;
-  if (!/^[a-z\d](?:[a-z\d-]{0,37})$/i.test(selectedOwner || '')) throw new Error('KB requires an explicitly selected --owner GitHub login.');
+  if (!LOGIN.test(selectedOwner || '')) throw new Error(repository + ' requires an explicitly selected --owner GitHub login (registry owner is null).');
   return selectedOwner;
 }
 
@@ -183,11 +200,11 @@ function args(argv) {
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const opts = args(argv);
-  const match = /^(ChipIn-one\/[^#]+)#([1-9]\d*)$/.exec(opts.issue ?? '');
-  if (!match) throw new Error('Exact --issue owner/repo#number is required.');
+  const parsed = parseAdmissionIssue(opts.issue ?? '');
+  if (!parsed) throw new Error('Exact --issue owner/repo#number in a registry repository with admission on is required.');
   const config = JSON.parse(await readFile(resolve(opts.config ?? 'automation/metadata-migration.config.json'), 'utf8'));
   const result = await readAdmission({
-    client: new GitHubClient(env.GITHUB_TOKEN), config, repository: match[1], number: Number(match[2]),
+    client: new GitHubClient(env.GITHUB_TOKEN), config, repository: parsed.repository, number: parsed.number,
     selectedOwner: opts.owner ?? null, expectedRevision: opts['expected-revision'] ?? null,
   });
   if (opts.output) await writeFile(resolve(opts.output), JSON.stringify(result.receipt, null, 2) + '\n');

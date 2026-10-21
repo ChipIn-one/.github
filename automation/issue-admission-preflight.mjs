@@ -6,7 +6,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { GitHubClient } from './github-metadata.mjs';
-import { readAdmission } from './issue-admission.mjs';
+import { parseAdmissionIssue, readAdmission, requiresExplicitOwner } from './issue-admission.mjs';
 import { GhReadClient, PreflightError, safeAdmissionDiagnostics, retryTransient, selectDirectTransport } from './issue-admission-transport.mjs';
 import { createAdmissionEnvelope } from './issue-admission-evidence.mjs';
 
@@ -20,17 +20,19 @@ export function parsePreflightArgs(argv) {
     }
     params[key] = argv[i + 1];
   }
-  const match = /^(ChipIn-one\/(?:chipin-frontend|chipin-backend|chipin-knowledge-base))#([1-9]\d*)$/.exec(params.issue ?? '');
-  if (!match || (params.owner && !/^[a-z\d](?:[a-z\d-]{0,37})$/i.test(params.owner)) ||
-      (match[1] === 'ChipIn-one/chipin-knowledge-base' && !params.owner) ||
+  const parsed = parseAdmissionIssue(params.issue ?? '');
+  if (!parsed || (params.owner && !/^[a-z\d](?:[a-z\d-]{0,37})$/i.test(params.owner)) ||
+      (requiresExplicitOwner(parsed.repository) && !params.owner) ||
       (params['expected-revision'] && !/^[a-f0-9]{64}$/.test(params['expected-revision'])) ||
       (!!params.producer !== !!params['request-id'])) throw new PreflightError('INVALID_REQUEST');
-  return { ...params, repository: match[1], number: Number(match[2]) };
+  return { ...params, repository: parsed.repository, number: parsed.number };
 }
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 function metadataSha(path) {
-  // Safe in trusted Actions producer only. No task-controlled checkout or ref.
+  // Safe in trusted Actions producer only. No task-controlled checkout or ref. Note: the admission scope
+  // and owner policy live in workflow-registry.yaml/registry.mjs (#183); their integrity is covered by
+  // sourceSha (the whole trusted tree), readerBlobSha pins the reader module only.
   return execFileSync('git', ['rev-parse', `HEAD:${path}`], { encoding: 'utf8', timeout: 5000 }).trim();
 }
 function producerContext(env, configBytes) {

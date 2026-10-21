@@ -6,24 +6,25 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import { parseAdmissionIssue, requiresExplicitOwner } from './issue-admission.mjs';
 
 const repo = 'ChipIn-one/.github', human = 'syllik', bot = 'github-actions[bot]';
 const workflow = '.github/workflows/issue-admission-human-orchestrator.yml';
 const apiRoot = 'https://api.github.com/repos/' + repo;
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const positive = n => /^[1-9][0-9]*$/.test(String(n ?? '')) && Number.isSafeInteger(Number(n));
-const issueRx = /^ChipIn-one\/(?:chipin-frontend|chipin-backend|chipin-knowledge-base)#[1-9][0-9]*$/;
 const loginRx = /^[a-z0-9](?:[a-z0-9-]{0,37})$/i;
 const uuidRx = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const paths = new Set([workflow, workflow + '@master', workflow + '@refs/heads/master']);
 const fail = () => { throw Error('UNTRUSTED_ORCHESTRATOR_REQUEST'); };
 
 export function validateInputs({issue, owner = '', expected_revision = ''}) {
-  if (typeof issue !== 'string' || !issueRx.test(issue) ||
+  const parsed = typeof issue === 'string' ? parseAdmissionIssue(issue) : null;
+  if (!parsed ||
       typeof owner !== 'string' || (owner && !loginRx.test(owner)) ||
       typeof expected_revision !== 'string' ||
       (expected_revision && !/^[0-9a-f]{64}$/.test(expected_revision)) ||
-      (issue.includes('/chipin-knowledge-base#') ? !owner : !!owner)) fail();
+      (requiresExplicitOwner(parsed.repository) ? !owner : !!owner)) fail();
   return {issue, owner, expected_revision};
 }
 
