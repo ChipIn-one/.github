@@ -19,10 +19,16 @@ const OPEN_ISSUES_QUERY = [
   "      totalCount",
   "      pageInfo { hasNextPage endCursor }",
   "      nodes {",
-  "        number title url state updatedAt lastEditedAt",
+  "        number title url state createdAt updatedAt lastEditedAt",
   "        linkedBranches(first: 100) { totalCount }",
-  "        timelineItems(last: 1, itemTypes: [REOPENED_EVENT]) {",
-  "          nodes { __typename ... on ReopenedEvent { createdAt } }",
+  "        timelineItems(last: 100, itemTypes: [CLOSED_EVENT, REOPENED_EVENT, RENAMED_TITLE_EVENT]) {",
+  "          totalCount",
+  "          nodes {",
+  "            __typename",
+  "            ... on ClosedEvent { createdAt }",
+  "            ... on ReopenedEvent { createdAt }",
+  "            ... on RenamedTitleEvent { createdAt }",
+  "          }",
   "        }",
   "        closedByPullRequestsReferences(first: 100, includeClosedPrs: true) {",
   "          totalCount",
@@ -33,6 +39,21 @@ const OPEN_ISSUES_QUERY = [
   "            mergeCommit { oid }",
   "          }",
   "        }",
+  "      }",
+  "    }",
+  "  }",
+  "}",
+].join("\n");
+
+const BODY_REVISIONS_QUERY = [
+  "query FrontendCompletionBodyRevisions($owner: String!, $repo: String!, $number: Int!, $after: String) {",
+  "  repository(owner: $owner, name: $repo) {",
+  "    issue(number: $number) {",
+  "      number lastEditedAt",
+  "      userContentEdits(first: 100, after: $after) {",
+  "        totalCount",
+  "        pageInfo { hasNextPage endCursor }",
+  "        nodes { editedAt deletedAt diff }",
   "      }",
   "    }",
   "  }",
@@ -114,12 +135,37 @@ export async function readRequiredRelationships(client, repository, number) {
   };
 }
 
+function normalizeTimeline(connection) {
+  const nodes = Array.isArray(connection?.nodes) ? connection.nodes.filter(Boolean) : null;
+  if (!nodes || !Number.isInteger(connection?.totalCount)) {
+    return { readable: false, detail: "Issue timeline (closed/reopened/renamed events) is unreadable." };
+  }
+  if (nodes.length !== connection.totalCount) {
+    return {
+      readable: false,
+      detail: "Issue timeline is incomplete: read " + nodes.length + " of " + connection.totalCount
+        + " closed/reopened/renamed events.",
+    };
+  }
+  const byType = (typename) => nodes
+    .filter((event) => event.__typename === typename)
+    .map((event) => event.createdAt ?? null);
+  const timeline = {
+    closedAt: byType("ClosedEvent"),
+    reopenedAt: byType("ReopenedEvent"),
+    renamedAt: byType("RenamedTitleEvent"),
+  };
+  for (const values of Object.values(timeline)) {
+    if (values.some((value) => typeof value !== "string" || !Number.isFinite(Date.parse(value)))) {
+      return { readable: false, detail: "An Issue timeline event has no readable timestamp." };
+    }
+  }
+  return { readable: true, ...timeline };
+}
+
 function normalizeIssue(node) {
-  const reopenedAt = (node.timelineItems?.nodes ?? [])
-    .map((event) => event?.createdAt ?? null)
-    .filter(Boolean)
-    .sort()
-    .at(-1) ?? null;
+  const timeline = normalizeTimeline(node.timelineItems);
+  const reopenedAt = timeline.readable ? (timeline.reopenedAt.slice().sort().at(-1) ?? null) : null;
   const development = node.closedByPullRequestsReferences ?? { totalCount: 0, nodes: [] };
 
   return {
@@ -127,9 +173,11 @@ function normalizeIssue(node) {
     title: node.title ?? "",
     url: node.url ?? null,
     state: node.state ?? null,
+    createdAt: node.createdAt ?? null,
     updatedAt: node.updatedAt ?? null,
     lastEditedAt: node.lastEditedAt ?? null,
     reopenedAt,
+    timeline,
     linkedBranchCount: Number(node.linkedBranches?.totalCount ?? 0),
     linkedPullRequestTotalCount: Number(development.totalCount ?? 0),
     linkedPullRequests: (development.nodes ?? []).filter(Boolean).map(normalizePullRequest),
@@ -164,6 +212,71 @@ export async function readOpenFrontendIssues(client, repository = FRONTEND_REPOS
       + issues.length + " of " + totalCount);
   }
   return issues;
+}
+
+export async function readIssueBodyRevisions(client, repository, number) {
+  const { owner, repo } = splitRepository(repository);
+  const revisions = [];
+  let after = null;
+  let totalCount = null;
+  let lastEditedAt = null;
+
+  for (;;) {
+    const data = await client.graphql(BODY_REVISIONS_QUERY, { owner, repo, number, after });
+    const issue = data?.repository?.issue;
+    const connection = issue?.userContentEdits;
+    if (issue?.number !== number || !connection?.pageInfo || !Array.isArray(connection.nodes)) {
+      throw new Error("Issue #" + number + " edit history is unreadable");
+    }
+    totalCount ??= connection.totalCount;
+    lastEditedAt ??= issue.lastEditedAt ?? null;
+    for (const node of connection.nodes.filter(Boolean)) {
+      if (node.deletedAt || typeof node.diff !== "string") {
+        throw new Error("Issue #" + number + " has a deleted or unreadable body revision at "
+          + (node.editedAt ?? "unknown"));
+      }
+      revisions.push({ editedAt: node.editedAt ?? null, body: node.diff });
+    }
+    if (!connection.pageInfo.hasNextPage) break;
+    if (!connection.pageInfo.endCursor) {
+      throw new Error("Issue #" + number + " edit history pagination cursor is missing");
+    }
+    after = connection.pageInfo.endCursor;
+  }
+
+  if (!Number.isInteger(totalCount) || revisions.length !== totalCount) {
+    throw new Error("Issue #" + number + " edit history is incomplete: read "
+      + revisions.length + " of " + (totalCount ?? "unknown"));
+  }
+  return { lastEditedAt, revisions };
+}
+
+export async function readScopeHistory(client, repository, issue) {
+  if (!issue.timeline || issue.timeline.readable !== true) {
+    return { readable: false, detail: issue.timeline?.detail ?? "Issue timeline was not read." };
+  }
+  const history = {
+    readable: true,
+    closedAt: issue.timeline.closedAt,
+    reopenedAt: issue.timeline.reopenedAt,
+    renamedAt: issue.timeline.renamedAt,
+    bodyRevisions: [],
+  };
+  if (!issue.lastEditedAt) return history;
+
+  try {
+    const { lastEditedAt, revisions } = await readIssueBodyRevisions(client, repository, issue.number);
+    if (lastEditedAt !== issue.lastEditedAt) {
+      return {
+        readable: false,
+        detail: "Issue #" + issue.number + " was edited while the sweep ran (lastEditedAt "
+          + issue.lastEditedAt + " -> " + lastEditedAt + ").",
+      };
+    }
+    return { ...history, bodyRevisions: revisions };
+  } catch (error) {
+    return { readable: false, detail: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export async function readProductionReleases(client, repository = FRONTEND_REPOSITORY) {
@@ -366,6 +479,7 @@ export async function runCompletionSweep(
       repository,
       releases,
       containsCommit,
+      readScopeHistory: (candidate) => readScopeHistory(client, repository, candidate),
     });
     if (decision.action !== "close-completed") {
       const projectReconciliation = await reconcileProject(issue);
