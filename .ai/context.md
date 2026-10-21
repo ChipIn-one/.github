@@ -17,3 +17,4 @@
 - Repository-specific completion triggers remain repository-owned. For frontend code work, `dev` is integration only and completion is after the required implementation reaches production branch `main`.
 - Project automation is fail-closed: unreadable, missing, ambiguous, unauthorized, or inconsistent structured state blocks mutation.
 - Human merge only.
+- `workflow-registry.yaml` is the machine-readable registry of repositories in the ChipIn workflow standard; `docs/workflow/` is the standard itself (v1, owner-approved 2026-10-21, epic #149). Repository names, branches and owners belong in the registry, not in new code literals.

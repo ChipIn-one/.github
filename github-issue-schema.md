@@ -4,6 +4,7 @@ Last reviewed: 2026-10-08
 
 This document defines the shared GitHub task metadata model for ChipIn repositories.
 It does not define repository-specific implementation, review, build, test, deploy, or agent-execution rules.
+Which repositories take part in this model, with which branches, owners and capabilities, is defined by the [ChipIn Workflow Standard v1](docs/workflow/README.md) and `workflow-registry.yaml`.
 
 ## Authorities
 

@@ -6,10 +6,13 @@ import { GitHubClient } from "./github-metadata.mjs";
 import { preflightPr } from "./issue-admission-pr.mjs";
 import { readAdmission, assertFreshReceipt } from "./issue-admission.mjs";
 import { reconcileDevelopmentLink, readTaskIdentityMarker } from "./development-link.mjs";
+import { loadRegistry, requireRepositoryProfile } from "./registry.mjs";
 
 const REPO = "ChipIn-one/chipin-frontend";
 const ROOT = "/repos/" + REPO;
-const PROJECT = 5;
+// Project number and the dev -> main route come from workflow-registry.yaml.
+const PROJECT = loadRegistry().project.number;
+const { integration: INTEGRATION_BRANCH, promotion: PROMOTION_BRANCH } = requireRepositoryProfile(REPO).branches;
 const CATEGORIES = { implementation: "pr:implementation", release: "pr:release" };
 const PROJECT_QUERY = 'query PRMembership($after:String){ organization(login:"ChipIn-one"){ projectV2(number:5){id items(first:100,after:$after){totalCount pageInfo{hasNextPage endCursor} nodes{id content{__typename ... on PullRequest{id number repository{nameWithOwner}}}}}}}}';
 const PROJECT_ADD = 'mutation AddPR($project:ID!,$pr:ID!){addProjectV2ItemById(input:{projectId:$project,contentId:$pr}){item{id}}}';
@@ -27,8 +30,8 @@ export function isDependabotPR(pr) {
 
 export function classifyPR(pr) {
   if (pr.base?.repo?.full_name !== REPO || pr.head?.repo?.full_name !== REPO) throw new Error("SCOPE: same-repo frontend PR only");
-  if (pr.base.ref === "dev" && !["main", "dev"].includes(pr.head.ref)) return "implementation";
-  if (pr.base.ref === "main" && pr.head.ref === "dev") return "release";
+  if (pr.base.ref === INTEGRATION_BRANCH && ![PROMOTION_BRANCH, INTEGRATION_BRANCH].includes(pr.head.ref)) return "implementation";
+  if (pr.base.ref === PROMOTION_BRANCH && pr.head.ref === INTEGRATION_BRANCH) return "release";
   throw new Error("ROUTE: only implementation→dev and dev→main");
 }
 export function implementationIdentity(body) {
@@ -172,7 +175,7 @@ export async function verifyRelease(client,refs) {
   const issues=[];
   for (const num of refs.prs) {
     const impl=await client.request(ROOT+"/pulls/"+num);
-    if (!impl?.merged_at || impl.base?.ref!=="dev") throw new Error("RELEASE: PR #"+num+" not merged into dev");
+    if (!impl?.merged_at || impl.base?.ref!==INTEGRATION_BRANCH) throw new Error("RELEASE: PR #"+num+" not merged into "+INTEGRATION_BRANCH);
     const task=implementationIdentity(impl.body);
     // Release verification is read-only. It may NEVER add a missing native link
     // to an already-merged implementation PR (especially a terminal Issue).
@@ -382,7 +385,11 @@ export async function reconcilePR(client,policy,number,expectedSha,{admissionCli
 }
 async function main(){
   const {readFile}=await import("node:fs/promises");
-  const policy=JSON.parse(await readFile(new URL("./pr-metadata.config.json",import.meta.url),"utf8"));
+  const config=JSON.parse(await readFile(new URL("./pr-metadata.config.json",import.meta.url),"utf8"));
+  // Repository owner comes from the registry; the config keeps only PR-metadata-specific policy.
+  const profile=requireRepositoryProfile(config.repository);
+  if (profile.capabilities.prMetadata==="off") throw new Error("CONFIG: prMetadata is off for "+config.repository+" in workflow-registry.yaml");
+  const policy={...config,ownerPolicy:{...config.ownerPolicy,implementationOwner:profile.owner,releaseOwner:profile.owner}};
   const admissionConfig=JSON.parse(await readFile(new URL("./metadata-migration.config.json",import.meta.url),"utf8"));
   const client=new GitHubClient(process.env.CHIPIN_PR_METADATA_TOKEN);
   const admissionClient=new GitHubClient(process.env.CHIPIN_ADMISSION_READ_TOKEN);

@@ -3,8 +3,6 @@
   "project": 5,
   "ownerPolicy": {
     "allowIssueOwner": true,
-    "implementationOwner": "syllik",
-    "releaseOwner": "syllik",
     "allowAuthorFallback": false
   },
   "reviewerPolicy": {

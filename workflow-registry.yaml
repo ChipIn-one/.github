@@ -1,0 +1,62 @@
+# ChipIn workflow registry — single source for which repositories take part in the
+# shared workflow, with which branches, owner and capabilities.
+# Spec: docs/workflow/README.md §2. Loader and validator: automation/registry.mjs.
+#
+# This file is parsed by a strict built-in YAML subset reader (no dependencies):
+# block mappings, block sequences, one-line [flow] sequences, one-line {flow} mappings,
+# plain/quoted scalars, null, booleans and integers. Anchors, tags, multi-line scalars
+# and duplicate keys are rejected. Unknown keys fail validation.
+schemaVersion: 1
+standardVersion: v1            # tag line of the standard this registry agrees with
+project:
+  number: 5
+  statuses: [Backlog, Todo, In Progress, Done]   # Done is a derived mirror only
+repositories:
+  - repository: ChipIn-one/chipin-frontend
+    kind: code                 # code | docs | meta
+    visibility: public
+    owner: syllik              # required native assignee; null is allowed for docs (chosen at intake)
+    branches: { default: main, integration: dev, promotion: main }
+    deploymentProfile: production      # none | staging | production
+    completion: production-merge       # production-merge | integration-merge | deployment-receipt | manual
+    protection: ruleset                # ruleset | protection | unavailable (Free + private)
+    requiredChecks: [frontend-ci]
+    capabilities:
+      admission: required       # required | advisory | off
+      developmentLink: required
+      prMetadata: required
+      relationships: required   # blocked-by gate in admission
+      completion: automatic     # automatic | manual
+      milestones: enabled
+      dependabot: required
+      agentRouting: required    # AGENTS.md routing block + .ai/context.md
+  - repository: ChipIn-one/chipin-backend
+    kind: code
+    visibility: private
+    owner: olegbal
+    branches: { default: develop, integration: develop }
+    deploymentProfile: production
+    completion: manual                  # until the backend completion decision (#156)
+    protection: unavailable             # until the Team upgrade (#161)
+    requiredChecks: [Unit and integration tests]
+    capabilities: { admission: advisory, developmentLink: required, prMetadata: required, relationships: required, completion: manual, milestones: enabled, dependabot: required, agentRouting: required }
+  - repository: ChipIn-one/chipin-knowledge-base
+    kind: docs
+    visibility: private
+    owner: null
+    branches: { default: master, integration: master }
+    deploymentProfile: none
+    completion: manual
+    protection: unavailable
+    requiredChecks: []
+    capabilities: { admission: advisory, developmentLink: required, prMetadata: off, relationships: required, completion: manual, milestones: off, dependabot: required, agentRouting: required }
+  - repository: ChipIn-one/.github
+    kind: meta
+    visibility: public
+    owner: syllik
+    branches: { default: master, integration: master }
+    deploymentProfile: none
+    completion: integration-merge
+    protection: ruleset
+    requiredChecks: [evaluate-fixtures]
+    capabilities: { admission: advisory, developmentLink: required, prMetadata: off, relationships: required, completion: manual, milestones: off, dependabot: required, agentRouting: required }
