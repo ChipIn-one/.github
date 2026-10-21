@@ -12,6 +12,7 @@ const FE = 'ChipIn-one/chipin-frontend';
 const BE = 'ChipIn-one/chipin-backend';
 const KB = 'ChipIn-one/chipin-knowledge-base';
 const META = 'ChipIn-one/.github';
+const NOTIF = 'ChipIn-one/chipin-notifications';
 const V1 = 'a'.repeat(40);
 const V11 = 'b'.repeat(40);
 const profile = name => getRepositoryProfile(name);
@@ -135,6 +136,7 @@ function fakeSource(over = {}) {
     [BE]: [workflow(uses('issue-admission-action', 'f'.repeat(40)), uses('development-link-action', 'f'.repeat(40)), uses('create-milestone-action', 'f'.repeat(40)))],
     [KB]: [workflow(uses('development-link-action', 'f'.repeat(40)))],
     [META]: [],
+    [NOTIF]: [],
   };
   const na = { state: 'unavailable' };
   return {
@@ -149,7 +151,7 @@ function fakeSource(over = {}) {
     closedIssuesWithOpenPrs: async () => [],
     mergedPullRequests: async () => [{ number: 5, mergedAt: new Date().toISOString(), headSha: 'h' }],
     checkRuns: async () => [{ name: 'Unit and integration tests', conclusion: 'success' }],
-    orgRepositories: async () => [{ fullName: FE, archived: false }, { fullName: 'ChipIn-one/chipin-notifications', archived: false }, { fullName: 'ChipIn-one/old', archived: true }],
+    orgRepositories: async () => [{ fullName: FE, archived: false }, { fullName: 'ChipIn-one/chipin-backend-python', archived: false }, { fullName: NOTIF, archived: false }, { fullName: 'ChipIn-one/old', archived: true }],
     ...over,
   };
 }
@@ -167,9 +169,10 @@ test('audit: .github and FE conform; BE and KB show the expected drift; unregist
   assert.ok(checks(by(BE).findings).includes('PIN_STALE'));
   assert.equal(by(KB).status, 'DRIFT');
   assert.ok(checks(by(KB).findings).includes('DEPENDABOT_MISSING'));
-  assert.deepEqual(report.unregistered, ['ChipIn-one/chipin-notifications']);
-  assert.deepEqual(report.summary, { repositories: 4, conformant: 2, drift: 2, unreadable: 0, unregistered: 1 });
-  assert.match(renderSummary(report), /UNREGISTERED \(no action\)\n- ChipIn-one\/chipin-notifications/);
+  assert.deepEqual(report.unregistered, ['ChipIn-one/chipin-backend-python']);
+  assert.deepEqual(report.summary, { repositories: 5, conformant: 3, drift: 2, unreadable: 0, unregistered: 1 });
+  assert.equal(by(NOTIF).status, 'CONFORMANT', 'every capability is off, protection is unavailable on the plan');
+  assert.match(renderSummary(report), /UNREGISTERED \(no action\)\n- ChipIn-one\/chipin-backend-python/);
 });
 
 test('audit: merge past a red required check is drift for protection-unavailable repositories', async () => {
@@ -184,7 +187,7 @@ test('audit: any read failure makes the repository UNREADABLE with no findings',
   assert.deepEqual(report.repositories[0].findings, []);
   assert.match(report.repositories[0].error, /403/);
   const shared = await audit({ source: fakeSource({ tags: async () => { throw new Error('boom'); } }) });
-  assert.equal(shared.summary.unreadable, 4);
+  assert.equal(shared.summary.unreadable, 5);
 });
 
 // --- drift Issues ------------------------------------------------------------------------------------------
@@ -209,7 +212,7 @@ test('drift Issue: marker, shape, owner fallback for KB, no duplicates on rerun,
   assert.match(store.issues[0].body, /^Conformance: ChipIn-one\/chipin-backend\n\n## Problem/);
   assert.match(store.issues[0].body, /## Acceptance\n\n- \[ \] /);
   const again = await upsertIssues({ report, store, apply: true });
-  assert.deepEqual(again.actions.map(a => a.action), ['unchanged', 'unchanged', 'unchanged', 'unchanged']);
+  assert.deepEqual(again.actions.map(a => a.action), ['unchanged', 'unchanged', 'unchanged', 'unchanged', 'unchanged']);
   assert.equal(store.issues.length, 2);
   const later = { ...report, repositories: report.repositories.map(r => ({ ...r, checkedAt: 'later' })) };
   assert.equal((await upsertIssues({ report: later, store, apply: true })).actions.every(a => a.action === 'unchanged'), true, 'a new audit time alone does not rewrite the Issue');
@@ -302,7 +305,7 @@ test('CLI: audit writes per-repository artifacts; upsert apply needs activation'
   const saved = process.exitCode;
   const report = await main(['audit', '--dir', 'out', '--output', 'report.json', '--summary', 's.md'], {}, { source: fakeSource(), writeFile });
   assert.equal(report.summary.drift, 2);
-  assert.deepEqual([...written.keys()].sort(), ['out/conformance-chipin-backend.json', 'out/conformance-chipin-frontend.json', 'out/conformance-chipin-knowledge-base.json', 'out/conformance-dot-github.json', 'report.json', 's.md']);
+  assert.deepEqual([...written.keys()].sort(), ['out/conformance-chipin-backend.json', 'out/conformance-chipin-frontend.json', 'out/conformance-chipin-knowledge-base.json', 'out/conformance-chipin-notifications.json', 'out/conformance-dot-github.json', 'report.json', 's.md']);
   await assert.rejects(main(['upsert', '--apply', '--report', 'report.json'], {}, { store: new FakeStore(), readFile: async () => written.get('report.json') }), /requires --activate/);
   const store = new FakeStore();
   const result = await main(['upsert', '--apply', '--activate', 'conformance-v1', '--report', 'report.json', '--output', 'u.json'], { CHIPIN_CONFORMANCE_WRITE: '1' }, { store, readFile: async () => written.get('report.json'), writeFile });
@@ -312,5 +315,5 @@ test('CLI: audit writes per-repository artifacts; upsert apply needs activation'
 });
 
 test('the real registry yields a profile for each audited repository', () => {
-  assert.equal(loadRegistry().repositories.length, 4);
+  assert.equal(loadRegistry().repositories.length, 5);
 });

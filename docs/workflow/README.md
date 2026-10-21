@@ -8,6 +8,7 @@ Owned by `ChipIn-one/.github`; this directory is the first entry point for every
 | this page | the standard: principles, registry, reusable workflows, pins, relationships, conformance, routing |
 | [onboarding.md](onboarding.md) | connect a repository to the standard |
 | [relationships.md](relationships.md) | native Issue relationships contract and blocker gate |
+| [release.md](release.md) | release policy: tags, GitHub Releases, version from `Version impact` |
 | [conformance.md](conformance.md) | what the conformance audit checks |
 
 Task metadata (Issue Type, Priority, Severity, Project #5 Status, Milestone) stays defined by [github-issue-schema.md](../../github-issue-schema.md).
@@ -66,13 +67,14 @@ The file is read by a strict built-in YAML subset reader, so the repository need
 | `completion` | `production-merge`, `integration-merge`, `deployment-receipt`, `manual` |
 | `protection` | `ruleset`, `protection`, `unavailable` (Free plan + private) |
 | `requiredChecks` | names of checks the integration branch must require |
+| `release` | `strategy` (`semver-by-impact`, `deploy-tag`, `none`), `trigger` (`promotion-merge`, `integration-merge`, `production-deploy`; none for `none`), `tagPrefix` (default `v`); see [release.md](release.md) |
 | `capabilities` | `admission` (required/advisory/off), `developmentLink` (required/advisory/off), `prMetadata`, `relationships`, `dependabot`, `agentRouting` (required/off), `completion` (automatic/manual), `milestones` (enabled/off) |
 
 Defaults by `kind` apply to capabilities a record does not list: `code` — everything required/automatic/enabled; `docs` — no `prMetadata` and no `milestones`;
 `meta` — no `prMetadata`. A record overrides the default. A capability `completion: automatic` contradicts a top-level `completion: manual` and fails validation.
 
 Repositories outside the registry are not managed by the standard. The conformance audit lists organization repositories that are not registered
-(for example `chipin-notifications`, `slack-rofls`, `chipin-backend-python`) as `UNREGISTERED` and takes no action.
+(currently `slack-rofls` and `chipin-backend-python`, excluded by owner decision) as `UNREGISTERED` and takes no action.
 
 Consumers that used to hardcode repository names read the registry: the Development-link allowlist, task-identity pattern and integration-branch check
 (`development-link.mjs`), the milestone allowlist (`create-milestone.mjs`), and the PR-metadata owner, branches and Project number (`pr-metadata.mjs`).
@@ -112,7 +114,7 @@ Composite actions remain the units of logic and tests; direct action calls from 
 ## 4. Versioning and pins
 
 - `.github` gets semantic tags `v1.0.0`, `v1.1.0`, …. A tag is placed on `master` after merging a PR that changes `automation/`, reusable workflows or the registry.
-  Minor — backward-compatible changes; patch — fixes; breaking changes → `v2`. Tags are placed by the owner on request (a comment in the Issue with the SHA).
+  Minor — backward-compatible changes; patch — fixes; breaking changes → `v2`. Until [#175](https://github.com/ChipIn-one/.github/issues/175) automates it, tags are placed by the owner on request (a comment in the Issue with the SHA); the target rule is in [release.md](release.md).
 - Consumers pin a **SHA** with a version comment: `@<sha> # v1.0.0`. This keeps the fail-closed pin policy and lets Dependabot (ecosystem `github-actions`) raise the pin.
   Dependabot `github-actions` is enabled in every registry repository (`dependabot: required`), weekly, targeting the integration branch.
 - Compatibility inside v1: inputs of actions and reusable workflows are never removed and never change meaning; new inputs are optional.
