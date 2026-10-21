@@ -2,9 +2,13 @@ name: Release
 
 # Reusable release workflow (docs/workflow/release.md, task .github#169). A caller repository runs it
 # after a human merge into its release branch (templates/caller-release-*.yml). The job checks out this
-# repository at the exact SHA the caller pinned (github.job_workflow_sha), so the engine, the registry and
-# the caller pin move together. apply=false (default) only prints the plan; apply=true creates the tag and
-# the GitHub Release through the caller's token, which needs contents: write on the calling repository.
+# repository at the exact SHA the caller pinned (job.workflow_sha / job.workflow_repository: the `job`
+# context describes the called workflow, the `github` context always describes the caller), so the
+# engine, the registry and the caller pin move together; an empty or mismatched SHA fails the job before
+# any read. apply=false (default) only prints the plan; apply=true creates the tag and the GitHub Release
+# through the caller's token. Permissions are inherited from the caller job (a called workflow can only
+# downgrade them), so the caller grants contents: write for apply. Tags and Releases created with the
+# default GITHUB_TOKEN do not trigger other workflows (push: tags / release events).
 on:
   workflow_call:
     inputs:
@@ -35,9 +39,6 @@ on:
         description: "Created or existing tag; empty when nothing is released"
         value: ${{ jobs.release.outputs.tag }}
 
-permissions:
-  contents: read
-
 jobs:
   release:
     runs-on: ubuntu-24.04
@@ -45,14 +46,32 @@ jobs:
     outputs:
       outcome: ${{ steps.release.outputs.outcome }}
       tag: ${{ steps.release.outputs.tag }}
+    env:
+      WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+      WORKFLOW_SHA: ${{ job.workflow_sha }}
     steps:
+      - name: Require the pinned workflow source
+        run: |
+          set -euo pipefail
+          if [[ "$WORKFLOW_REPOSITORY" != "ChipIn-one/.github" || ! "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_repository/job.workflow_sha are not a pinned ChipIn-one/.github commit (got '$WORKFLOW_REPOSITORY' @ '$WORKFLOW_SHA')"
+            exit 1
+          fi
       - name: Checkout the pinned org automation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          repository: ChipIn-one/.github
-          ref: ${{ github.job_workflow_sha }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: chipin-workflow
           persist-credentials: false
+      - name: Verify the checkout matches the pin
+        run: |
+          set -euo pipefail
+          head="$(git -C chipin-workflow rev-parse HEAD)"
+          if [[ "$head" != "$WORKFLOW_SHA" ]]; then
+            echo "::error::checked out $head, expected $WORKFLOW_SHA"
+            exit 1
+          fi
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:

@@ -140,6 +140,12 @@ test("version impact parsing accepts the real body formats and rejects everythin
   assert.equal(parseVersionImpact("## Version impact\n\nShared composite action behaviour change only.\n").impact, null);
   assert.equal(parseVersionImpact("## Version impact\n\nnonexistent\n").impact, null);
   assert.equal(parseVersionImpact("## Version impact\n\nhotfix\n").impact, null);
+  for (const ambiguous of ["minor/patch", "none → patch after review", "None of the above; minor", "patch (or minor?)"]) {
+    const parsed = parseVersionImpact("## Version impact\n\n" + ambiguous + "\n");
+    assert.equal(parsed.impact, null, ambiguous);
+    assert.match(parsed.reason, /more than one impact keyword/u);
+  }
+  assert.equal(parseVersionImpact("## Version impact\n\npatch-level fix, nothing else\n").impact, "patch");
   assert.equal(parseVersionImpact(null).impact, null);
 });
 
@@ -179,7 +185,8 @@ test("plan: frontend promotion merge collects implementation PRs since the previ
     [10, "patch", "ChipIn-one/chipin-frontend#110"],
     [11, "none", "ChipIn-one/chipin-frontend#111"],
   ]);
-  assert.deepEqual(plan.unattributedCommits, []);
+  assert.deepEqual(plan.unattributedCommits, [], "the promotion merge commit is covered by the release PR, not unattributed");
+  assert.deepEqual(plan.excludedPullRequests.map((pull) => [pull.number, pull.baseRef]), [[20, "main"]]);
   assert.equal(plan.impact, "patch");
   assert.equal(plan.version, "1.0.9");
   assert.equal(plan.tag, "v1.0.9");
@@ -298,10 +305,14 @@ test("plan: idempotency — an already tagged commit is a no-op, a tag on anothe
   const store = fakeStore(tagOnly);
   const missing = await planRelease(store, { repository: FE, profile: feProfile, ref: "main" });
   assert.equal(missing.outcome, "RELEASE_MISSING");
+  // the inventory of the already tagged version comes from the next lower ancestor tag
+  assert.equal(missing.inventoryBaseTag, "v1.0.8");
+  assert.deepEqual(missing.includedPullRequests.map((pull) => pull.number), [10, 11]);
   const completed = await applyRelease(store, missing);
   assert.equal(completed.outcome, "RELEASED");
   assert.deepEqual(completed.applied, { tag: false, release: true });
   assert.deepEqual(store.writes.map((write) => write.kind), ["release"]);
+  assert.match(store.writes[0].body, /- ChipIn-one\/chipin-frontend#110 \(#10\)/u);
 });
 
 test("apply: creates the tag on the exact commit, reads it back, then the Release with the Included Issues block", async () => {
@@ -397,6 +408,10 @@ test("runRelease turns a blocked plan into a BLOCKED receipt and keeps the inclu
   assert.equal(receipt.code, "INVALID_VERSION_IMPACT");
   assert.equal(receipt.includedPullRequests.length, 2);
   assert.equal(receipt.previousTag, "v1.0.8");
+  // BLOCKED receipts carry the context resolved so far
+  assert.equal(receipt.sha, sha("3"));
+  assert.equal(receipt.releaseBranch, "main");
+  assert.equal(receipt.strategy, "semver-by-impact");
   assert.match(formatReleaseSummary(receipt), /`BLOCKED` \(`INVALID_VERSION_IMPACT`\)/u);
   assert.match(formatReleaseSummary(receipt), /\| #10 \| invalid: missing/u);
 
@@ -512,7 +527,13 @@ test("release-action, reusable workflow and caller templates: plan by default, a
   const workflow = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
   assert.match(workflow, /^  workflow_call:$/mu);
   assert.doesNotMatch(workflow, /^  push:$/mu);
-  assert.match(workflow, /job_workflow_sha/u);
+  // the called workflow's own SHA/repository come from the job context, never from github.* (caller)
+  assert.match(workflow, /ref: \$\{\{ job\.workflow_sha \}\}/u);
+  assert.match(workflow, /repository: \$\{\{ job\.workflow_repository \}\}/u);
+  assert.doesNotMatch(workflow, /github\.job_workflow_sha|github\.workflow_sha/u);
+  assert.match(workflow, /\[\[ "\$head" != "\$WORKFLOW_SHA" \]\]/u);
+  // permissions are inherited from the caller (a called workflow can only downgrade them)
+  assert.doesNotMatch(workflow, /^permissions:/mu);
   assert.match(workflow, /release-action/u);
   assert.match(workflow, /default: false/u);
 
@@ -521,5 +542,64 @@ test("release-action, reusable workflow and caller templates: plan by default, a
     assert.match(template, /ChipIn-one\/\.github\/\.github\/workflows\/release\.yml@/u);
     assert.match(template, /contents: write/u);
     assert.match(template, /apply: true/u);
+    assert.match(template, /group: release-\$\{\{ github\.repository \}\}/u);
+    assert.match(template, /cancel-in-progress: false/u);
   }
+});
+
+test("plan: commits in range without one included PR block instead of a silent no-release", async () => {
+  // hotfix PR straight into main after the tag: excluded, nothing included -> BLOCKED
+  const hotfix = {
+    graph: { [sha("0")]: [], [sha("4")]: [sha("0")] },
+    branches: { main: sha("4"), dev: sha("0") },
+    tags: { "v1.0.8": sha("0") },
+    pulls: [{ number: 30, baseRef: "main", commits: [sha("4")], mergedAt: "2026-10-05T10:00:00Z", body: "## Version impact\n\npatch\n" }],
+  };
+  await assert.rejects(
+    planRelease(fakeStore(hotfix), { repository: FE, profile: feProfile, ref: "main" }),
+    (error) => error.code === "NO_INCLUDED_PULL_REQUESTS" && /excluded, base main: #30/u.test(error.message)
+      && error.extra.excludedPullRequests.length === 1 && error.extra.unattributedCommits.length === 0,
+  );
+
+  // squash-merged promotion: the dev PRs' merge commits are not in the range
+  const squashed = {
+    graph: { [sha("0")]: [], [sha("5")]: [sha("0")] },
+    branches: { main: sha("5"), dev: sha("2") },
+    tags: { "v1.0.8": sha("0") },
+    pulls: [{ number: 20, baseRef: "main", commits: [sha("5")], mergeCommitSha: sha("5"), mergedAt: "2026-10-05T10:00:00Z", body: "## Version impact\n\nnone\n" }],
+  };
+  squashed.graph[sha("2")] = [sha("0")];
+  await assert.rejects(
+    planRelease(fakeStore(squashed), { repository: FE, profile: feProfile, ref: "main" }),
+    (error) => error.code === "NO_INCLUDED_PULL_REQUESTS",
+  );
+
+  // direct pushes only
+  const direct = {
+    graph: { [sha("a")]: [], [sha("b")]: [sha("a")] },
+    branches: { master: sha("b") },
+    tags: { "v1.1.0": sha("a") },
+    pulls: [],
+  };
+  const receipt = await runRelease(fakeStore(direct), { mode: "plan", repository: ORG, profile: orgProfile, ref: "master", initialVersion: null });
+  assert.equal(receipt.outcome, "BLOCKED");
+  assert.equal(receipt.code, "NO_INCLUDED_PULL_REQUESTS");
+  assert.deepEqual(receipt.unattributedCommits, [sha("b")]);
+  assert.match(formatReleaseSummary(receipt), /NO_INCLUDED_PULL_REQUESTS/u);
+});
+
+test("GitHub store memoizes merge-commit lookups per pull request", async () => {
+  let graphqlCalls = 0;
+  const client = {
+    request: async () => { throw new Error("unexpected request"); },
+    graphql: async (_query, variables) => {
+      graphqlCalls += 1;
+      return { repository: { pullRequest: { number: variables.number, mergeCommit: { oid: sha("2") } } } };
+    },
+    listAll: async () => [{ number: 11, title: "t", body: "b", html_url: "u", merged_at: "2026-10-02T10:00:00Z", base: { ref: "dev" }, merge_commit_sha: null }],
+  };
+  const store = githubStore(client, FE);
+  await store.listCommitPulls(sha("1"));
+  await store.listCommitPulls(sha("2"));
+  assert.equal(graphqlCalls, 1);
 });

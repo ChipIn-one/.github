@@ -52,7 +52,7 @@ runs:
         RELEASE_OUTPUT: ${{ inputs.output }}
       run: |
         set -euo pipefail
-        test -n "${GITHUB_TOKEN:-}"
+        if [[ -z "${GITHUB_TOKEN:-}" ]]; then echo "::error::input token is empty"; exit 1; fi
         args=(--repository "$RELEASE_REPOSITORY" --ref "$RELEASE_REF" --output "$RELEASE_OUTPUT")
         if [[ -n "$RELEASE_INITIAL_VERSION" ]]; then args+=(--initial-version "$RELEASE_INITIAL_VERSION"); fi
         if [[ "$RELEASE_APPLY" == "true" ]]; then

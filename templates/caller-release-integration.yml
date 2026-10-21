@@ -7,7 +7,10 @@ on:
   push:
     branches: [master]          # branches.integration from workflow-registry.yaml
 permissions:
-  contents: write               # tags and GitHub Releases in this repository
+  contents: write               # tags and GitHub Releases in this repository (the called workflow inherits this)
+concurrency:
+  group: release-${{ github.repository }}   # one release run at a time; a later push waits, never cancels
+  cancel-in-progress: false
 jobs:
   release:
     if: github.repository_owner == 'ChipIn-one'

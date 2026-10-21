@@ -105,6 +105,8 @@ export function parseVersionImpact(body) {
     .replace(/^[`*_]+/u, "");
   const match = /^(none|patch|minor|major)\b/iu.exec(cleaned);
   if (!match) return { impact: null, raw, reason: "first line is not none/patch/minor/major: " + JSON.stringify(raw) };
+  const keywords = new Set([...cleaned.matchAll(/\b(none|patch|minor|major)\b/giu)].map((hit) => hit[1].toLowerCase()));
+  if (keywords.size > 1) return { impact: null, raw, reason: "first line names more than one impact keyword: " + JSON.stringify(raw) };
   return { impact: match[1].toLowerCase(), raw };
 }
 
@@ -133,7 +135,7 @@ export function formatIncludedIssuesBlock(includedPullRequests) {
   return lines.join("\n") + "\n";
 }
 
-export function highestVersionTag(tags, tagPrefix) {
+export function sortedVersionTags(tags, tagPrefix) {
   const prefixed = tags
     .map((tag) => {
       const version = tag.name.startsWith(tagPrefix) ? tag.name.slice(tagPrefix.length) : null;
@@ -157,8 +159,25 @@ export function githubStore(client, repository) {
   const { owner, repo } = splitRepository(repository);
   const root = "/repos/" + owner + "/" + repo;
 
+  // /commits/{sha}/pulls returns merged PRs only for commits reachable from the DEFAULT branch
+  // (otherwise only open PRs). Every registry release branch is the default branch today
+  // (frontend main, backend develop, .github master); a different layout needs another inventory.
   async function readCommitPullsPage(sha) {
     return client.listAll(root + "/commits/" + sha + "/pulls");
+  }
+  const mergeCommitCache = new Map();
+  async function mergeCommitOf(pull) {
+    if (!mergeCommitCache.has(pull.number)) {
+      mergeCommitCache.set(pull.number, (async () => {
+        const data = await client.graphql(MERGE_COMMIT_QUERY, { owner, repo, number: pull.number });
+        const oid = data?.repository?.pullRequest?.mergeCommit?.oid ?? null;
+        if (data?.repository?.pullRequest?.number !== pull.number || !SHA_PATTERN.test(oid ?? "")) {
+          throw blocked("UNREADABLE_PULL", "Merged pull request #" + pull.number + " has no readable merge commit");
+        }
+        return oid;
+      })());
+    }
+    return mergeCommitCache.get(pull.number);
   }
 
   return {
@@ -215,13 +234,7 @@ export function githubStore(client, repository) {
       const result = [];
       for (const pull of pulls) {
         let mergeCommitSha = pull.merge_commit_sha ?? null;
-        if (pull.merged_at && !mergeCommitSha) {
-          const data = await client.graphql(MERGE_COMMIT_QUERY, { owner, repo, number: pull.number });
-          mergeCommitSha = data?.repository?.pullRequest?.mergeCommit?.oid ?? null;
-          if (data?.repository?.pullRequest?.number !== pull.number || !SHA_PATTERN.test(mergeCommitSha ?? "")) {
-            throw blocked("UNREADABLE_PULL", "Merged pull request #" + pull.number + " has no readable merge commit");
-          }
-        }
+        if (pull.merged_at && !mergeCommitSha) mergeCommitSha = await mergeCommitOf(pull);
         result.push({
           number: pull.number,
           title: pull.title ?? "",
@@ -291,8 +304,9 @@ async function assertOnReleaseBranch(store, branch, sha) {
   }
 }
 
-async function findPreviousTag(store, tags, sha) {
+async function findPreviousTag(store, tags, sha, { skip = null } = {}) {
   for (const tag of tags) {
+    if (skip && tag.name === skip) continue;
     if (tag.sha === sha) return { tag, status: "identical", commits: [] };
     const comparison = await store.compare(tag.sha, sha);
     if (comparison.status === "identical") return { tag, status: "identical", commits: [] };
@@ -301,15 +315,21 @@ async function findPreviousTag(store, tags, sha) {
   return null;
 }
 
-async function collectIncludedPullRequests(store, commits, integrationBranch) {
+async function collectIncludedPullRequests(store, commits, integrationBranch, promotionBranch = null) {
   const included = new Map();
+  const excluded = new Map();
   const unattributed = [];
   const rangeShas = new Set(commits.map((commit) => commit.sha));
   for (const commit of commits) {
     const pulls = await store.listCommitPulls(commit.sha);
-    const merged = pulls.filter((pull) => pull.mergedAt && pull.baseRef === integrationBranch
-      && pull.mergeCommitSha && rangeShas.has(pull.mergeCommitSha));
-    if (pulls.every((pull) => !pull.mergedAt || !pull.mergeCommitSha || !rangeShas.has(pull.mergeCommitSha))) {
+    const inRange = pulls.filter((pull) => pull.mergedAt && pull.mergeCommitSha && rangeShas.has(pull.mergeCommitSha));
+    const merged = inRange.filter((pull) => pull.baseRef === integrationBranch);
+    // PRs merged into the promotion branch (the dev -> main release PR itself, or a hotfix straight
+    // into main) are never counted for the version; they are reported so nothing disappears silently.
+    for (const pull of inRange.filter((pull) => promotionBranch && pull.baseRef === promotionBranch)) {
+      excluded.set(pull.number, { number: pull.number, title: pull.title, url: pull.url, baseRef: pull.baseRef, mergedAt: pull.mergedAt, mergeCommitSha: pull.mergeCommitSha });
+    }
+    if (merged.length === 0 && !inRange.some((pull) => promotionBranch && pull.baseRef === promotionBranch && pull.mergeCommitSha === commit.sha)) {
       unattributed.push(commit.sha);
     }
     for (const pull of merged) {
@@ -330,11 +350,23 @@ async function collectIncludedPullRequests(store, commits, integrationBranch) {
   }
   return {
     included: [...included.values()].sort((a, b) => Date.parse(a.mergedAt) - Date.parse(b.mergedAt)),
+    excluded: [...excluded.values()].sort((a, b) => Date.parse(a.mergedAt) - Date.parse(b.mergedAt)),
     unattributed,
   };
 }
 
-export async function planRelease(store, { repository, profile, ref, initialVersion = null }) {
+export async function planRelease(store, options) {
+  const context = {};
+  try {
+    return await planReleaseInner(store, options, context);
+  } catch (error) {
+    // BLOCKED receipts carry the context resolved so far (sha, branch, previous tag, inventory).
+    if (error instanceof ReleaseBlocked) error.extra = { ...context, ...error.extra };
+    throw error;
+  }
+}
+
+async function planReleaseInner(store, { repository, profile, ref, initialVersion = null }, context) {
   const base = {
     contract: RELEASE_CONTRACT,
     repository,
@@ -348,23 +380,34 @@ export async function planRelease(store, { repository, profile, ref, initialVers
   }
   if (initialVersion !== null) parseSemVer(initialVersion);
 
+  Object.assign(context, base);
   const sha = await store.resolveCommit(ref);
   const releaseBranch = releaseBranchFor(profile);
+  Object.assign(context, { sha, releaseBranch });
   await assertOnReleaseBranch(store, releaseBranch, sha);
 
-  const tags = highestVersionTag(await store.listVersionTags(profile.release.tagPrefix), profile.release.tagPrefix);
+  const tags = sortedVersionTags(await store.listVersionTags(profile.release.tagPrefix), profile.release.tagPrefix);
   const previous = await findPreviousTag(store, tags, sha);
+  Object.assign(context, { previousTag: previous?.tag.name ?? null, previousSha: previous?.tag.sha ?? null });
 
   if (previous?.status === "identical") {
     const release = await store.readRelease(previous.tag.name);
+    // The Release of an already tagged commit still needs the inventory of that version: the PRs
+    // between the next lower ancestor tag and this commit.
+    const inventoryBase = await findPreviousTag(store, tags, sha, { skip: previous.tag.name });
+    const inventory = inventoryBase?.status === "ahead"
+      ? await collectIncludedPullRequests(store, inventoryBase.commits, profile.branches.integration, profile.branches.promotion)
+      : { included: [], excluded: [], unattributed: [] };
     return {
       ...base,
       sha,
       releaseBranch,
       previousTag: previous.tag.name,
       previousSha: previous.tag.sha,
-      includedPullRequests: [],
-      unattributedCommits: [],
+      inventoryBaseTag: inventoryBase?.tag.name ?? null,
+      includedPullRequests: inventory.included,
+      excludedPullRequests: inventory.excluded,
+      unattributedCommits: inventory.unattributed,
       impact: null,
       version: previous.tag.version,
       tag: previous.tag.name,
@@ -379,6 +422,7 @@ export async function planRelease(store, { repository, profile, ref, initialVers
   let version;
   let impact = null;
   let includedPullRequests = [];
+  let excludedPullRequests = [];
   let unattributedCommits = [];
   if (previous === null) {
     if (tags.length > 0) {
@@ -395,17 +439,25 @@ export async function planRelease(store, { repository, profile, ref, initialVers
       throw blocked("INITIAL_VERSION_NOT_ALLOWED", "--initial-version is only valid for a repository without tags; previous tag is "
         + previous.tag.name);
     }
-    const collected = await collectIncludedPullRequests(store, previous.commits, profile.branches.integration);
+    const collected = await collectIncludedPullRequests(store, previous.commits, profile.branches.integration, profile.branches.promotion);
     includedPullRequests = collected.included;
+    excludedPullRequests = collected.excluded;
     unattributedCommits = collected.unattributed;
+    Object.assign(context, { includedPullRequests, excludedPullRequests, unattributedCommits });
+    if (includedPullRequests.length === 0 && previous.commits.length > 0) {
+      // Commits since the tag but not one PR merged into the integration branch: a squash-merged
+      // promotion, a hotfix straight into the promotion branch or direct pushes. Never guessed.
+      throw blocked("NO_INCLUDED_PULL_REQUESTS", previous.commits.length + " commit(s) since " + previous.tag.name
+        + " but no pull request merged into " + profile.branches.integration + " is in the range"
+        + (excludedPullRequests.length > 0 ? " (excluded, base " + profile.branches.promotion + ": "
+          + excludedPullRequests.map((pull) => "#" + pull.number).join(", ") + ")" : "")
+        + (unattributedCommits.length > 0 ? "; commits without a pull request: " + unattributedCommits.map((sha) => sha.slice(0, 7)).join(", ") : "")
+        + ". Decide by hand (tag it, or merge the work through the integration branch).");
+    }
     const invalid = includedPullRequests.filter((pull) => pull.impact === null);
     if (invalid.length > 0) {
       throw blocked("INVALID_VERSION_IMPACT", "Included pull request(s) have no valid `## Version impact`: "
-        + invalid.map((pull) => "#" + pull.number + " (" + pull.impactReason + ")").join("; "), {
-        includedPullRequests,
-        unattributedCommits,
-        previousTag: previous.tag.name,
-      });
+        + invalid.map((pull) => "#" + pull.number + " (" + pull.impactReason + ")").join("; "));
     }
     impact = maxImpact(includedPullRequests.map((pull) => pull.impact));
     if (impact === "none") {
@@ -416,6 +468,7 @@ export async function planRelease(store, { repository, profile, ref, initialVers
         previousTag: previous.tag.name,
         previousSha: previous.tag.sha,
         includedPullRequests,
+        excludedPullRequests,
         unattributedCommits,
         impact,
         version: null,
@@ -445,6 +498,7 @@ export async function planRelease(store, { repository, profile, ref, initialVers
     previousTag: previous?.tag.name ?? null,
     previousSha: previous?.tag.sha ?? null,
     includedPullRequests,
+    excludedPullRequests,
     unattributedCommits,
     impact,
     version,
@@ -526,6 +580,10 @@ export function formatReleaseSummary(receipt) {
       lines.push("| #" + pull.number + " | " + (pull.impact ?? "invalid: " + pull.impactReason) + " | "
         + (pull.taskIdentity ?? "-") + " | " + pull.mergedAt + " |");
     }
+  }
+  if ((receipt.excludedPullRequests ?? []).length > 0) {
+    lines.push("", "Pull requests merged into the promotion branch in range (never counted for the version): "
+      + receipt.excludedPullRequests.map((pull) => "#" + pull.number + " (" + pull.baseRef + ")").join(", ") + ".");
   }
   if ((receipt.unattributedCommits ?? []).length > 0) {
     lines.push("", "Commits in range without a merged pull request (treated as impact none): "
