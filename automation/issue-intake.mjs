@@ -11,6 +11,7 @@ import {
 } from './github-metadata.mjs';
 import { createHash } from 'node:crypto';
 import { requiredOwner, validateBody, verifyAdmission, ADMISSION_CONTRACT } from './issue-admission.mjs';
+import { GitHubNativeStore, appendDeclarations, declare, parseIssueRef as parseRelationshipRef, renderDeclaration } from './relationships.mjs';
 
 const APPLY_ACTIVATION = 'issue-intake-v1';
 const APPLY_ENV = 'CHIPIN_ISSUE_WRITE';
@@ -339,6 +340,7 @@ function parseArgs(argv) {
     mode: null, operation: null, target: null, issueType: null, priority: null,
     severity: null, title: null, body: null, bodyFile: null, owner: null,
     state: null, output: null, activate: null, config: 'automation/metadata-migration.config.json',
+    relationships: [],
   };
   const values = [...argv];
   args.mode = values.shift(); args.operation = values.shift(); args.target = values.shift();
@@ -350,11 +352,20 @@ function parseArgs(argv) {
     '--severity': 'severity', '--title': 'title', '--body': 'body', '--body-file': 'bodyFile', '--owner': 'owner',
     '--state': 'state', '--output': 'output', '--activate': 'activate', '--config': 'config',
   };
+  const relationshipFlags = { '--blocked-by': 'blocked_by', '--blocks': 'blocks', '--relates-to': 'relates_to', '--parent': 'parent' };
   for (let i = 0; i < values.length; i += 1) {
+    if (relationshipFlags[values[i]]) {
+      args.relationships.push({ kind: relationshipFlags[values[i]], target: values[++i] });
+      continue;
+    }
     const name = map[values[i]];
     if (!name) throw new Error('Unknown argument: ' + values[i]);
     args[name] = values[++i];
   }
+  if (args.relationships.length && args.operation !== 'create') {
+    throw new Error('Relationship flags are supported only with create; use relationships.mjs declare for an existing Issue.');
+  }
+  for (const { target } of args.relationships) parseRelationshipRef(target);
   if (args.operation === 'create' && args.mode === 'apply' && !args.state) throw new Error('Create apply requires --state for retry-safe issue identity persistence.');
   if (args.operation === 'create' && args.mode === 'apply' && args.output && resolve(args.state) === resolve(args.output)) {
     throw new Error('Create apply requires --state and --output to resolve to different paths.');
@@ -405,6 +416,12 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
     let suppliedBody = args.body || '';
     try { if (args.bodyFile) suppliedBody = await (overrides.readFile || readFile)(resolve(args.bodyFile), 'utf8'); }
     catch (error) { result.blockers.push('Issue body read failed: ' + error.message); }
+    // Declared relationships become `## Dependencies` lines in the created body; native edges follow after creation.
+    if (!result.blockers.length && args.relationships.length) {
+      try {
+        suppliedBody = appendDeclarations(suppliedBody, args.relationships.map(({ kind, target }) => renderDeclaration(kind, parseRelationshipRef(target).canonical)));
+      } catch (error) { result.blockers.push('Relationship declarations rejected: ' + error.message); }
+    }
     result.blockers.push(...validateBody(args.title, suppliedBody));
     if (args.mode === 'plan') {
       result.action = result.blockers.length ? 'incomplete' : 'ready-to-create';
@@ -576,6 +593,14 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
               result.receipt = { ...result.receipt, status: 'BLOCKED', blockers: [...result.blockers] };
             }
           }
+        }
+        if (!result.blockers.length && args.relationships.length) {
+          try {
+            const store = overrides.relationshipStore || new GitHubNativeStore(client);
+            result.relationships = await declare({ store, issue: key(target.repository, target.number), additions: args.relationships, apply: true });
+            result.blockers.push(...result.relationships.blockers.map((blocker) => 'Relationships: ' + blocker));
+            if (!result.relationships.blockers.length) result.applied.push('native-relationships');
+          } catch (error) { result.blockers.push('Relationships failed: ' + error.message); }
         }
         result.action = result.blockers.length ? 'incomplete' : 'complete';
       }
