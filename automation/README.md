@@ -142,7 +142,7 @@ The tests include issue-intake retry and fail-closed coverage, migration safety/
 
 ## Fail-closed Issue admission
 
-Versioned read-only `issue-admission.mjs` validates a fresh exact Issue revision, durable body, native Type/Priority/Bug Severity, required FE/BE/explicit KB assignee, exactly one Project #5 item and readable Status. Writers remain exclusively in `issue-intake.mjs`. The `issue-admission-pr.mjs` boundary and `issue-admission-action/action.yml` guard PR reconciliation, publication handoff and review where callers opt in with an org read credential. A queued connector bridge is not a positive admission. See [issue-intake.md](./issue-intake.md) for roll-out and explicit governance bootstrap limitations.
+Versioned read-only `issue-admission.mjs` validates a fresh exact Issue revision, durable body, native Type/Priority/Bug Severity, the required assignee from the registry record (explicit `--owner` where the record has `owner: null`), exactly one Project #5 item and readable Status. Writers remain exclusively in `issue-intake.mjs`. The `issue-admission-pr.mjs` boundary and `issue-admission-action/action.yml` guard PR reconciliation, publication handoff and review where callers opt in with an org read credential. A queued connector bridge is not a positive admission. See [issue-intake.md](./issue-intake.md) for roll-out; the admission scope (including `.github`) and the required owner per repository come from the registry (#183).
 
 ### Issue-based trusted preflight (#119)
 

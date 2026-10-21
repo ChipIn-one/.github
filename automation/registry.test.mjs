@@ -6,7 +6,7 @@ import test from 'node:test';
 
 import { SUPPORTED_REPOSITORIES, readTaskIdentityMarker } from './development-link.mjs';
 import { isSupportedIntakeRepository } from './issue-intake.mjs';
-import { requiredOwner } from './issue-admission.mjs';
+import { admissionRepositories, requiredOwner } from './issue-admission.mjs';
 import {
   KIND_DEFAULTS, REGISTRY_PATH, RegistryError, getRepositoryProfile, integrationBranch,
   listRepositories, loadRegistry, main, parseYamlSubset, requireRepositoryProfile, validateRegistry,
@@ -219,6 +219,7 @@ test('admission and intake scope is the registry: every repository with admissio
   assert.deepEqual([...SUPPORTED_REPOSITORIES], taskRepositories);
   assert.deepEqual(taskRepositories, [FE, BE, KB], 'chipin-notifications is registered with every task capability off');
   assert.deepEqual(listRepositories({ capability: 'admission' }), [FE, BE, KB, META]);
+  assert.deepEqual(admissionRepositories(), [FE, BE, KB, META]);
   for (const repository of [FE, BE, KB, META]) assert.equal(isSupportedIntakeRepository(repository), true);
   assert.equal(isSupportedIntakeRepository(NOTIF), false, 'admission off');
   assert.equal(isSupportedIntakeRepository('ChipIn-one/Chipin-Frontend'), false, 'exact spelling only (GitHub would resolve the mis-cased name)');

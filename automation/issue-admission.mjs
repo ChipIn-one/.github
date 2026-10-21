@@ -200,11 +200,11 @@ function args(argv) {
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const opts = args(argv);
-  const match = /^(ChipIn-one\/[^#]+)#([1-9]\d*)$/.exec(opts.issue ?? '');
-  if (!match) throw new Error('Exact --issue owner/repo#number is required.');
+  const parsed = parseAdmissionIssue(opts.issue ?? '');
+  if (!parsed) throw new Error('Exact --issue owner/repo#number in a registry repository with admission on is required.');
   const config = JSON.parse(await readFile(resolve(opts.config ?? 'automation/metadata-migration.config.json'), 'utf8'));
   const result = await readAdmission({
-    client: new GitHubClient(env.GITHUB_TOKEN), config, repository: match[1], number: Number(match[2]),
+    client: new GitHubClient(env.GITHUB_TOKEN), config, repository: parsed.repository, number: parsed.number,
     selectedOwner: opts.owner ?? null, expectedRevision: opts['expected-revision'] ?? null,
   });
   if (opts.output) await writeFile(resolve(opts.output), JSON.stringify(result.receipt, null, 2) + '\n');

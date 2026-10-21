@@ -88,3 +88,24 @@ test('first trusted issue-based preflight may bind its authenticated full revisi
   const result = await verifyAdmissionEvidence(v);
   assert.equal(result.revision, revision);
 });
+
+test('evidence accepts a .github receipt and rejects repositories outside the admission scope', async () => {
+  const meta = 'ChipIn-one/.github#183';
+  const metaSetup = setup();
+  metaSetup.envelope = createAdmissionEnvelope({ receipt: { ...receipt(), issue: meta }, requestId, producer: 'trusted-bot[bot]', sourceSha: sha,
+    readerBlobSha: reader, configSha256: config, runId: 12, runAttempt: 1 });
+  metaSetup.expectedIssue = meta;
+  const ok = await verifyAdmissionEvidence(metaSetup);
+  assert.equal(ok.revision, revision);
+  // the producer refuses to build an envelope for a repository outside the admission scope,
+  // and the consumer refuses a forged one
+  for (const outside of ['ChipIn-one/chipin-notifications#1', 'ChipIn-one/slack-rofls#1', 'ChipIn-one/.GitHub#183']) {
+    assert.throws(() => createAdmissionEnvelope({ receipt: { ...receipt(), issue: outside }, requestId, producer: 'trusted-bot[bot]', sourceSha: sha,
+      readerBlobSha: reader, configSha256: config, runId: 12, runAttempt: 1 }), { code: 'INVALID_RECEIPT' });
+    const forged = setup();
+    forged.envelope.receipt.issue = outside;
+    forged.expectedIssue = outside;
+    // a tampered receipt fails the envelope digest first (UNTRUSTED_EVIDENCE); either way nothing is admitted
+    await assert.rejects(verifyAdmissionEvidence(forged), (error) => ['INVALID_RECEIPT', 'UNTRUSTED_EVIDENCE'].includes(error.code));
+  }
+});
