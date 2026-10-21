@@ -1,0 +1,20 @@
+# Caller template for repositories with release strategy semver-by-impact / trigger promotion-merge
+# (registry example: chipin-frontend, dev -> main). Copy to .github/workflows/release.yml in the
+# repository, set the promotion branch and the pin. The run happens after a human merge into the
+# promotion branch; the tag and the Release are created on that merge commit by the engine in
+# ChipIn-one/.github (docs/workflow/release.md). Nothing here bumps a version in a task PR.
+name: Release
+on:
+  push:
+    branches: [main]            # branches.promotion from workflow-registry.yaml
+permissions:
+  contents: write               # tags and GitHub Releases in this repository
+jobs:
+  release:
+    if: github.repository_owner == 'ChipIn-one'
+    uses: ChipIn-one/.github/.github/workflows/release.yml@<sha>   # vX.Y.Z — pin the org tag SHA
+    with:
+      apply: true               # false prints the plan only
+      # initial-version: "1.0.8"   # only for the very first run of a repository without tags
+    secrets:
+      token: ${{ secrets.GITHUB_TOKEN }}

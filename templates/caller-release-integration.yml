@@ -1,0 +1,18 @@
+# Caller template for repositories with release strategy semver-by-impact / trigger integration-merge
+# (registry example: ChipIn-one/.github, merges to master). Copy to .github/workflows/release.yml in the
+# repository, set the integration branch and the pin. Documentation-only merges declare
+# `Version impact: none` and produce nothing (docs/workflow/release.md).
+name: Release
+on:
+  push:
+    branches: [master]          # branches.integration from workflow-registry.yaml
+permissions:
+  contents: write               # tags and GitHub Releases in this repository
+jobs:
+  release:
+    if: github.repository_owner == 'ChipIn-one'
+    uses: ChipIn-one/.github/.github/workflows/release.yml@<sha>   # vX.Y.Z — pin the org tag SHA
+    with:
+      apply: true               # false prints the plan only
+    secrets:
+      token: ${{ secrets.GITHUB_TOKEN }}
