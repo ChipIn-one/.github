@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import {
   buildIntakeArgs,
+  drainQueue,
+  intakeStatus,
   parseRequestBody,
   pendingQueueItems,
   renderQueueComment,
@@ -310,4 +312,135 @@ test('KB owner travels through validated bridge queue into canonical writer', ()
   assert.match(noOwner.blockers.join('\n'), /explicitly selected/);
   const wrongFixedOwner = validateQueuedRequest(config, { ...request, target: 'ChipIn-one/chipin-backend#168' });
   assert.match(wrongFixedOwner.blockers.join('\n'), /Owner policy conflict/);
+});
+
+test('a pending read-back is a distinct retryable bridge status, not a blocker', () => {
+  const target = 'ChipIn-one/chipin-frontend#466';
+  const pending = { issue: target, action: 'pending-readback', blockers: [], receipt: null, pending: { code: 'PROJECT_MEMBERSHIP_READBACK_PENDING', detail: 'listing lag' } };
+  let blockers = [];
+  assert.equal(intakeStatus(pending, target, blockers), 'pending');
+  assert.deepEqual(blockers, []);
+
+  blockers = [];
+  assert.equal(intakeStatus({ ...pending, issue: 'ChipIn-one/chipin-frontend#1' }, target, blockers), 'blocked');
+  assert.equal(blockers.length, 1);
+
+  blockers = [];
+  assert.equal(intakeStatus({ issue: target, action: 'complete', receipt: { status: 'INTAKE_COMPLETE' } }, target, blockers), 'complete');
+  blockers = [];
+  assert.equal(intakeStatus({ issue: target, action: 'incomplete', blockers: ['x'] }, target, ['x']), 'blocked');
+
+  const comment = renderReceiptComment({
+    status: 'pending',
+    blockers: [],
+    request: { target, issueType: 'Task', priority: 'P2', severity: 'none' },
+    intake: { applied: ['issue-metadata', 'project-membership'], receipt: null },
+    pending: pending.pending,
+  }, 42);
+  assert.match(comment, /Outcome: \*\*PENDING\*\*/);
+  assert.match(comment, /PROJECT_MEMBERSHIP_READBACK_PENDING/);
+  assert.match(comment, /next drain retries it automatically/);
+  assert.doesNotMatch(comment, /edit\/reopen this request to retry/);
+  assert.match(comment, /"status":"pending"/);
+
+  const queued = { schemaVersion: 1, requestIssue: 100, target, issueType: 'Task', priority: 'P2', severity: 'none' };
+  const comments = [
+    { id: 10, user: { login: 'github-actions[bot]' }, body: renderQueueComment(queued) },
+    { id: 11, user: { login: 'github-actions[bot]' }, body: comment.replace('"queueCommentId":42', '"queueCommentId":10') },
+  ];
+  assert.deepEqual(pendingQueueItems({ number: 100 }, comments).map((entry) => [entry.id, entry.pendingRetries]), [[10, 1]]);
+  const blockedComments = [
+    comments[0],
+    { id: 12, user: { login: 'github-actions[bot]' }, body: renderReceiptComment({ status: 'blocked', blockers: ['x'], request: queued, intake: null }, 10) },
+  ];
+  assert.deepEqual(pendingQueueItems({ number: 100 }, blockedComments), []);
+});
+
+test('drain keeps a pending control Issue open, closes the others, and reports outcome pending without attention', async () => {
+  const target = 'ChipIn-one/chipin-frontend#466';
+  const queuedPending = { schemaVersion: 1, requestIssue: 140, target, issueType: 'Task', priority: 'P2', severity: 'none' };
+  const queuedDone = { ...queuedPending, requestIssue: 141, target: 'ChipIn-one/chipin-frontend#467' };
+  const calls = [];
+  const queueClient = {
+    listAll: async (path) => {
+      calls.push(path);
+      if (path.startsWith('/repos/ChipIn-one/.github/issues?')) {
+        return [
+          { number: 140, title: '[issue-intake] ' + target, html_url: 'u140' },
+          { number: 141, title: '[issue-intake] ChipIn-one/chipin-frontend#467', html_url: 'u141' },
+          { number: 142, title: 'unrelated', html_url: 'u142' },
+        ];
+      }
+      if (path.endsWith('/issues/140/comments')) return [{ id: 10, user: { login: 'github-actions[bot]' }, body: renderQueueComment(queuedPending) }];
+      if (path.endsWith('/issues/141/comments')) return [{ id: 20, user: { login: 'github-actions[bot]' }, body: renderQueueComment(queuedDone) }];
+      throw new Error('unexpected ' + path);
+    },
+    request: async (path, options) => { calls.push(path + ' ' + options.method + ' ' + JSON.stringify(options.body)); return {}; },
+  };
+  const intakeRunner = async (argv) => {
+    const issue = argv[2];
+    if (issue === target) return { issue, action: 'pending-readback', blockers: [], receipt: null, applied: ['project-membership'], pending: { code: 'PROJECT_MEMBERSHIP_READBACK_PENDING', detail: 'lag' } };
+    return { issue, action: 'complete', blockers: [], applied: [], receipt: { status: 'INTAKE_COMPLETE', fields: {}, project: { membershipCount: 1, status: 'Backlog' } } };
+  };
+
+  const summary = await drainQueue({ config, queueClient, writeToken: 'w', intakeRunner, state: 'open' });
+  assert.equal(summary.outcome, 'pending');
+  assert.deepEqual(summary.entries.map((entry) => [entry.requestIssue, entry.status]), [[140, 'pending'], [141, 'complete']]);
+  assert.ok(calls[0].includes('state=open'));
+  assert.ok(!calls.some((call) => call.startsWith('/repos/ChipIn-one/.github/issues/140 PATCH')), 'pending Issue must stay open');
+  assert.ok(calls.some((call) => call.startsWith('/repos/ChipIn-one/.github/issues/141 PATCH')), 'completed Issue is closed');
+  const pendingComment = calls.find((call) => call.startsWith('/repos/ChipIn-one/.github/issues/140/comments POST'));
+  assert.match(pendingComment, /PENDING/);
+
+  await assert.rejects(drainQueue({ config, queueClient, writeToken: 'w', intakeRunner, state: 'closed' }), /Drain state must be all or open/);
+});
+
+test('scheduled retry drain exists, is serialized with the writers and scans open control Issues only', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/issue-intake-drain-retry.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /^  schedule:$/m);
+  assert.match(workflow, /group: canonical-issue-intake-writes/);
+  assert.match(workflow, /issue-intake-request\.mjs drain/);
+  assert.match(workflow, /--state open/);
+  assert.doesNotMatch(workflow, /issue-intake\.mjs apply/);
+});
+
+test('a request still pending after MAX_PENDING_RETRIES results is reported BLOCKED and its control Issue closed', async () => {
+  const target = 'ChipIn-one/chipin-frontend#466';
+  const queued = { schemaVersion: 1, requestIssue: 140, target, issueType: 'Task', priority: 'P2', severity: 'none' };
+  const pendingReceipt = { status: 'pending', blockers: [], request: queued, intake: { applied: [], receipt: null }, pending: { code: 'PROJECT_MEMBERSHIP_READBACK_PENDING', detail: 'lag' } };
+  const comments = (count) => [
+    { id: 10, user: { login: 'github-actions[bot]' }, body: renderQueueComment(queued) },
+    ...Array.from({ length: count }, (_, index) => ({ id: 11 + index, user: { login: 'github-actions[bot]' }, body: renderReceiptComment(pendingReceipt, 10) })),
+  ];
+  const makeClient = (count) => {
+    const calls = [];
+    return { calls, client: {
+      listAll: async (path) => {
+        if (path.startsWith('/repos/ChipIn-one/.github/issues?')) return [{ number: 140, title: '[issue-intake] ' + target, html_url: 'u' }];
+        if (path.endsWith('/issues/140/comments')) return comments(count);
+        throw new Error('unexpected ' + path);
+      },
+      request: async (path, options) => { calls.push(path + ' ' + options.method + ' ' + JSON.stringify(options.body)); return {}; },
+    } };
+  };
+  const stillPending = async (argv) => ({ issue: argv[2], action: 'pending-readback', blockers: [], receipt: null, applied: [], pending: { code: 'PROJECT_MEMBERSHIP_READBACK_PENDING', detail: 'lag' } });
+
+  const fifth = makeClient(5);
+  const summaryPending = await drainQueue({ config, queueClient: fifth.client, writeToken: 'w', intakeRunner: stillPending, state: 'open' });
+  assert.equal(summaryPending.outcome, 'pending');
+  assert.ok(!fifth.calls.some((call) => call.includes('/issues/140 PATCH')), 'still retrying: Issue stays open');
+
+  const sixth = makeClient(6);
+  const summaryBlocked = await drainQueue({ config, queueClient: sixth.client, writeToken: 'w', intakeRunner: stillPending, state: 'open' });
+  assert.equal(summaryBlocked.outcome, 'attention-required');
+  assert.match(summaryBlocked.entries[0].blockers.join(' '), /still pending after 6 retries/);
+  assert.ok(sixth.calls.some((call) => call.includes('/issues/140 PATCH')), 'blocked: Issue is closed');
+  assert.match(sixth.calls.find((call) => call.includes('/comments POST')), /BLOCKED/);
+
+  // a run that completes after earlier PENDING results closes the Issue normally
+  const completes = makeClient(2);
+  const summaryComplete = await drainQueue({ config, queueClient: completes.client, writeToken: 'w', state: 'open',
+    intakeRunner: async (argv) => ({ issue: argv[2], action: 'complete', blockers: [], applied: [], receipt: { status: 'INTAKE_COMPLETE', fields: {}, project: { membershipCount: 1, status: 'Backlog' } } }) });
+  assert.equal(summaryComplete.outcome, 'complete');
+  assert.ok(completes.calls.some((call) => call.includes('/issues/140 PATCH')));
 });
