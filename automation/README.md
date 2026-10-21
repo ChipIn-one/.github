@@ -12,6 +12,10 @@ Project #5 `Status` uses `Backlog`, `Todo`, `In Progress`, and `Done`. `Done` is
 `development-link.mjs`, `create-milestone.mjs` and `pr-metadata.mjs` read repository allowlists, integration branches and owners from it; `registry.test.mjs` guards the admission and intake modules that still carry their own literals against drift.
 Validate locally with `node automation/registry.mjs --validate`; `automation-tests` runs it on every pull request.
 
+## Conformance audit
+
+`conformance.mjs audit` compares every `workflow-registry.yaml` repository (integration branch) with its record: callers, pins against `ChipIn-one/.github` tags, Dependabot `github-actions`, routing block and `.ai/context.md`, protection and required checks, pull requests in Project #5, closed Issues with open PRs, merges past a red required check. `upsert` keeps one drift Issue per repository. Run weekly by `.github/workflows/conformance-audit.yml`; see [docs/workflow/conformance.md](../docs/workflow/conformance.md).
+
 ## Issue intake
 
 `issue-intake.mjs` provides one bounded create/finalize and reconcile path for new ChipIn issues. It reuses active schema IDs and shared Project/Issue readers from `github-metadata.mjs`; migration #117 is historical only.

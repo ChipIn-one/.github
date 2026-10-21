@@ -23,7 +23,7 @@ The standard is specified in full; implementation lands task by task. Statements
 | Release tags and SHA pins, Dependabot in all repositories | planned | [#151](https://github.com/ChipIn-one/.github/issues/151) |
 | Native relationships reconciler and blocker gate | planned | [#136](https://github.com/ChipIn-one/.github/issues/136) |
 | Reusable `pr-gate` / `issue-gate` | planned | [#153](https://github.com/ChipIn-one/.github/issues/153) |
-| Conformance audit | planned | [#154](https://github.com/ChipIn-one/.github/issues/154) |
+| Conformance audit | implemented; scheduled runs plan only until `CONFORMANCE_AUDIT_APPLY` is set | [#154](https://github.com/ChipIn-one/.github/issues/154) |
 | Backend / knowledge-base conformance packages | planned | [#155](https://github.com/ChipIn-one/.github/issues/155), [#158](https://github.com/ChipIn-one/.github/issues/158) |
 | Docs consolidation and routing blocks | planned | [#160](https://github.com/ChipIn-one/.github/issues/160) |
 
@@ -132,7 +132,7 @@ Summary; the full contract is in [relationships.md](relationships.md).
 
 ## 6. Conformance audit
 
-Planned in [#154](https://github.com/ChipIn-one/.github/issues/154); the checks are listed in [conformance.md](conformance.md).
+Implemented in [#154](https://github.com/ChipIn-one/.github/issues/154); the checks are listed in [conformance.md](conformance.md).
 A weekly org workflow reports one `conformance-<repo>.json` artifact per registry repository and keeps one drift Issue per repository in `.github`.
 
 ## 7. Documentation and routing

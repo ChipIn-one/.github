@@ -1,0 +1,94 @@
+name: Conformance audit
+
+# Weekly read-only audit of every workflow-registry.yaml repository (docs/workflow/conformance.md).
+# The audit step uses only the read token. Drift Issues in this repository are written by the
+# separate upsert step, and only when apply is on: dispatch apply=true, or the repository variable
+# CONFORMANCE_AUDIT_APPLY is "true" for scheduled runs. An unreadable repository fails the job and
+# never opens, edits or closes an Issue.
+on:
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Upsert drift Issues (false = audit and print the planned Issue actions only)"
+        required: true
+        default: false
+        type: boolean
+      repository:
+        description: "Optional single registry repository (owner/name); empty = all (UNREGISTERED is reported only for full runs)"
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chipin-conformance-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      APPLY: ${{ (github.event_name == 'workflow_dispatch' && inputs.apply == true) || (github.event_name == 'schedule' && vars.CONFORMANCE_AUDIT_APPLY == 'true') }}
+      TARGET_REPOSITORY: ${{ inputs.repository || '' }}
+    steps:
+      - name: Checkout trusted org workflow
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Run automation tests
+        run: node --test automation/*.test.mjs
+      - name: Audit registry repositories (read-only)
+        id: audit
+        env:
+          GITHUB_TOKEN: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${GITHUB_TOKEN:-}"
+          mkdir -p conformance
+          repo_args=()
+          if [[ -n "$TARGET_REPOSITORY" ]]; then repo_args+=(--repository "$TARGET_REPOSITORY"); fi
+          node automation/conformance.mjs audit "${repo_args[@]}" --dir conformance \
+            --output conformance-report.json --summary conformance-summary.md
+      - name: Publish summary
+        if: always()
+        run: |
+          if [[ -f conformance-summary.md ]]; then cat conformance-summary.md >> "$GITHUB_STEP_SUMMARY"; fi
+      - name: Upsert drift Issues
+        if: ${{ !cancelled() && hashFiles('conformance-report.json') != '' }}
+        env:
+          READ_TOKEN: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.CHIPIN_ISSUE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ "$APPLY" == "true" ]]; then
+            test -n "${WRITE_TOKEN:-}"
+            GITHUB_TOKEN="$WRITE_TOKEN" CHIPIN_CONFORMANCE_WRITE=1 \
+              node automation/conformance.mjs upsert --apply --activate conformance-v1 \
+              --report conformance-report.json --output conformance-upsert.json
+          else
+            GITHUB_TOKEN="$READ_TOKEN" \
+              node automation/conformance.mjs upsert --report conformance-report.json --output conformance-upsert.json
+          fi
+          cat conformance-upsert.json
+      - name: Upload conformance artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-${{ github.run_id }}
+          path: |
+            conformance/conformance-*.json
+            conformance-report.json
+            conformance-summary.md
+            conformance-upsert.json
+          if-no-files-found: warn
+          retention-days: 30
