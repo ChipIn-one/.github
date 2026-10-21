@@ -25,4 +25,4 @@ Before FE/BE/KB task execution (even before a PR exists), use `automation/issue-
 
 ## Tests
 
-Run the automation suite with `node --test automation/*.test.mjs` (CI: `.github/workflows/automation-tests.yml`). The short form `node --test automation/` fails on Node 24 (the directory is treated as a module); do not use it in docs, briefs or PR descriptions.
+Run the automation suite with `node --test automation/*.test.mjs` (CI: `.github/workflows/automation-tests.yml`, Node 24.21.0). The short form `node --test automation/` fails on Node 24+ (the directory is treated as a module); do not use it in docs, briefs or PR descriptions.

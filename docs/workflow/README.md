@@ -12,7 +12,9 @@ Owned by `ChipIn-one/.github`; this directory is the first entry point for every
 | [conformance.md](conformance.md) | what the conformance audit checks |
 
 Task metadata (Issue Type, Priority, Severity, Project #5 Status, Milestone) stays defined by [github-issue-schema.md](../../github-issue-schema.md).
-Automation reference: [automation/README.md](../../automation/README.md). Tests: `node --test automation/*.test.mjs` (the form `node --test automation/` fails on Node 24).
+Automation reference: [automation/README.md](../../automation/README.md).
+
+Tests: `node --test automation/*.test.mjs` (the form `node --test automation/` fails on Node 24+; CI pins 24.21.0).
 
 ## Implementation status
 
