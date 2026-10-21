@@ -5,6 +5,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { GitHubClient, readIssueSnapshot, readProjectSnapshot, verifyOrgSchema, verifyProjectSnapshot } from './github-metadata.mjs';
+import { dependencyBlockers } from './relationships.mjs';
 
 export const ADMISSION_CONTRACT = 'chipin-issue-admission/v1';
 export const ADMISSION_MAX_AGE_MS = 120_000;
@@ -56,7 +57,7 @@ function observedFields(config, snapshot) {
   return { fields, blockers };
 }
 
-export function verifyAdmission({ config, repository, number, selectedOwner = null, snapshot, project, checkedAt = new Date().toISOString(), expectedRevision = null, allowTerminalReconciliation = false }) {
+export function verifyAdmission({ config, repository, number, selectedOwner = null, snapshot, project, checkedAt = new Date().toISOString(), expectedRevision = null, allowTerminalReconciliation = false, enforceDependencies = false }) {
   const blockers = [];
   let owner = null;
   try { owner = requiredOwner(repository, selectedOwner); } catch (error) { blockers.push(error.message); }
@@ -72,6 +73,8 @@ export function verifyAdmission({ config, repository, number, selectedOwner = nu
   if (!issue?.node_id || !issue?.updated_at) blockers.push('Issue node_id/updated_at unavailable for revision-bound admission.');
   blockers.push(...validateBody(issue?.title, issue?.body));
   if (snapshot?.relationsReadable !== true) blockers.push('Issue native relationships are unreadable.');
+  // Execution gate only (readAdmission); intake completeness must not depend on an open blocker.
+  if (enforceDependencies) blockers.push(...dependencyBlockers(snapshot, repository));
   const actualOwners = (issue?.assignees ?? []).map(user => user?.login).filter(Boolean);
   if (!Array.isArray(issue?.assignees)) blockers.push('Native assignees are unreadable.');
   if (owner && !actualOwners.includes(owner)) blockers.push('Required native assignee ' + owner + ' is missing.');
@@ -137,7 +140,7 @@ export async function readAdmission({ client, config, repository, number, select
   catch (error) { blockers.push('Project #5 unreadable: ' + error.message); }
   try { snapshot = await (overrides.readIssueSnapshot ?? readIssueSnapshot)(client, repository, number); }
   catch (error) { blockers.push('Native Issue unreadable: ' + error.message); }
-  const result = verifyAdmission({ config, repository, number, selectedOwner, snapshot, project, expectedRevision });
+  const result = verifyAdmission({ config, repository, number, selectedOwner, snapshot, project, expectedRevision, enforceDependencies: true });
   blockers.push(...result.blockers);
   if (!blockers.length) {
     try {
@@ -151,6 +154,7 @@ export async function readAdmission({ client, config, repository, number, select
         config, repository, number, selectedOwner,
         snapshot: latest, project: latestProject, checkedAt: result.receipt.checkedAt,
         expectedRevision: result.receipt.revision,
+        enforceDependencies: true,
       });
       if (confirmed.blockers.length) {
         blockers.push('STALE: canonical state changed during admission read-back: ' + confirmed.blockers.join('; '));

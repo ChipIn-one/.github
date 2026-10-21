@@ -140,14 +140,16 @@ export function safeAdmissionDiagnostics(blockers, principal, transport) {
   const values = Array.isArray(blockers) ? blockers : [];
   return values.map(b => {
     const s = String(b);
-    const code = /401|403|permission|forbidden/i.test(s) ? 'PERMISSION_DENIED'
+    const code = /^BLOCKED_BY_DEPENDENCY:/.test(s) ? 'BLOCKED_BY_DEPENDENCY'
+      : /401|403|permission|forbidden/i.test(s) ? 'PERMISSION_DENIED'
       : /Organization schema unreadable|Issue field .*missing|Issue Type .*missing/i.test(s) ? 'SCHEMA_UNREADABLE'
       : /Project.*unreadable|Project .*unavailable/i.test(s) ? 'PROJECT_UNREADABLE'
       : /STALE|revision changed|read-back failed/i.test(s) ? 'STALE_REVISION'
       : /Native Issue unreadable/i.test(s) ? 'NATIVE_ISSUE_UNREADABLE'
       : 'INVALID_METADATA';
     return { code, principal, transport, capability: code === 'PROJECT_UNREADABLE' ? 'Project #5' : 'canonical admission',
-      remedy: code === 'STALE_REVISION' ? 'Obtain a fresh full canonical read-back.'
+      remedy: code === 'BLOCKED_BY_DEPENDENCY' ? 'Close the blocking Issue or have a human remove the native edge; Executor must not edit relationships.'
+        : code === 'STALE_REVISION' ? 'Obtain a fresh full canonical read-back.'
         : code === 'INVALID_METADATA' ? 'Use canonical issue-intake owner; Executor must not repair metadata.'
         : 'Confirm existing principal can read org Issue Fields, native Issue and Project #5.' };
   });
