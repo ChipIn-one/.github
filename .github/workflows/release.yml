@@ -1,0 +1,97 @@
+name: Release
+
+# Reusable release workflow (docs/workflow/release.md, task .github#169). A caller repository runs it
+# after a human merge into its release branch (templates/caller-release-*.yml). The job checks out this
+# repository at the exact SHA the caller pinned (job.workflow_sha / job.workflow_repository: the `job`
+# context describes the called workflow, the `github` context always describes the caller), so the
+# engine, the registry and the caller pin move together; an empty or mismatched SHA fails the job before
+# any read. apply=false (default) only prints the plan; apply=true creates the tag and the GitHub Release
+# through the caller's token. Permissions are inherited from the caller job (a called workflow can only
+# downgrade them), so the caller grants contents: write for apply. Tags and Releases created with the
+# default GITHUB_TOKEN do not trigger other workflows (push: tags / release events).
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Release commit (SHA or branch); empty = the caller's event SHA"
+        required: false
+        default: ""
+        type: string
+      initial-version:
+        description: "First version X.Y.Z for a repository without tags; empty otherwise"
+        required: false
+        default: ""
+        type: string
+      apply:
+        description: "Create the tag and the Release (false = plan only)"
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      token:
+        description: "Token for the calling repository: contents read for plan, contents write for apply"
+        required: true
+    outputs:
+      outcome:
+        description: "PLANNED, NO_RELEASE, ALREADY_RELEASED, RELEASE_MISSING, RELEASED or BLOCKED"
+        value: ${{ jobs.release.outputs.outcome }}
+      tag:
+        description: "Created or existing tag; empty when nothing is released"
+        value: ${{ jobs.release.outputs.tag }}
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      outcome: ${{ steps.release.outputs.outcome }}
+      tag: ${{ steps.release.outputs.tag }}
+    env:
+      WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+      WORKFLOW_SHA: ${{ job.workflow_sha }}
+    steps:
+      - name: Require the pinned workflow source
+        run: |
+          set -euo pipefail
+          if [[ "$WORKFLOW_REPOSITORY" != "ChipIn-one/.github" || ! "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::job.workflow_repository/job.workflow_sha are not a pinned ChipIn-one/.github commit (got '$WORKFLOW_REPOSITORY' @ '$WORKFLOW_SHA')"
+            exit 1
+          fi
+      - name: Checkout the pinned org automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: chipin-workflow
+          persist-credentials: false
+      - name: Verify the checkout matches the pin
+        run: |
+          set -euo pipefail
+          head="$(git -C chipin-workflow rev-parse HEAD)"
+          if [[ "$head" != "$WORKFLOW_SHA" ]]; then
+            echo "::error::checked out $head, expected $WORKFLOW_SHA"
+            exit 1
+          fi
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Release
+        id: release
+        uses: ./chipin-workflow/automation/release-action
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.ref != '' && inputs.ref || github.sha }}
+          token: ${{ secrets.token }}
+          initial-version: ${{ inputs.initial-version }}
+          apply: ${{ inputs.apply && 'true' || 'false' }}
+          output: release-receipt.json
+      - name: Upload receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-receipt-${{ github.run_id }}
+          path: release-receipt.json
+          if-no-files-found: warn
+          retention-days: 90

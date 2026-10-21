@@ -33,6 +33,30 @@ Registry rules: `none` has no trigger; `semver-by-impact` uses `promotion-merge`
 - Cleanup of the old flow (`version:bump`, `version:check`, the version resolver, lockfile sync, the related rules) is [#172](https://github.com/ChipIn-one/.github/issues/172).
 - Historical versions 1.0.2-1.0.8 are backfilled as tags on the matching `main` merge commits after the owner approves a dry-run list ([#171](https://github.com/ChipIn-one/.github/issues/171)).
 
+## Engine (`automation/release.mjs`, task #169)
+
+One engine for every `semver-by-impact` and `deploy-tag` repository; the registry profile decides the release branch and the tag prefix.
+
+```bash
+# read-only plan (prints the decision, writes nothing)
+node automation/release.mjs plan --repository ChipIn-one/.github --ref master [--output receipt.json]
+# apply: explicit activation and env switch; the token needs contents: write on the repository
+CHIPIN_RELEASE_WRITE=1 node automation/release.mjs apply --repository ChipIn-one/.github --ref <sha> --activate release-v1
+```
+
+Steps, all fail-closed:
+
+1. Resolve `--ref` to a commit. For `promotion-merge` it must be contained in `branches.promotion`, for `integration-merge` in `branches.integration` (`COMMIT_NOT_ON_RELEASE_BRANCH` otherwise); `production-deploy` takes the deployed SHA as is.
+2. Previous tag: the highest `<prefix>X.Y.Z` tag that is an ancestor of the commit. Tags on other branches are skipped; if tags exist but none is an ancestor → `PREVIOUS_TAG_UNREACHABLE`. A repository without tags needs `--initial-version X.Y.Z` (`NO_PREVIOUS_TAG`); that first release has no inventory and the flag is rejected once a tag exists.
+3. Inventory: the commits between the previous tag and the release commit; for each, the merged pull requests whose base is `branches.integration` and whose merge commit is in that range (for the frontend these are the implementation PRs merged into `dev`). PRs merged into the promotion branch (the `dev -> main` release PR itself, a hotfix straight into `main`) are never counted and are reported as `excludedPullRequests`; commits covered by neither (direct pushes) are `unattributedCommits` and carry no impact. Commits in the range but **no** included PR (a squash-merged promotion, a hotfix-only range, direct pushes only) → `NO_INCLUDED_PULL_REQUESTS`: nothing is guessed, a human decides.
+4. Impact: the first non-empty line of `## Version impact` of every included PR must start with `none`, `patch`, `minor` or `major` (list markers, backticks and bold are ignored, so "- `patch`: …" and "Patch: …" parse). A missing section or any other text → `INVALID_VERSION_IMPACT` with the offending PRs; nothing is guessed. The version is the previous one bumped by the maximum impact; `major` from `0.x` → `MAJOR_FROM_ZERO`.
+5. Idempotency: the release commit already tagged → `ALREADY_RELEASED` (no-op; a tag without a Release → `RELEASE_MISSING`, apply creates only the Release, with the inventory taken from the next lower ancestor tag so the "Included Issues" block is right). The computed tag on another commit → `TAG_CONFLICT`. All included impacts `none` → `NO_RELEASE`. `## Version impact` lines that name more than one keyword ("minor/patch") are invalid; HTML-comment placeholders, checkbox lists and a heading with a trailing colon are not recognised either (fail closed), so PR templates must keep the plain form.
+6. Apply: create the tag ref on the exact SHA, read it back, create the Release with native generated notes plus the "Included Issues" block (from the `Task identity` lines of the included PRs), read it back as published. Any read-back mismatch → `READBACK_MISMATCH`.
+
+Receipt (`--output`, uploaded by the workflow as `release-receipt-<run>`): `contract: chipin-release/v1`, `mode`, `repository`, `strategy`, `trigger`, `sha`, `releaseBranch`, `previousTag`, `includedPullRequests` (`number`, `impact`, `impactRaw`, `taskIdentity`, `mergedAt`), `unattributedCommits`, `impact`, `version`, `tag`, `outcome` (`PLANNED`, `NO_RELEASE`, `ALREADY_RELEASED`, `RELEASE_MISSING`, `RELEASED`, `BLOCKED` + `code`), `detail`. The process exits 1 only for `BLOCKED`.
+
+Callers: the reusable workflow `.github/workflows/release.yml` (`workflow_call`, inputs `ref`, `initial-version`, `apply`; secret `token`) checks out this repository at the SHA the caller pinned (`job.workflow_sha`, verified after checkout; an empty value fails the job) and runs `automation/release-action`. Permissions are inherited from the caller job, which grants `contents: write`; tags and Releases created with the default `GITHUB_TOKEN` do not trigger other workflows (a PAT or App token is needed if something must react to the tag). The templates serialise runs per repository with a `concurrency` group. The inventory relies on `/commits/{sha}/pulls`, which lists merged PRs only for commits reachable from the default branch (true for every registry release branch today). Templates: `templates/caller-release-promotion.yml` (frontend-like, push to the promotion branch) and `templates/caller-release-integration.yml` (`.github`-like, push to the integration branch). No repository adopts them in #169; adoption is [#175](https://github.com/ChipIn-one/.github/issues/175) (`.github`) and [#170](https://github.com/ChipIn-one/.github/issues/170) (frontend).
+
 ## Rollout
 
 | Step | Task |
