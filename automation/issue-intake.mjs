@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   GitHubClient,
+  readIssueProjectItems,
   readIssueSnapshot,
   readProjectSnapshot,
   verifyOrgSchema,
@@ -16,6 +17,12 @@ import { GitHubNativeStore, appendDeclarations, declare, parseIssueRef as parseR
 const APPLY_ACTIVATION = 'issue-intake-v1';
 const APPLY_ENV = 'CHIPIN_ISSUE_WRITE';
 const INITIAL_STATUS = 'Backlog';
+// The membership wait is governed by the time budget; the read cap only bounds a pathological
+// zero-latency loop (120 reads x 2 s delay > 4 min, so the budget always ends first in practice).
+const MEMBERSHIP_READ_ATTEMPTS = 120;
+const MEMBERSHIP_READ_BUDGET_MS = 240000;
+export const PENDING_READBACK_CODE = 'PROJECT_MEMBERSHIP_READBACK_PENDING';
+export const PENDING_STATUS_READBACK_CODE = 'PROJECT_STATUS_READBACK_PENDING';
 // Intake scope is the admission scope of the registry (#183): FE, BE, KB and .github today.
 export function isSupportedIntakeRepository(repository) {
   return isAdmissionRepository(repository);
@@ -507,26 +514,71 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             let memberships = projectItemsFor(project, target.repository, target.number);
             if (memberships.length > 1) throw new Error('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items).');
 
-            const membershipAttempts = overrides.projectMembershipReadAttempts ?? 16;
+            const membershipAttempts = overrides.projectMembershipReadAttempts ?? MEMBERSHIP_READ_ATTEMPTS;
+            const membershipBudgetMs = overrides.projectMembershipReadBudgetMs ?? MEMBERSHIP_READ_BUDGET_MS;
             const statusAttempts = overrides.projectStatusReadAttempts ?? 6;
             const delayMs = overrides.projectMembershipReadDelayMs ?? 2000;
             const sleep = overrides.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+            const now = overrides.now || (() => Date.now());
+            const readIssueItems = overrides.readIssueProjectItems || readIssueProjectItems;
             let statusInitialized = false;
+            let knownStatus = null; // Status already visible on the Issue side (human-owned, never re-initialised)
+
+            const pendingReturn = async (code, detail) => {
+              // Retryable, not a blocker: the next drain re-runs the same idempotent reconcile.
+              result.pending = { code, detail };
+              result.action = 'pending-readback';
+              await emit(result, args.output, persist);
+              process.exitCode = 2;
+              return result;
+            };
 
             if (!memberships.length) {
-              await (overrides.addProjectMembership || addProjectMembership)(client, project, snapshot);
-              result.applied.push('project-membership');
+              // The Project items listing can lag behind an earlier add (2026-10-20: more than 60 s).
+              // The Issue's own projectItems view is read first so a retry never adds a second item.
+              const issueSide = await readIssueItems(client, target.repository, target.number, config.project.number);
+              if (issueSide.length > 1) throw new Error('Project #' + config.project.number + ' has duplicate membership (' + issueSide.length + ' items on the Issue).');
+              let knownItemId = null;
+              if (!issueSide.length) {
+                knownItemId = (await (overrides.addProjectMembership || addProjectMembership)(client, project, snapshot)) || null;
+                result.applied.push('project-membership');
+              } else {
+                knownItemId = issueSide[0].id || null;
+                knownStatus = issueSide[0].status || null;
+                result.applied.push('project-membership:already-present');
+              }
+              // Status is initialised on the item id we already know, so a lagging listing cannot turn
+              // the Status step into a blocker later; the listing wait below only confirms visibility.
+              if (knownItemId && !knownStatus) {
+                await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, knownItemId);
+                result.applied.push('status:' + INITIAL_STATUS);
+                statusInitialized = true;
+              }
 
+              const startedAt = now();
               for (let attempt = 0; attempt < membershipAttempts; attempt += 1) {
                 project = await readProject(client, config);
                 memberships = projectItemsFor(project, target.repository, target.number);
                 if (memberships.length !== 0) break;
-                if (attempt + 1 < membershipAttempts) await sleep(delayMs);
+                if (attempt + 1 >= membershipAttempts || now() - startedAt + delayMs > membershipBudgetMs) break;
+                await sleep(delayMs);
+              }
+
+              if (!memberships.length) {
+                // The add succeeded (or was already present on the Issue) but the Project listing has not
+                // caught up within the budget. The next drain skips the add once the membership is visible.
+                let issueSideCount = 'unknown';
+                try { issueSideCount = String((await readIssueItems(client, target.repository, target.number, config.project.number)).length); }
+                catch { /* diagnostic only; the pending state does not depend on it */ }
+                return pendingReturn(PENDING_READBACK_CODE,
+                  'Project #' + config.project.number + ' membership for ' + key(target.repository, target.number)
+                    + ' is not visible in the Project items listing after ' + Math.round((now() - startedAt) / 1000)
+                    + ' s (' + issueSideCount + ' item(s) visible on the Issue side). Retry the same intake later; nothing is re-added while the Issue shows the item.');
               }
             }
 
             if (memberships.length > 1) throw new Error('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items).');
-            if (memberships.length === 1 && !memberships[0].status) {
+            if (memberships.length === 1 && !memberships[0].status && !statusInitialized && !knownStatus) {
               await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, memberships[0].id);
               result.applied.push('status:' + INITIAL_STATUS);
               statusInitialized = true;
@@ -543,7 +595,12 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             }
 
             if (memberships.length !== 1) throw new Error('Project membership read-back count is ' + memberships.length + ', expected exactly 1.');
-            if (!memberships[0].status) throw new Error('Project Status read-back is missing after mutation.');
+            if (!memberships[0].status) {
+              if (!statusInitialized && !knownStatus) throw new Error('Project Status read-back is missing after mutation.');
+              return pendingReturn(PENDING_STATUS_READBACK_CODE,
+                'Project #' + config.project.number + ' Status ' + (knownStatus ?? INITIAL_STATUS) + ' is ' + (knownStatus ? 'visible on the Issue side' : 'set on item ' + memberships[0].id)
+                  + ' but the Project listing does not show it yet. Retry the same intake later; Status is initialised only when still absent.');
+            }
           } catch (error) { result.blockers.push('Project reconciliation failed: ' + error.message); }
         }
         if (!result.blockers.length) {
