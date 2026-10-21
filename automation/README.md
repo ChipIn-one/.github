@@ -12,6 +12,10 @@ Project #5 `Status` uses `Backlog`, `Todo`, `In Progress`, and `Done`. `Done` is
 `development-link.mjs`, `create-milestone.mjs` and `pr-metadata.mjs` read repository allowlists, integration branches and owners from it; `registry.test.mjs` guards the admission and intake modules that still carry their own literals against drift.
 Validate locally with `node automation/registry.mjs --validate`; `automation-tests` runs it on every pull request.
 
+## Native relationships
+
+`relationships.mjs` is the only writer of native Issue relationships (`blocked by`, `relates to`, parent/sub-issue). It parses `Blocked by:`, `Blocks:`, `Relates to:` and `Parent:` lines in `## Dependencies`, adds missing native edges (never removes, inverts or re-parents), mirrors native edges back into the body, reads every write back, and exposes the read-only blocker gate used by `readAdmission()` (`BLOCKED_BY_DEPENDENCY`). `reconcile` is run by `.github/workflows/relationships-reconcile.yml`; `declare` writes lines and edges for one Issue; `issue-intake.mjs apply create` accepts `--blocked-by/--blocks/--relates-to/--parent`. See [docs/workflow/relationships.md](../docs/workflow/relationships.md).
+
 ## Issue intake
 
 `issue-intake.mjs` provides one bounded create/finalize and reconcile path for new ChipIn issues. It reuses active schema IDs and shared Project/Issue readers from `github-metadata.mjs`; migration #117 is historical only.

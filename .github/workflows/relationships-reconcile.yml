@@ -1,0 +1,81 @@
+name: Relationships reconcile
+
+# Add-only reconciler for native Issue relationships (docs/workflow/relationships.md).
+# Scheduled runs are read-only plans until the repository variable RELATIONSHIPS_RECONCILE_APPLY
+# is set to "true"; a manual dispatch applies only with apply=true. Writes use the separate
+# CHIPIN_ISSUE_WRITE_TOKEN. The workflow never closes Issues and never changes Project Status.
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Write missing native edges and declaration lines (false = read-only plan)"
+        required: true
+        default: false
+        type: boolean
+      repository:
+        description: "Optional single registry repository (owner/name); empty = all registry repositories"
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chipin-relationships-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      APPLY: ${{ (github.event_name == 'workflow_dispatch' && inputs.apply == true) || (github.event_name == 'schedule' && vars.RELATIONSHIPS_RECONCILE_APPLY == 'true') }}
+      TARGET_REPOSITORY: ${{ inputs.repository || '' }}
+      RECEIPT_PATH: relationships-receipt.json
+    steps:
+      - name: Checkout trusted org workflow
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Run automation tests
+        run: node --test automation/*.test.mjs
+      - name: Reconcile native relationships
+        env:
+          READ_TOKEN: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.CHIPIN_ISSUE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo_args=()
+          if [[ -n "$TARGET_REPOSITORY" ]]; then repo_args+=(--repository "$TARGET_REPOSITORY"); fi
+          if [[ "$APPLY" == "true" ]]; then
+            test -n "${WRITE_TOKEN:-}"
+            GITHUB_TOKEN="$WRITE_TOKEN" CHIPIN_RELATIONSHIPS_WRITE=1 \
+              node automation/relationships.mjs reconcile --apply --activate relationships-v1 \
+              "${repo_args[@]}" --output "$RECEIPT_PATH"
+          else
+            test -n "${READ_TOKEN:-}"
+            GITHUB_TOKEN="$READ_TOKEN" \
+              node automation/relationships.mjs reconcile "${repo_args[@]}" --output "$RECEIPT_PATH"
+          fi
+      - name: Summarize
+        if: always()
+        run: |
+          if [[ -f "$RECEIPT_PATH" ]]; then
+            node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1]));console.log("## Relationships reconcile ("+r.mode+")\n\n- outcome: "+r.outcome+"\n- "+JSON.stringify(r.summary))' "$RECEIPT_PATH" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relationships-receipt-${{ github.run_id }}
+          path: relationships-receipt.json
+          if-no-files-found: warn
+          retention-days: 30

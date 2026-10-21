@@ -21,7 +21,7 @@ The standard is specified in full; implementation lands task by task. Statements
 | --- | --- | --- |
 | Registry `workflow-registry.yaml` + loader `automation/registry.mjs` | implemented | [#150](https://github.com/ChipIn-one/.github/issues/150) |
 | Release tags and SHA pins, Dependabot in all repositories | planned | [#151](https://github.com/ChipIn-one/.github/issues/151) |
-| Native relationships reconciler and blocker gate | planned | [#136](https://github.com/ChipIn-one/.github/issues/136) |
+| Native relationships reconciler and blocker gate | implemented; scheduled runs plan only until live acceptance | [#136](https://github.com/ChipIn-one/.github/issues/136), [#152](https://github.com/ChipIn-one/.github/issues/152) |
 | Reusable `pr-gate` / `issue-gate` | planned | [#153](https://github.com/ChipIn-one/.github/issues/153) |
 | Conformance audit | planned | [#154](https://github.com/ChipIn-one/.github/issues/154) |
 | Backend / knowledge-base conformance packages | planned | [#155](https://github.com/ChipIn-one/.github/issues/155), [#158](https://github.com/ChipIn-one/.github/issues/158) |
@@ -39,7 +39,7 @@ Principles (fixed inside v1):
    native relationships (blocked by, relates to, parent/sub-issue, Development link). Markdown, labels and comments only transport intent; they are not state.
 2. Fail closed: unreadable, ambiguous or stale state blocks instead of being guessed.
 3. Only a human merges. Automation never closes an Issue because of Status `Done` and never changes Status because a PR merged.
-4. One writer per kind of metadata: intake — `automation/issue-intake.mjs`; relationships — `automation/relationships.mjs` (planned, #136);
+4. One writer per kind of metadata: intake — `automation/issue-intake.mjs`; relationships — `automation/relationships.mjs`;
    Project — `pr-project-writer.mjs`; completion — `frontend-production-completion.mjs` (and future profile-specific writers). Executor agents have no write rights.
 5. Extensibility: a new repository is one registry record plus two caller files. Logic knows `kind` and capabilities, not the names FE/BE/KB.
 6. Cost: $0 of infrastructure beyond GitHub; CI minutes are saved with path filters and self-hosted runners where they exist.

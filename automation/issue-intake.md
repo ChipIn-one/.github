@@ -119,6 +119,8 @@ Coverage includes explicit intake, optional Milestone behavior, rejection of ret
 
 The sole canonical create/reconcile writer remains `issue-intake.mjs`. It now validates a substantive title/body, actual assignees (FE `syllik`, BE `olegbal`, KB explicitly supplied `--owner <login>`), Type/Priority/applicable Severity, Project #5 membership/Status and full native read-back before an `INTAKE_COMPLETE` receipt. Other native human assignees and Milestones are never cleared. Reads fail closed, and a writer checkpoint with unknown issue identity cannot be retried as a new create.
 
+`apply create` also accepts repeatable `--blocked-by`, `--blocks`, `--relates-to` and `--parent` (`owner/repo#number`). The declaration lines are added to `## Dependencies` of the created body and the native edges are written after the Issue is created, with read-back; any relationship blocker makes the receipt `incomplete`. `reconcile` rejects these flags: it never edits bodies (use `relationships.mjs declare`). See [docs/workflow/relationships.md](../docs/workflow/relationships.md).
+
 Read-only preflight (run again immediately before each execution/publication/handoff, not from a stored cache):
 
 ```sh
