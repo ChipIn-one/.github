@@ -6,6 +6,12 @@ This directory contains narrow, fail-closed automation for ChipIn GitHub coordin
 
 Project #5 `Status` uses `Backlog`, `Todo`, `In Progress`, and `Done`. `Done` is accepted only as a derived mirror of an Issue already `closed/completed`; terminal completion authority remains native Issue closure. `DEV`/`PROD` stay retired. The retired DEV-readiness reader/writer workflows are not part of the active automation surface; PR merge state remains native GitHub evidence.
 
+## Repository registry
+
+`registry.mjs` loads and validates `../workflow-registry.yaml` (see [docs/workflow](../docs/workflow/README.md)): repository kind, owner, branches, protection and capabilities.
+`development-link.mjs`, `create-milestone.mjs` and `pr-metadata.mjs` read repository allowlists, integration branches and owners from it; `registry.test.mjs` guards the admission and intake modules that still carry their own literals against drift.
+Validate locally with `node automation/registry.mjs --validate`; `automation-tests` runs it on every pull request.
+
 ## Issue intake
 
 `issue-intake.mjs` provides one bounded create/finalize and reconcile path for new ChipIn issues. It reuses active schema IDs and shared Project/Issue readers from `github-metadata.mjs`; migration #117 is historical only.

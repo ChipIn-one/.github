@@ -1,0 +1,245 @@
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+
+import { SUPPORTED_REPOSITORIES, readTaskIdentityMarker } from './development-link.mjs';
+import { isSupportedIntakeRepository } from './issue-intake.mjs';
+import { requiredOwner } from './issue-admission.mjs';
+import {
+  KIND_DEFAULTS, REGISTRY_PATH, RegistryError, getRepositoryProfile, integrationBranch,
+  listRepositories, loadRegistry, main, parseYamlSubset, requireRepositoryProfile, validateRegistry,
+} from './registry.mjs';
+
+const FE = 'ChipIn-one/chipin-frontend';
+const BE = 'ChipIn-one/chipin-backend';
+const KB = 'ChipIn-one/chipin-knowledge-base';
+const META = 'ChipIn-one/.github';
+
+const record = (overrides = {}) => ({
+  repository: 'ChipIn-one/example', kind: 'code', visibility: 'public', owner: 'syllik',
+  branches: { default: 'main', integration: 'main' }, deploymentProfile: 'none',
+  completion: 'production-merge', protection: 'unavailable', requiredChecks: [], ...overrides,
+});
+const document = (repositories = [record()]) => ({
+  schemaVersion: 1, standardVersion: 'v1', project: { number: 5, statuses: ['Backlog', 'Done'] }, repositories,
+});
+const rejects = (fn, code) => assert.throws(fn, error => error instanceof RegistryError && error.code === code,
+  `expected ${code}`);
+
+test('YAML subset: block and flow collections, comments, scalars', () => {
+  const parsed = parseYamlSubset([
+    '# header',
+    'a: 1  # trailing',
+    'b: [x y, "q # not comment", \'s\']',
+    'c: { k: v, n: null, t: true, e: [] }',
+    'list:',
+    '  - name: one',
+    '    deep:',
+    '      - 7',
+    '  - plain',
+    'empty:',
+    'tail: value',
+  ].join('\n'));
+  assert.deepEqual(parsed, {
+    a: 1, b: ['x y', 'q # not comment', 's'], c: { k: 'v', n: null, t: true, e: [] },
+    list: [{ name: 'one', deep: [7] }, 'plain'], empty: null, tail: 'value',
+  });
+});
+
+test('YAML subset rejects what it does not understand instead of guessing', () => {
+  rejects(() => parseYamlSubset(''), 'YAML_EMPTY');
+  rejects(() => parseYamlSubset('a: 1\na: 2'), 'YAML_DUPLICATE_KEY');
+  rejects(() => parseYamlSubset('a: { k: 1, k: 2 }'), 'YAML_DUPLICATE_KEY');
+  rejects(() => parseYamlSubset('a:\n\tb: 1'), 'YAML_UNSUPPORTED');
+  rejects(() => parseYamlSubset('a: &anchor 1'), 'YAML_UNSUPPORTED');
+  rejects(() => parseYamlSubset('a: |\n  text'), 'YAML_UNSUPPORTED');
+  rejects(() => parseYamlSubset('a: !tag 1'), 'YAML_UNSUPPORTED');
+  rejects(() => parseYamlSubset('a: b: c'), 'YAML_UNSUPPORTED');
+  rejects(() => parseYamlSubset('a: [1, 2'), 'YAML_UNSUPPORTED');
+  rejects(() => parseYamlSubset('a: "open'), 'YAML_UNSUPPORTED');
+  rejects(() => parseYamlSubset('a: [1] extra'), 'YAML_UNSUPPORTED');
+  rejects(() => parseYamlSubset('---\na: 1'), 'YAML_UNSUPPORTED');
+  rejects(() => parseYamlSubset('a: 1\n  b: 2'), 'YAML_INDENT');
+  rejects(() => parseYamlSubset('just text'), 'YAML_SYNTAX');
+});
+
+test('workflow-registry.yaml matches the approved standard exactly', () => {
+  const registry = loadRegistry();
+  assert.equal(registry.schemaVersion, 1);
+  assert.equal(registry.standardVersion, 'v1');
+  assert.deepEqual(registry.project, { number: 5, statuses: ['Backlog', 'Todo', 'In Progress', 'Done'] });
+  assert.deepEqual(registry.repositories.map(profile => profile.repository), [FE, BE, KB, META]);
+
+  assert.deepEqual(getRepositoryProfile(FE), {
+    repository: FE, kind: 'code', visibility: 'public', owner: 'syllik',
+    branches: { default: 'main', integration: 'dev', promotion: 'main' },
+    deploymentProfile: 'production', completion: 'production-merge', protection: 'ruleset',
+    requiredChecks: ['frontend-ci'],
+    capabilities: { admission: 'required', developmentLink: 'required', prMetadata: 'required',
+      relationships: 'required', completion: 'automatic', milestones: 'enabled',
+      dependabot: 'required', agentRouting: 'required' },
+  });
+  assert.deepEqual(getRepositoryProfile(BE), {
+    repository: BE, kind: 'code', visibility: 'private', owner: 'olegbal',
+    branches: { default: 'develop', integration: 'develop', promotion: null },
+    deploymentProfile: 'production', completion: 'manual', protection: 'unavailable',
+    requiredChecks: ['Unit and integration tests'],
+    capabilities: { admission: 'advisory', developmentLink: 'required', prMetadata: 'required',
+      relationships: 'required', completion: 'manual', milestones: 'enabled',
+      dependabot: 'required', agentRouting: 'required' },
+  });
+  assert.deepEqual(getRepositoryProfile(KB), {
+    repository: KB, kind: 'docs', visibility: 'private', owner: null,
+    branches: { default: 'master', integration: 'master', promotion: null },
+    deploymentProfile: 'none', completion: 'manual', protection: 'unavailable', requiredChecks: [],
+    capabilities: { admission: 'advisory', developmentLink: 'required', prMetadata: 'off',
+      relationships: 'required', completion: 'manual', milestones: 'off',
+      dependabot: 'required', agentRouting: 'required' },
+  });
+  assert.deepEqual(getRepositoryProfile(META), {
+    repository: META, kind: 'meta', visibility: 'public', owner: 'syllik',
+    branches: { default: 'master', integration: 'master', promotion: null },
+    deploymentProfile: 'none', completion: 'integration-merge', protection: 'ruleset',
+    requiredChecks: ['evaluate-fixtures'],
+    capabilities: { admission: 'advisory', developmentLink: 'required', prMetadata: 'off',
+      relationships: 'required', completion: 'manual', milestones: 'off',
+      dependabot: 'required', agentRouting: 'required' },
+  });
+});
+
+test('loaded registry is immutable and cached for the default path', () => {
+  const registry = loadRegistry();
+  assert.equal(loadRegistry(), registry);
+  assert.throws(() => { registry.repositories[0].owner = 'someone'; }, TypeError);
+  assert.throws(() => { registry.repositories[0].capabilities.admission = 'off'; }, TypeError);
+  assert.throws(() => { registry.project.statuses.push('X'); }, TypeError);
+});
+
+test('unknown repository is null for lookup and fail-closed for require', () => {
+  assert.equal(getRepositoryProfile('ChipIn-one/chipin-notifications'), null);
+  assert.equal(getRepositoryProfile(undefined), null);
+  rejects(() => requireRepositoryProfile('ChipIn-one/chipin-notifications'), 'UNKNOWN_REPOSITORY');
+  rejects(() => integrationBranch('ChipIn-one/chipin-notifications'), 'UNKNOWN_REPOSITORY');
+  assert.equal(getRepositoryProfile('chipin-one/CHIPIN-FRONTEND').repository, FE);
+});
+
+test('schema rejects unknown keys at every level and missing keys', () => {
+  rejects(() => validateRegistry({ ...document(), extra: 1 }), 'REGISTRY_SCHEMA');
+  rejects(() => validateRegistry({ ...document(), project: { number: 5, statuses: ['A'], extra: 1 } }), 'REGISTRY_SCHEMA');
+  rejects(() => validateRegistry(document([record({ surprise: true })])), 'REGISTRY_SCHEMA');
+  rejects(() => validateRegistry(document([record({ branches: { default: 'main', integration: 'main', x: 'y' } })])), 'REGISTRY_SCHEMA');
+  rejects(() => validateRegistry(document([record({ capabilities: { teleport: 'required' } })])), 'REGISTRY_SCHEMA');
+  const { owner, ...withoutOwner } = record();
+  rejects(() => validateRegistry(document([withoutOwner])), 'REGISTRY_SCHEMA');
+  rejects(() => validateRegistry(document([])), 'REGISTRY_SCHEMA');
+  rejects(() => validateRegistry({ schemaVersion: 1, standardVersion: 'v1', repositories: [] }), 'REGISTRY_SCHEMA');
+});
+
+test('schema rejects invalid values', () => {
+  rejects(() => validateRegistry({ ...document(), schemaVersion: 2 }), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry({ ...document(), standardVersion: '1.0' }), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ capabilities: { admission: 'sometimes' } })])), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ capabilities: { prMetadata: 'advisory' } })])), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ kind: 'service' })])), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ protection: 'maybe' })])), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ repository: 'other-org/repo' })])), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ owner: 'not a login' })])), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ owner: null })])), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ requiredChecks: ['a', 'a'] })])), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ branches: { default: '', integration: 'main' } })])), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry({ ...document(), project: { number: 0, statuses: ['A'] } }), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry({ ...document(), project: { number: 5, statuses: ['A', 'A'] } }), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ completion: 'manual', capabilities: { completion: 'automatic' } })])),
+    'REGISTRY_VALUE');
+});
+
+test('owner may be null only for docs repositories', () => {
+  const docs = validateRegistry(document([record({ kind: 'docs', owner: null })]));
+  assert.equal(docs.repositories[0].owner, null);
+});
+
+test('duplicate repository is rejected case-insensitively', () => {
+  rejects(() => validateRegistry(document([record(), record({ repository: 'ChipIn-one/EXAMPLE' })])), 'REGISTRY_DUPLICATE');
+});
+
+test('capabilities default by kind and the record overrides the default', () => {
+  const [code, docs, meta, override] = validateRegistry(document([
+    record({ repository: 'ChipIn-one/a' }),
+    record({ repository: 'ChipIn-one/b', kind: 'docs' }),
+    record({ repository: 'ChipIn-one/c', kind: 'meta' }),
+    record({ repository: 'ChipIn-one/d', capabilities: { admission: 'advisory', milestones: 'off' } }),
+  ])).repositories;
+  assert.deepEqual(code.capabilities, KIND_DEFAULTS.code);
+  assert.equal(docs.capabilities.prMetadata, 'off');
+  assert.equal(docs.capabilities.milestones, 'off');
+  assert.equal(docs.capabilities.admission, 'required');
+  assert.equal(meta.capabilities.prMetadata, 'off');
+  assert.equal(meta.capabilities.milestones, 'enabled');
+  assert.equal(override.capabilities.admission, 'advisory');
+  assert.equal(override.capabilities.milestones, 'off');
+  assert.equal(override.capabilities.prMetadata, 'required');
+});
+
+test('loadRegistry reports an unreadable file as a registry error', () => {
+  rejects(() => loadRegistry({ path: '/nonexistent/workflow-registry.yaml' }), 'REGISTRY_UNREADABLE');
+});
+
+test('listRepositories filters by kind and capability', () => {
+  assert.deepEqual(listRepositories({ kinds: ['code', 'docs'], capability: 'developmentLink' }), [FE, BE, KB]);
+  assert.deepEqual(listRepositories({ capability: 'milestones', values: ['enabled'] }), [FE, BE]);
+  assert.deepEqual(listRepositories({ capability: 'prMetadata' }), [FE, BE]);
+  assert.deepEqual(listRepositories({ capability: 'admission', values: ['advisory'] }), [BE, KB, META]);
+  assert.deepEqual(listRepositories({ kinds: ['meta'] }), [META]);
+  rejects(() => listRepositories({ capability: 'nope' }), 'REGISTRY_VALUE');
+});
+
+test('registry drift guard: allowlists elsewhere still agree with the registry', async () => {
+  const taskRepositories = listRepositories({ kinds: ['code', 'docs'] });
+  assert.deepEqual([...SUPPORTED_REPOSITORIES], taskRepositories);
+  for (const repository of taskRepositories) assert.equal(isSupportedIntakeRepository(repository), true);
+  assert.equal(isSupportedIntakeRepository(META), false);
+
+  // issue-admission.mjs still carries its own owner table; it must agree with the registry.
+  for (const repository of taskRepositories) {
+    const { owner } = getRepositoryProfile(repository);
+    assert.equal(requiredOwner(repository, owner === null ? 'syllik' : null), owner ?? 'syllik');
+  }
+  assert.throws(() => requiredOwner(META), /Unsupported admission repository/);
+
+  const migration = JSON.parse(await readFile(new URL('./metadata-migration.config.json', import.meta.url), 'utf8'));
+  assert.equal(migration.project.number, loadRegistry().project.number);
+  assert.deepEqual(migration.project.statusValues, [...loadRegistry().project.statuses]);
+});
+
+test('consumers resolve the same behavior from the registry as the old literals', () => {
+  assert.deepEqual([...SUPPORTED_REPOSITORIES].sort(), [BE, FE, KB]);
+  assert.equal(integrationBranch(FE), 'dev');
+  assert.equal(integrationBranch(BE), 'develop');
+  assert.equal(integrationBranch(KB), 'master');
+  for (const repository of [FE, BE, KB]) {
+    assert.equal(readTaskIdentityMarker(`Task identity: ${repository}#12`).repository, repository);
+  }
+  assert.throws(() => readTaskIdentityMarker(`Task identity: ${META}#12`), /./);
+  assert.throws(() => readTaskIdentityMarker('Task identity: ChipIn-one/chipin-frontendX#12'), /./);
+});
+
+test('CLI validates the real registry and fails closed on a broken file', async () => {
+  const out = []; const err = [];
+  const stdout = { write: text => out.push(text) };
+  const stderr = { write: text => err.push(text) };
+  assert.equal(main(['--validate'], stdout, stderr), 0);
+  assert.match(out.join(''), /^REGISTRY OK: 4 repositories, standard v1/);
+
+  const dir = await mkdtemp(join(tmpdir(), 'registry-test-'));
+  const broken = join(dir, 'broken.yaml');
+  const real = await readFile(REGISTRY_PATH, 'utf8');
+  await writeFile(broken, real.replace('owner: olegbal', 'owner: olegbal\n    surprise: 1'));
+  assert.equal(main(['--validate', '--file', broken], stdout, stderr), 1);
+  assert.match(err.join(''), /REGISTRY INVALID: REGISTRY_SCHEMA: repositories\[1\]: unknown key "surprise"/);
+
+  assert.equal(main([], stdout, stderr), 2);
+  assert.equal(main(['--validate', '--file'], stdout, stderr), 2);
+  assert.equal(main(['--validate', '--bogus'], stdout, stderr), 2);
+});

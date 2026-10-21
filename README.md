@@ -7,6 +7,8 @@ Organisation-wide defaults and GitHub coordination tooling for `ChipIn-one`.
 | `.github/ISSUE_TEMPLATE/` | shared Issue Forms: bug, enhancement, docs, tests, research |
 | `.github/workflows/issue-metadata-finalize.yml` | manual UI finalizer for canonical issue metadata and Project #5 membership/Status |
 | `github-issue-schema.md` | canonical task metadata model |
+| `workflow-registry.yaml` | machine-readable registry of repositories in the ChipIn workflow standard |
+| `docs/workflow/` | [ChipIn Workflow Standard v1](docs/workflow/README.md): registry, pins, relationships, conformance, onboarding |
 | `automation/` | fail-closed coordination, issue-intake, and metadata migration tooling |
 
 ## Shared templates and repository overrides

@@ -5,14 +5,19 @@ import { readFile } from "node:fs/promises";
 
 import { GitHubClient } from "./github-metadata.mjs";
 import { readAdmission, assertFreshReceipt } from "./issue-admission.mjs";
+import { getRepositoryProfile, integrationBranch, listRepositories } from "./registry.mjs";
 
-export const SUPPORTED_REPOSITORIES = new Set([
-  "ChipIn-one/chipin-frontend",
-  "ChipIn-one/chipin-backend",
-  "ChipIn-one/chipin-knowledge-base",
-]);
+// Task repositories come from workflow-registry.yaml. Meta repositories host the shared
+// automation; their Issues are not Task-admitted (the admission allowlists are code/docs only).
+export const SUPPORTED_REPOSITORIES = new Set(
+  listRepositories({ kinds: ["code", "docs"], capability: "developmentLink" }),
+);
 
-const TASK_IDENTITY_PATTERN = /^ChipIn-one\/(chipin-frontend|chipin-backend|chipin-knowledge-base)#([1-9]\d*)$/u;
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+const TASK_IDENTITY_PATTERN = new RegExp(
+  "^ChipIn-one\\/(" + [...SUPPORTED_REPOSITORIES].map((name) => escapeRegExp(name.split("/")[1])).join("|") + ")#([1-9]\\d*)$",
+  "u",
+);
 const TASK_IDENTITY_MARKER = "Task identity:";
 
 const TARGET_QUERY = `
@@ -335,18 +340,15 @@ export async function reconcileDevelopmentLink(client, {
     if (current?.number !== prNumber || current?.state !== 'open' ||
         current?.head?.sha !== expectedHeadSha || current?.head?.repo?.full_name !== repository ||
         current?.base?.repo?.full_name !== repository ||
-        current?.base?.ref !== ({
-          'ChipIn-one/chipin-frontend': 'dev',
-          'ChipIn-one/chipin-backend': 'develop',
-          'ChipIn-one/chipin-knowledge-base': 'master',
-        })[repository]) {
+        current?.base?.ref !== integrationBranch(repository)) {
       throw new Error('STALE: PR head SHA/state/branch changed after canonical admission.');
     }
     const admittedMarker = readTaskIdentityMarker(current.body);
     if (!admittedMarker || admittedMarker.canonical !== task.canonical) {
       throw new Error('STALE: PR Task identity changed or disappeared after canonical admission.');
     }
-    if (repository === 'ChipIn-one/chipin-knowledge-base') {
+    // Registry owner null = the task owner is chosen at intake (KB), so the PR must declare it.
+    if (getRepositoryProfile(repository)?.owner === null) {
       let currentOwner;
       try { currentOwner = readKBTaskOwnerMarker(current.body); }
       catch (error) { throw new Error('STALE: ' + error.message); }
@@ -387,11 +389,7 @@ export async function reconcileDevelopmentLink(client, {
         afterAdmission?.head?.sha !== expectedHeadSha ||
         afterAdmission?.head?.repo?.full_name !== repository ||
         afterAdmission?.base?.repo?.full_name !== repository ||
-        afterAdmission?.base?.ref !== ({
-          'ChipIn-one/chipin-frontend': 'dev',
-          'ChipIn-one/chipin-backend': 'develop',
-          'ChipIn-one/chipin-knowledge-base': 'master',
-        })[repository] ||
+        afterAdmission?.base?.ref !== integrationBranch(repository) ||
         afterAdmission?.body !== admittedPRBody) {
       throw new Error('STALE: PR head, state, branch or body changed during live Issue admission.');
     }
