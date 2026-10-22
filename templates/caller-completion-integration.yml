@@ -1,0 +1,25 @@
+# Caller template for repositories with completion: integration-merge
+# (registry example: ChipIn-one/chipin-knowledge-base, merges to master). Copy to
+# .github/workflows/completion.yml in the repository, set the integration branch and the pin.
+# Issues close only when a native Development link ties them to the merged PR
+# (native-development-link caller); Project #5 repair is off, the Done mirror is Project-side.
+name: Completion
+on:
+  push:
+    branches: [master]          # branches.integration from workflow-registry.yaml
+permissions:
+  contents: read
+  issues: write                 # close completed Issues in this repository
+  pull-requests: read
+concurrency:
+  group: completion-${{ github.repository }}   # one completion run at a time; a later push waits, never cancels
+  cancel-in-progress: false
+jobs:
+  completion:
+    if: github.repository_owner == 'ChipIn-one'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: ChipIn-one/.github/automation/completion-action@<sha>   # vX.Y.Z — pin the org tag SHA
+        with:
+          token: ${{ github.token }}

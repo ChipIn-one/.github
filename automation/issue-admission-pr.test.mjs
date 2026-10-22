@@ -22,10 +22,9 @@ test('implementation needs one exact same-repository identity before PR handoff'
 });
 test('.github implementation PRs are admitted against master; repositories outside admission scope are rejected', () => {
   const META = 'ChipIn-one/.github';
-  // .github is inside admission scope (no "Unsupported PR admission repository"); the implementation-PR
-  // identity marker itself stays limited to the development-link scope (code/docs repositories), which
-  // is the documented boundary until a .github PR caller exists (#153).
-  assert.throws(() => taskIdentitiesForPr(META, pr(META, 'master', 'feat/issue-183', 'Task identity: ' + META + '#183')), /Task identity must be exactly/);
+  // .github is inside admission scope, and since #179 (completion for .github needs the Development link)
+  // its implementation-PR identity marker is accepted like FE/BE/KB.
+  assert.deepEqual(taskIdentitiesForPr(META, pr(META, 'master', 'feat/issue-183', 'Task identity: ' + META + '#183')).map(x => x.issueNumber), [183]);
   assert.equal(selectedOwnerForPr(META, 'Task identity: ' + META + '#183'), null);
   assert.throws(() => taskIdentitiesForPr('ChipIn-one/chipin-notifications', pr('ChipIn-one/chipin-notifications', 'main')), /Unsupported PR admission repository/);
   assert.throws(() => taskIdentitiesForPr('ChipIn-one/slack-rofls', pr('ChipIn-one/slack-rofls', 'main')), /Unsupported PR admission repository/);

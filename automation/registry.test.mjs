@@ -98,10 +98,10 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
   assert.deepEqual(getRepositoryProfile(KB), {
     repository: KB, kind: 'docs', visibility: 'private', owner: null,
     branches: { default: 'master', integration: 'master', promotion: null },
-    deploymentProfile: 'none', completion: 'manual', protection: 'unavailable', requiredChecks: [],
+    deploymentProfile: 'none', completion: 'integration-merge', protection: 'unavailable', requiredChecks: [],
     release: { strategy: 'none', trigger: null, tagPrefix: 'v' },
     capabilities: { admission: 'advisory', developmentLink: 'required', prMetadata: 'off',
-      relationships: 'required', completion: 'manual', milestones: 'off',
+      relationships: 'required', completion: 'automatic', milestones: 'off',
       dependabot: 'required', agentRouting: 'required' },
   });
   assert.deepEqual(getRepositoryProfile(META), {
@@ -111,7 +111,7 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
     requiredChecks: ['evaluate-fixtures'],
     release: { strategy: 'semver-by-impact', trigger: 'integration-merge', tagPrefix: 'v' },
     capabilities: { admission: 'advisory', developmentLink: 'required', prMetadata: 'off',
-      relationships: 'required', completion: 'manual', milestones: 'off',
+      relationships: 'required', completion: 'automatic', milestones: 'off',
       dependabot: 'required', agentRouting: 'required' },
   });
   assert.deepEqual(getRepositoryProfile(NOTIF), {
@@ -170,8 +170,17 @@ test('schema rejects invalid values', () => {
   rejects(() => validateRegistry(document([record({ branches: { default: '', integration: 'main' } })])), 'REGISTRY_VALUE');
   rejects(() => validateRegistry({ ...document(), project: { number: 0, statuses: ['A'] } }), 'REGISTRY_VALUE');
   rejects(() => validateRegistry({ ...document(), project: { number: 5, statuses: ['A', 'A'] } }), 'REGISTRY_VALUE');
+  // `automatic` needs a strategy the completion engine implements (automation/completion.mjs)
   rejects(() => validateRegistry(document([record({ completion: 'manual', capabilities: { completion: 'automatic' } })])),
     'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ completion: 'deployment-receipt', capabilities: { completion: 'automatic' } })])),
+    'REGISTRY_VALUE');
+  for (const completion of ['production-merge', 'integration-merge']) {
+    const ok = validateRegistry(document([record({ completion, capabilities: { completion: 'automatic' } })]));
+    assert.equal(ok.repositories[0].capabilities.completion, 'automatic');
+  }
+  assert.equal(validateRegistry(document([record({ completion: 'deployment-receipt', capabilities: { completion: 'manual' } })]))
+    .repositories[0].completion, 'deployment-receipt');
 });
 
 test('owner may be null only for docs repositories', () => {
@@ -207,6 +216,7 @@ test('loadRegistry reports an unreadable file as a registry error', () => {
 
 test('listRepositories filters by kind and capability', () => {
   assert.deepEqual(listRepositories({ kinds: ['code', 'docs'], capability: 'developmentLink' }), [FE, BE, KB]);
+  assert.deepEqual(listRepositories({ kinds: ['code', 'docs', 'meta'], capability: 'developmentLink' }), [FE, BE, KB, META]);
   assert.deepEqual(listRepositories({ capability: 'milestones', values: ['enabled'] }), [FE, BE]);
   assert.deepEqual(listRepositories({ capability: 'prMetadata' }), [FE, BE]);
   assert.deepEqual(listRepositories({ capability: 'admission', values: ['advisory'] }), [BE, KB, META]);
@@ -215,9 +225,9 @@ test('listRepositories filters by kind and capability', () => {
 });
 
 test('admission and intake scope is the registry: every repository with admission on, owner from its record', async () => {
-  const taskRepositories = listRepositories({ kinds: ['code', 'docs'], capability: 'developmentLink' });
+  const taskRepositories = listRepositories({ kinds: ['code', 'docs', 'meta'], capability: 'developmentLink' });
   assert.deepEqual([...SUPPORTED_REPOSITORIES], taskRepositories);
-  assert.deepEqual(taskRepositories, [FE, BE, KB], 'chipin-notifications is registered with every task capability off');
+  assert.deepEqual(taskRepositories, [FE, BE, KB, META], 'chipin-notifications is registered with every task capability off; .github PRs are linked since #179');
   assert.deepEqual(listRepositories({ capability: 'admission' }), [FE, BE, KB, META]);
   assert.deepEqual(admissionRepositories(), [FE, BE, KB, META]);
   for (const repository of [FE, BE, KB, META]) assert.equal(isSupportedIntakeRepository(repository), true);
@@ -239,14 +249,14 @@ test('admission and intake scope is the registry: every repository with admissio
 });
 
 test('consumers resolve the same behavior from the registry as the old literals', () => {
-  assert.deepEqual([...SUPPORTED_REPOSITORIES].sort(), [BE, FE, KB]);
+  assert.deepEqual([...SUPPORTED_REPOSITORIES].sort(), [META, BE, FE, KB]);
   assert.equal(integrationBranch(FE), 'dev');
   assert.equal(integrationBranch(BE), 'develop');
   assert.equal(integrationBranch(KB), 'master');
-  for (const repository of [FE, BE, KB]) {
+  for (const repository of [FE, BE, KB, META]) {
     assert.equal(readTaskIdentityMarker(`Task identity: ${repository}#12`).repository, repository);
   }
-  assert.throws(() => readTaskIdentityMarker(`Task identity: ${META}#12`), /./);
+  assert.throws(() => readTaskIdentityMarker(`Task identity: ${NOTIF}#12`), /./);
   assert.throws(() => readTaskIdentityMarker('Task identity: ChipIn-one/chipin-frontendX#12'), /./);
 });
 

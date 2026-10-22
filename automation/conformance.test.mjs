@@ -37,7 +37,16 @@ test('caller presence follows the registry capabilities', () => {
   assert.match(be[0].message, /prMetadata/);
   assert.deepEqual(checkCallers(profile(META), []), [], 'meta repositories host the actions');
   const kbPins = extractPins([workflow(uses('development-link-action', V1))]);
-  assert.deepEqual(checkCallers(profile(KB), kbPins), [], 'KB admission is covered by the development-link action');
+  const kb = checkCallers(profile(KB), kbPins);
+  assert.equal(kb.length, 1, 'KB admission is covered by the development-link action; completion (integration-merge) still needs its caller');
+  assert.match(kb[0].message, /completion is automatic but no workflow uses completion-action/);
+  const kbComplete = extractPins([workflow(uses('development-link-action', V1), uses('completion-action', V1))]);
+  assert.deepEqual(checkCallers(profile(KB), kbComplete), [], 'KB with development-link and completion callers conforms');
+  // production-merge keeps the frontend action; the generic action does not satisfy it
+  const feWrong = checkCallers(profile(FE), extractPins([workflow(uses('issue-admission-action', V1), uses('development-link-action', V1),
+    uses('pr-metadata-action', V1), uses('create-milestone-action', V1), uses('completion-action', V1))]));
+  assert.deepEqual(checks(feWrong), ['CALLER_MISSING']);
+  assert.match(feWrong[0].message, /frontend-production-completion-action/);
   const gate = extractPins([{ path: 'p', text: `    uses: ChipIn-one/.github/.github/workflows/pr-gate.yml@${V1} # v1.0.0` }]);
   assert.deepEqual(checks(checkCallers(profile(BE), gate)), ['CALLER_MISSING'], 'pr-gate covers admission, link and metadata; BE milestones still needed');
 });
@@ -48,6 +57,11 @@ test('capability-aware change filter ignores tests and docs', () => {
   assert.equal(touchesCapability('issue-admission-action', ['automation/issue-admission.test.mjs', 'docs/x.md']), false);
   assert.equal(touchesCapability('development-link-action', ['automation/relationships.mjs']), true);
   assert.equal(touchesCapability('frontend-production-completion-action', ['automation/pr-metadata.mjs']), false);
+  assert.equal(touchesCapability('completion-action', ['automation/completion.mjs']), true);
+  assert.equal(touchesCapability('completion-action', ['automation/frontend-production-completion-policy.mjs']), true);
+  assert.equal(touchesCapability('completion-action', ['workflow-registry.yaml']), true);
+  assert.equal(touchesCapability('completion-action', ['automation/completion.test.mjs', 'docs/workflow/completion.md']), false);
+  assert.equal(touchesCapability('completion-action', ['automation/release.mjs']), false);
 });
 
 const source = (over = {}) => ({

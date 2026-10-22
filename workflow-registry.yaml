@@ -48,22 +48,22 @@ repositories:
     owner: null
     branches: { default: master, integration: master }
     deploymentProfile: none
-    completion: manual
+    completion: integration-merge       # the Issue closes after its linked PR merged into master (#179)
     protection: unavailable
     requiredChecks: []
     release: { strategy: none }                                                        # documents: no versions, no releases
-    capabilities: { admission: advisory, developmentLink: required, prMetadata: off, relationships: required, completion: manual, milestones: off, dependabot: required, agentRouting: required }
+    capabilities: { admission: advisory, developmentLink: required, prMetadata: off, relationships: required, completion: automatic, milestones: off, dependabot: required, agentRouting: required }
   - repository: ChipIn-one/.github
     kind: meta
     visibility: public
     owner: syllik
     branches: { default: master, integration: master }
     deploymentProfile: none
-    completion: integration-merge
+    completion: integration-merge       # the Issue closes after its linked PR merged into master (#179)
     protection: ruleset
     requiredChecks: [evaluate-fixtures]
     release: { strategy: semver-by-impact, trigger: integration-merge, tagPrefix: v }  # tag + GitHub Release after a merge that changes automation, workflows or the registry
-    capabilities: { admission: advisory, developmentLink: required, prMetadata: off, relationships: required, completion: manual, milestones: off, dependabot: required, agentRouting: required }
+    capabilities: { admission: advisory, developmentLink: required, prMetadata: off, relationships: required, completion: automatic, milestones: off, dependabot: required, agentRouting: required }
   - repository: ChipIn-one/chipin-notifications
     kind: docs
     visibility: private

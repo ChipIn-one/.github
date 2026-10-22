@@ -244,7 +244,7 @@ test("unsupported repository fails closed before GitHub reads", async () => {
   const client = makeClient();
   await assert.rejects(
     reconcileDevelopmentLink(client, {
-      repository: "ChipIn-one/.github",
+      repository: "ChipIn-one/chipin-notifications",
       pullRequestNumber: 10,
       explicitTaskIdentity: "ChipIn-one/chipin-frontend#7",
     }),

@@ -46,6 +46,9 @@ const TOUCHES = {
   'pr-metadata-action': [/^automation\/pr-metadata(-action\/|[a-z.-]*\.(mjs|json)$)/, /^automation\/development-link\.mjs$/, ...ADMISSION_CORE],
   'create-milestone-action': [/^automation\/create-milestone(-action\/|\.mjs$)/, /^automation\/registry\.mjs$/, /^workflow-registry\.yaml$/],
   'frontend-production-completion-action': [/^automation\/frontend-production-completion[a-z-]*(\/|\.mjs$)/, /^automation\/github-metadata\.mjs$/],
+  // the shared completion engine reuses the frontend readers and the registry
+  'completion-action': [/^automation\/completion(-action\/|\.mjs$)/, /^automation\/frontend-production-completion[a-z-]*(\/|\.mjs$)/,
+    /^automation\/github-metadata\.mjs$/, /^automation\/registry\.mjs$/, /^workflow-registry\.yaml$/],
   'pr-gate': [/^\.github\/workflows\/pr-gate\.yml$/, /^automation\//, /^workflow-registry\.yaml$/],
   'issue-gate': [/^\.github\/workflows\/issue-gate\.yml$/, /^automation\//, /^workflow-registry\.yaml$/],
 };
@@ -70,7 +73,9 @@ const REQUIRED_USES = [
   ['developmentLink', ['development-link-action', 'pr-gate'], p => p.capabilities.developmentLink !== 'off'],
   ['prMetadata', ['pr-metadata-action', 'pr-gate'], p => p.capabilities.prMetadata === 'required'],
   ['milestones', ['create-milestone-action'], p => p.capabilities.milestones === 'enabled'],
-  ['completion', ['frontend-production-completion-action'], p => p.capabilities.completion === 'automatic'],
+  // the accepted caller follows the registry strategy (docs/workflow/completion.md)
+  ['completion', p => (p.completion === 'production-merge' ? ['frontend-production-completion-action'] : ['completion-action']),
+    p => p.capabilities.completion === 'automatic'],
 ];
 
 export function checkCallers(profile, pins) {
@@ -78,6 +83,7 @@ export function checkCallers(profile, pins) {
   if (profile.kind === 'meta') return [];
   const used = new Set(pins.map(p => p.name));
   return REQUIRED_USES.filter(([, , applies]) => applies(profile))
+    .map(([capability, accepted]) => [capability, typeof accepted === 'function' ? accepted(profile) : accepted])
     .filter(([, accepted]) => !accepted.some(name => used.has(name)))
     .map(([capability, accepted]) => finding('CALLER_MISSING', 'drift',
       `Capability ${capability} is ${profile.capabilities[capability]} but no workflow uses ${accepted.join(' or ')} from ChipIn-one/.github.`,

@@ -1,0 +1,41 @@
+# Closes Issues of this repository whose Development-linked PRs merged into master
+# (completion: integration-merge in workflow-registry.yaml; docs/workflow/completion.md).
+# Writes use the organization PAT CHIPIN_ISSUE_WRITE_TOKEN, like the frontend fallback: the gates read
+# blockers and sub-issues that may live in private repositories (chipin-backend, knowledge base), which the
+# repository GITHUB_TOKEN cannot see, and Project #5 reconciliation (open Issue still showing derived Done)
+# stays on. Runs only from trusted master pushes and the schedule; no branch-selectable dispatch.
+name: Integration completion
+
+on:
+  push:
+    branches:
+      - master
+  schedule:
+    - cron: "11,41 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-completion
+  cancel-in-progress: false
+
+jobs:
+  close-completed-issues:
+    name: Close Issues completed on the integration branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24.21.0"
+      - name: Reconcile integration completion
+        env:
+          CHIPIN_CANONICAL_WRITE_TOKEN: ${{ secrets.CHIPIN_ISSUE_WRITE_TOKEN }}
+          CHIPIN_COMPLETION_WRITE: "1"
+        run: node automation/completion.mjs --repository "$GITHUB_REPOSITORY"
