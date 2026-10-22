@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {classifyPR,implementationIdentity,releaseReferences,bodyGaps,chooseOwner,chooseReviewer,uniqueProjectItem,ensureProjectPR,ensureCategory,readProject,reconcilePR,assertSingleNativeIssue} from "./pr-metadata.mjs";
+import {classifyPR,implementationIdentity,releaseReferences,bodyGaps,chooseOwner,chooseReviewer,uniqueProjectItem,ensureProjectPR,ensureCategory,readProject,reconcilePR,assertSingleNativeIssue,requiredShaCIGreen} from "./pr-metadata.mjs";
 const repo="ChipIn-one/chipin-frontend";
 const pr=(base,head)=>({base:{ref:base,repo:{full_name:repo}},head:{ref:head,repo:{full_name:repo}}});
 test("routes implementation and release exactly",()=>{
@@ -351,4 +351,110 @@ test("non-dependabot PR without a Task identity is still BLOCKED by admission",a
   // The reconciler's own identity gate keeps blocking even if admission were stubbed open.
   await assert.rejects(reconcilePR(client,feOnlyPolicy,463,pr.head.sha,{
     admissionClient:client,admissionConfig:{},admit:async()=>({status:"INTAKE_COMPLETE",receipts:[]})}),/IDENTITY/u);
+});
+
+// .github#214: canonical master trusts frontend-ci, required via a repository
+// ruleset. Response shapes are modelled on live REST reads (2026-10-22):
+// the branch/rules shapes of a ruleset-only branch come from ChipIn-one/.github
+// master (ruleset 24047968, the only org ruleset with a required_status_checks
+// rule): GET /branches/{b} exposes no ruleset checks, GET /rules/branches/{b}
+// carries them. The non-CI rule entries (deletion, non_fast_forward) and the
+// ruleset_id copy chipin-frontend main (ruleset 24097006); classicBranch copies
+// chipin-frontend dev/main classic protection.
+const CI_SHA="a".repeat(40), CI_BASE="b".repeat(40);
+const rulesetRule=(checks)=>({type:"required_status_checks",parameters:{strict_required_status_checks_policy:true,
+  do_not_enforce_on_create:false,required_status_checks:checks},ruleset_source_type:"Repository",
+  ruleset_source:repo,ruleset_id:24097006});
+const rulesetOnlyBranch=(name)=>({name,protected:true,protection:{enabled:false,
+  required_status_checks:{checks:[],contexts:[],enforcement_level:"off"}}});
+const classicBranch=(name,context)=>({name,protected:true,protection:{enabled:true,
+  required_status_checks:{checks:[{app_id:15368,context}],contexts:[context],enforcement_level:"everyone"}}});
+const otherRules=[{type:"deletion",ruleset_source_type:"Repository",ruleset_source:repo,ruleset_id:24097006},
+  {type:"non_fast_forward",ruleset_source_type:"Repository",ruleset_source:repo,ruleset_id:24097006}];
+function masterClient({name="master",branch=rulesetOnlyBranch(name),rules=[...otherRules,rulesetRule([{context:"frontend-ci",integration_id:15368}])],
+                       conclusion="success",path=".github/workflows/frontend-ci.yml"}={}){
+  const seen=[];
+  return {seen,async request(url){
+    seen.push(url);
+    if (url.endsWith("/rules/branches/"+name+"?per_page=100")) return rules;
+    if (url.endsWith("/branches/"+name)) return branch;
+    if (url.endsWith("/commits/"+CI_SHA+"/check-runs?per_page=100&filter=latest"))
+      return {total_count:1,check_runs:[{id:200,name:"frontend-ci",head_sha:CI_SHA,status:"completed",conclusion,
+        app:{id:15368,slug:"github-actions"},details_url:"https://github.com/"+repo+"/actions/runs/300/job/200"}]};
+    if (url.endsWith("/actions/runs/300"))
+      return {id:300,path,repository:{full_name:repo},head_sha:CI_SHA,head_branch:"feat/x",status:"completed",
+        conclusion:"success",event:"pull_request",pull_requests:[{number:7,head:{ref:"feat/x",sha:CI_SHA},base:{ref:"master",sha:CI_BASE}}]};
+    throw new Error("unexpected GET "+url);
+  }};
+}
+const masterPR={number:7,base:{ref:"master",sha:CI_BASE},head:{sha:CI_SHA,ref:"feat/x"}};
+
+test("#214 master: ruleset-required frontend-ci on the current head authorizes review",async()=>{
+  const client=masterClient();
+  const result=await requiredShaCIGreen(client,masterPR);
+  assert.equal(result.ok,true);
+  assert.deepEqual(result.required,["frontend-ci"]);
+  assert.ok(client.seen.some(u=>u.endsWith("/rules/branches/master?per_page=100")));
+});
+
+test("#214 master: failing frontend-ci or a non-frontend-ci workflow blocks",async()=>{
+  assert.equal((await requiredShaCIGreen(masterClient({conclusion:"failure"}),masterPR)).ok,false);
+  assert.equal((await requiredShaCIGreen(masterClient({path:".github/workflows/main-ci.yml"}),masterPR)).ok,false);
+});
+
+test("#214 master: classic-protection shape is still read (same strictness)",async()=>{
+  const result=await requiredShaCIGreen(masterClient({branch:classicBranch("master","frontend-ci"),rules:otherRules}),masterPR);
+  assert.equal(result.ok,true);
+  await assert.rejects(requiredShaCIGreen(masterClient({branch:classicBranch("master","main-ci"),rules:otherRules}),masterPR),
+    /unapproved required check/u);
+});
+
+test("#214 master: ruleset policy unreadable, empty or ambiguous fails closed",async()=>{
+  const fc={context:"frontend-ci",integration_id:15368};
+  for (const [opts,re] of [
+    [{rules:otherRules},/policy unreadable/u],                                    // no required check at all
+    [{rules:[]},/policy unreadable/u],
+    [{rules:null},/ruleset policy unreadable/u],
+    [{rules:{message:"Not Found"}},/ruleset policy unreadable/u],
+    [{rules:Array.from({length:100},()=>otherRules[0])},/ruleset policy unreadable or incomplete/u],
+    [{rules:[{parameters:{}}]},/ruleset policy unreadable/u],                     // untyped rule
+    [{rules:[rulesetRule([])]},/ruleset required checks unreadable/u],
+    [{rules:[rulesetRule(null)]},/ruleset required checks unreadable/u],
+    [{rules:[rulesetRule([{integration_id:15368}])]},/ruleset required checks unreadable/u],
+    [{branch:classicBranch("master","frontend-ci"),rules:[rulesetRule([{context:"frontend-ci",integration_id:999}])]},/ambiguous/u], // same context, other producer
+    [{rules:[rulesetRule([fc]),rulesetRule([{context:"frontend-ci",integration_id:999}])]},/ambiguous/u],
+    [{rules:[...otherRules,{type:"workflows",parameters:{workflows:[]}},rulesetRule([fc])]},/rule 'workflows' gates merge but is not verified/u],
+    [{rules:[{type:"code_scanning",parameters:{code_scanning_tools:[]}},rulesetRule([fc])]},/rule 'code_scanning' gates merge but is not verified/u],
+    [{rules:[rulesetRule([{context:"frontend-ci"}])]},/unapproved required check or producer/u], // any source
+    [{rules:[rulesetRule([{context:"frontend-ci",integration_id:999}])]},/unapproved/u],
+    [{rules:[rulesetRule([fc,{context:"e2e",integration_id:15368}])]},/unapproved/u],
+    [{rules:[rulesetRule([{context:"main-ci",integration_id:15368}])]},/unapproved/u],
+    [{branch:{...rulesetOnlyBranch("main")}},/policy unreadable/u],               // GET /branches/master redirected to renamed main
+    [{branch:{...rulesetOnlyBranch("master"),protected:false}},/policy unreadable/u],
+    [{branch:{name:"master",protected:true}},/policy unreadable/u],
+  ]) await assert.rejects(requiredShaCIGreen(masterClient(opts),masterPR),re,JSON.stringify(opts).slice(0,120));
+});
+
+test("#214 identical required check from classic protection and rulesets counts once",async()=>{
+  const fc={context:"frontend-ci",integration_id:15368};
+  for (const opts of [
+    {branch:classicBranch("master","frontend-ci"),rules:[rulesetRule([fc])]},
+    {rules:[rulesetRule([fc,fc])]},
+    {rules:[rulesetRule([fc]),rulesetRule([fc])]},
+  ]) {
+    const result=await requiredShaCIGreen(masterClient(opts),masterPR);
+    assert.equal(result.ok,true);
+    assert.deepEqual(result.required,["frontend-ci"]);
+  }
+});
+
+test("#214 dev: an extra ruleset-required check beyond classic frontend-ci is rejected",async()=>{
+  const devPR={...masterPR,base:{ref:"dev",sha:CI_BASE}};
+  await assert.rejects(requiredShaCIGreen(masterClient({name:"dev",branch:classicBranch("dev","frontend-ci"),
+    rules:[rulesetRule([{context:"other-check",integration_id:15368}])]}),devPR),/unapproved required check or producer for dev/u);
+});
+
+test("#214 unknown or prototype-named target branches are rejected",async()=>{
+  for (const ref of ["release","__proto__","constructor","toString"])
+    await assert.rejects(requiredShaCIGreen(masterClient(),{...masterPR,base:{ref,sha:CI_BASE}}),/unsupported target branch/u);
 });
