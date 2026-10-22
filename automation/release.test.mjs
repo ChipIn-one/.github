@@ -556,6 +556,18 @@ test("release-action, reusable workflow and caller templates: plan by default, a
     assert.match(template, /group: release-\$\{\{ github\.repository \}\}/u);
     assert.match(template, /cancel-in-progress: false/u);
   }
+
+  // this repository's own caller (#175) follows the integration template and pins a tag SHA
+  const caller = await readFile(new URL("../.github/workflows/release-on-master.yml", import.meta.url), "utf8");
+  assert.match(caller, /^on:\n  push:\n    branches: \[master\]/mu);
+  assert.doesNotMatch(caller, /workflow_dispatch|pull_request/u);
+  assert.match(caller, /^permissions:\n  contents: write/mu);
+  assert.match(caller, /uses: ChipIn-one\/\.github\/\.github\/workflows\/release\.yml@[0-9a-f]{40} +# v\d+\.\d+\.\d+$/mu);
+  assert.match(caller, /apply: true/u);
+  assert.match(caller, /token: \$\{\{ secrets\.GITHUB_TOKEN \}\}/u);
+  assert.match(caller, /group: release-\$\{\{ github\.repository \}\}/u);
+  assert.match(caller, /cancel-in-progress: false/u);
+  assert.match(caller, /if: github\.repository_owner == 'ChipIn-one'/u);
 });
 
 test("plan: commits in range without one included PR block instead of a silent no-release", async () => {
