@@ -542,6 +542,11 @@ test("release-action, reusable workflow and caller templates: plan by default, a
   assert.match(workflow, /ref: \$\{\{ job\.workflow_sha \}\}/u);
   assert.match(workflow, /repository: \$\{\{ job\.workflow_repository \}\}/u);
   assert.doesNotMatch(workflow, /github\.job_workflow_sha|github\.workflow_sha/u);
+  // the `job` context is only available at step level: a job-level `env:` referencing it invalidates the file
+  const jobLevelEnv = /^    env:\n((?:      .*\n)+)/mu.exec(workflow);
+  assert.equal(jobLevelEnv, null, "release job must not declare a job-level env block (job.* is unavailable there)");
+  assert.doesNotMatch(workflow, /^    env:[\s\S]*?\$\{\{ job\./mu);
+  assert.match(workflow, /^        env:\n          WORKFLOW_REPOSITORY: \$\{\{ job\.workflow_repository \}\}\n          WORKFLOW_SHA: \$\{\{ job\.workflow_sha \}\}/mu);
   assert.match(workflow, /\[\[ "\$head" != "\$WORKFLOW_SHA" \]\]/u);
   // permissions are inherited from the caller (a called workflow can only downgrade them)
   assert.doesNotMatch(workflow, /^permissions:/mu);
@@ -556,6 +561,18 @@ test("release-action, reusable workflow and caller templates: plan by default, a
     assert.match(template, /group: release-\$\{\{ github\.repository \}\}/u);
     assert.match(template, /cancel-in-progress: false/u);
   }
+
+  // this repository's own caller (#175) follows the integration template and pins a tag SHA
+  const caller = await readFile(new URL("../.github/workflows/release-on-master.yml", import.meta.url), "utf8");
+  // the trigger block is exactly one push to master: nothing else between `on:` and `permissions:`
+  assert.match(caller, /^on:\n  push:\n    branches: \[master\][^\n]*\npermissions:/mu);
+  assert.match(caller, /^permissions:\n  contents: write/mu);
+  assert.match(caller, /uses: ChipIn-one\/\.github\/\.github\/workflows\/release\.yml@[0-9a-f]{40} +# v\d+\.\d+\.\d+$/mu);
+  assert.match(caller, /apply: true/u);
+  assert.match(caller, /token: \$\{\{ secrets\.GITHUB_TOKEN \}\}/u);
+  assert.match(caller, /group: release-\$\{\{ github\.repository \}\}/u);
+  assert.match(caller, /cancel-in-progress: false/u);
+  assert.match(caller, /if: github\.repository_owner == 'ChipIn-one'/u);
 });
 
 test("plan: commits in range without one included PR block instead of a silent no-release", async () => {

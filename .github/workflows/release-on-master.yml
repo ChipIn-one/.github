@@ -1,0 +1,25 @@
+# Release caller for this repository (task .github#175, from templates/caller-release-integration.yml).
+# Every push to master (a human merge) runs the reusable release workflow pinned to an org tag; the
+# engine derives the version from `## Version impact` of the pull requests merged since the previous
+# tag and creates the tag and the GitHub Release (docs/workflow/release.md, README §4). Merges whose
+# included PRs all declare `none` produce nothing (NO_RELEASE); a head that is already tagged is a no-op
+# (ALREADY_RELEASED). The pin is raised by Dependabot (github-actions) or by hand after a release that
+# changes the engine; the engine that runs is always the pinned one, never the master being released.
+name: Release on master
+on:
+  push:
+    branches: [master]          # branches.integration from workflow-registry.yaml
+permissions:
+  contents: write               # tags and GitHub Releases in this repository (the called workflow inherits this)
+  pull-requests: read           # inventory: merged pull requests of the commits since the previous tag
+concurrency:
+  group: release-${{ github.repository }}   # one release run at a time; the newest push waits in the queue (GitHub keeps one pending run per group)
+  cancel-in-progress: false
+jobs:
+  release:
+    if: github.repository_owner == 'ChipIn-one'
+    uses: ChipIn-one/.github/.github/workflows/release.yml@50158ba40353f3cc9b2e90e317ba2c2bd7a5549d   # v1.2.1
+    with:
+      apply: true               # false prints the plan only
+    secrets:
+      token: ${{ secrets.GITHUB_TOKEN }}

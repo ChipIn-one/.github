@@ -25,7 +25,8 @@ The standard is specified in full; implementation lands task by task. Statements
 | --- | --- | --- |
 | Registry `workflow-registry.yaml` + loader `automation/registry.mjs` | implemented | [#150](https://github.com/ChipIn-one/.github/issues/150) |
 | Admission and intake scope from the registry (`.github` admitted, owner per record) | implemented | [#183](https://github.com/ChipIn-one/.github/issues/183) |
-| Release tags and SHA pins, Dependabot in all repositories | planned | [#151](https://github.com/ChipIn-one/.github/issues/151) |
+| Release tags and SHA pins, Dependabot in all repositories | implemented (tags by hand until #175) | [#151](https://github.com/ChipIn-one/.github/issues/151) |
+| Release engine, reusable `release.yml`, `.github` tag and Release on merge to `master` | implemented | [#169](https://github.com/ChipIn-one/.github/issues/169), [#175](https://github.com/ChipIn-one/.github/issues/175) |
 | Native relationships reconciler and blocker gate | implemented; scheduled runs plan only until live acceptance | [#136](https://github.com/ChipIn-one/.github/issues/136), [#152](https://github.com/ChipIn-one/.github/issues/152) |
 | Reusable `pr-gate` / `issue-gate` | planned | [#153](https://github.com/ChipIn-one/.github/issues/153) |
 | Conformance audit | implemented; scheduled runs plan only until `CONFORMANCE_AUDIT_APPLY` is set | [#154](https://github.com/ChipIn-one/.github/issues/154) |
@@ -117,8 +118,21 @@ Composite actions remain the units of logic and tests; direct action calls from 
 
 ## 4. Versioning and pins
 
-- `.github` gets semantic tags `v1.0.0`, `v1.1.0`, …. A tag is placed on `master` after merging a PR that changes `automation/`, reusable workflows or the registry.
-  Minor — backward-compatible changes; patch — fixes; breaking changes → `v2`. Until [#175](https://github.com/ChipIn-one/.github/issues/175) automates it, tags are placed by the owner on request (a comment in the Issue with the SHA); the target rule is in [release.md](release.md).
+- `.github` gets semantic tags `v1.0.0`, `v1.1.0`, …. Since [#175](https://github.com/ChipIn-one/.github/issues/175) the tag and the GitHub Release are created automatically:
+  `.github/workflows/release-on-master.yml` runs after every push to `master` (a human merge) and calls the reusable release workflow pinned to an org tag;
+  the version is the previous tag bumped by the maximum `## Version impact` of the pull requests merged since that tag ([release.md](release.md)).
+  Merges whose PRs all declare `none` create nothing; a head that is already tagged is a no-op. The engine that runs is the pinned one, never the `master` being
+  released, so after a release that changes the engine the pin in the caller is raised (Dependabot `github-actions` or by hand). Tags placed by hand before #175 (`v1.0.0`–`v1.2.1`) stay valid.
+- Choosing `## Version impact` in a `.github` PR (the first non-empty line of the section is one keyword; a mixed PR takes the highest):
+  - `none` — nothing a consumer pins changes: documentation, tests, Issue forms, templates, evidence, and org-internal workflows (`.github/workflows/*` that are not `workflow_call`).
+  - `patch` — a fix inside `automation/` (modules, composite actions), in a reusable `workflow_call` workflow or in a registry value, without new inputs and without behaviour a consumer must adopt.
+  - `minor` — a backward-compatible addition: a new module, action or reusable workflow, a new optional input or output, a new registry field or record.
+  - `major` — a removed or renamed input, a changed meaning of an existing one, a new required input, a registry schema change (`v2`); an explicit owner decision.
+  - Unsure between `none` and `patch`: if a consumer that moves its pin to the new tag gets different behaviour, it is `patch`.
+- A merged PR without a valid section blocks the run (`INVALID_VERSION_IMPACT`, red run on `master`), and the block persists for every later merge because the
+  range is "everything since the previous tag". Remedy: edit the body of the *merged* PR (add `## Version impact` with the keyword), then re-run the failed
+  `Release on master` run (the engine re-reads PR bodies on every run); placing the tag by hand is the fallback. Dependabot PRs have no such section: until the
+  engine learns a rule for `dependabot[bot]`, add the section to the Dependabot PR body before merging (or apply the remedy after).
 - Consumers pin a **SHA** with a version comment: `@<sha> # v1.0.0`. This keeps the fail-closed pin policy and lets Dependabot (ecosystem `github-actions`) raise the pin.
   Dependabot `github-actions` is enabled in every registry repository (`dependabot: required`), weekly, targeting the integration branch.
 - Compatibility inside v1: inputs of actions and reusable workflows are never removed and never change meaning; new inputs are optional.
