@@ -210,34 +210,85 @@ async function eligibleReviewer(client,login) {
   const p=await client.request(ROOT+"/collaborators/"+login+"/permission");
   if (!["write","maintain","admin"].includes(p?.permission)) throw new Error("REVIEWER_POLICY: reviewer lacks write-or-higher collaborator eligibility");
 }
-// GitHub branch protection is the live authority for required checks, not a
+// GitHub branch policy is the live authority for required checks, not a
 // frontend-ci success discovered anywhere on the SHA. The producer must also
 // be the expected GitHub Actions workflow, for this PR and this base revision.
+// dev/main stay trusted until the rollback window of chipin-frontend#497 ends;
+// canonical master trusts frontend-ci (.github#214).
 const TRUSTED_CI = Object.freeze({
-  dev: { "frontend-ci": ".github/workflows/frontend-ci.yml" },
-  main: { "main-ci": ".github/workflows/main-ci.yml" },
+  dev: Object.freeze({ "frontend-ci": ".github/workflows/frontend-ci.yml" }),
+  main: Object.freeze({ "main-ci": ".github/workflows/main-ci.yml" }),
+  master: Object.freeze({ "frontend-ci": ".github/workflows/frontend-ci.yml" }),
 });
 const ACTIONS_APP_ID = 15368;
+const RULES_PAGE = 100;
+
+// Classic branch protection, as exposed by GET /branches/{branch} (readable
+// without the admin-only /protection endpoint). A ruleset-only branch reports
+// protected=true with empty checks/contexts here, so an empty classic list is
+// valid; the combined list is checked for emptiness below.
+async function classicRequiredChecks(client, branch) {
+  const base = await client.request(ROOT + "/branches/" + encodeURIComponent(branch));
+  const protection = base?.protection?.required_status_checks;
+  const checks = protection?.checks;
+  const contexts = protection?.contexts;
+  // name guards a renamed-branch redirect (GET /branches/master answers for main).
+  if (base?.name !== branch || base.protected !== true || !Array.isArray(checks) || !Array.isArray(contexts))
+    throw new Error("REVIEW_CI: target-branch required status-check policy unreadable");
+  if (contexts.length !== checks.length ||
+      contexts.some(name => !checks.some(item => item.context === name)))
+    throw new Error("REVIEW_CI: inconsistent target-branch check policy");
+  return checks.map(x => ({context: x?.context, app_id: x?.app_id}));
+}
+
+// Active repository/org rulesets, as GET /rules/branches/{branch} returns them:
+// [{type:"required_status_checks",parameters:{required_status_checks:
+//   [{context,integration_id}],...},ruleset_id,...}, ...].
+// Only required_status_checks rules are verified here. Rule types that also gate
+// a merge on CI results but are not verified by this gate (required workflows,
+// code scanning) fail closed; other rule types (deletion, pull_request, ...) are
+// not CI results and are ignored.
+const UNVERIFIED_CI_RULES = new Set(["workflows", "code_scanning"]);
+async function rulesetRequiredChecks(client, branch) {
+  const rules = await client.request(ROOT + "/rules/branches/" + encodeURIComponent(branch) + "?per_page=" + RULES_PAGE);
+  if (!Array.isArray(rules) || rules.length >= RULES_PAGE || rules.some(rule => typeof rule?.type !== "string"))
+    throw new Error("REVIEW_CI: target-branch ruleset policy unreadable or incomplete");
+  const unverified = rules.find(rule => UNVERIFIED_CI_RULES.has(rule.type));
+  if (unverified)
+    throw new Error("REVIEW_CI: target-branch ruleset rule '" + unverified.type + "' gates merge but is not verified by this gate");
+  const checks = [];
+  for (const rule of rules.filter(rule => rule.type === "required_status_checks")) {
+    const listed = rule.parameters?.required_status_checks;
+    if (!Array.isArray(listed) || listed.length === 0 ||
+        listed.some(item => typeof item?.context !== "string" || item.context === ""))
+      throw new Error("REVIEW_CI: target-branch ruleset required checks unreadable");
+    for (const item of listed) checks.push({context: item.context, app_id: item.integration_id});
+  }
+  return checks;
+}
 
 export async function requiredShaCIGreen(client, pr) {
   const sha = pr?.head?.sha;
   const branch = pr?.base?.ref;
-  const workflows = TRUSTED_CI[branch];
+  const workflows = Object.hasOwn(TRUSTED_CI, branch ?? "") ? TRUSTED_CI[branch] : null;
   if (!/^[0-9a-f]{40}$/iu.test(sha || "") || !workflows)
     throw new Error("REVIEW_CI: unsupported target branch or invalid current head SHA");
 
-  // GET branch is readable without the admin-only /protection endpoint.
-  const base = await client.request(ROOT + "/branches/" + encodeURIComponent(branch));
-  const protection = base?.protection?.required_status_checks;
-  const checks = protection?.checks;
-  if (base?.name !== branch || base.protected !== true || !Array.isArray(checks) || checks.length === 0)
+  // GitHub enforces classic protection and rulesets together: read both.
+  // Identical {context, app_id} pairs from several sources are one requirement;
+  // the same context with a different producer is ambiguous.
+  const checks = [];
+  for (const item of [
+    ...await classicRequiredChecks(client, branch),
+    ...await rulesetRequiredChecks(client, branch),
+  ]) {
+    const same = checks.find(x => x.context === item.context);
+    if (!same) checks.push(item);
+    else if (same.app_id !== item.app_id)
+      throw new Error("REVIEW_CI: ambiguous target-branch required checks");
+  }
+  if (checks.length === 0)
     throw new Error("REVIEW_CI: target-branch required status-check policy unreadable");
-  const contexts = protection.contexts;
-  if (!Array.isArray(contexts) || contexts.length !== checks.length ||
-      contexts.some(name => !checks.some(item => item.context === name)))
-    throw new Error("REVIEW_CI: inconsistent target-branch check policy");
-  if (new Set(checks.map(x => x.context)).size !== checks.length)
-    throw new Error("REVIEW_CI: ambiguous target-branch required checks");
   if (checks.some(x => !Object.hasOwn(workflows, x.context) || x.app_id !== ACTIONS_APP_ID))
     throw new Error("REVIEW_CI: unapproved required check or producer for " + branch);
 
