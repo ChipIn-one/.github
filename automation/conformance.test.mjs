@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
-  GitHubConformanceSource, GitHubConformanceStore, audit, checkCallers, checkCompletionCaller, checkDependabot, checkIntake, checkMergedPastRed,
+  GitHubConformanceSource, GitHubConformanceStore, audit, checkCallers, checkCompletionCaller, checkCompletionSweep, checkDependabot, checkIntake, checkMergedPastRed,
   checkPins, checkProjectPullRequests, checkProtection, checkRouting, extractPins, main, parseMarker, renderIssue,
-  renderSummary, sortTags, touchesCapability, upsertIssues, workflowTriggers,
+  completionSweepCovers, renderSummary, sortTags, touchesCapability, upsertIssues, workflowTriggers,
 } from './conformance.mjs';
 import { getRepositoryProfile, loadRegistry, validateRegistry } from './registry.mjs';
 
@@ -21,7 +22,7 @@ const workflow = (...lines) => ({ path: '.github/workflows/x.yml', text: lines.j
 const checks = findings => findings.map(f => f.check);
 // the frontend dev/main record from before the canonical-master cutover (.github#216), rollback target of chipin-frontend#497
 const legacyFrontend = () => ({ ...profile(FE), branches: Object.freeze({ default: 'main', integration: 'dev', promotion: 'main' }),
-  completion: 'production-merge', capabilities: Object.freeze({ ...profile(FE).capabilities, completion: 'automatic' }) });
+  completion: 'production-merge', completionRunner: 'repository', capabilities: Object.freeze({ ...profile(FE).capabilities, completion: 'automatic' }) });
 
 // ---------------------------------------------------------------------------------------------------
 test('pins are extracted with action name, ref and version comment', () => {
@@ -50,14 +51,19 @@ test('caller presence follows the registry capabilities', () => {
   const feWrong = checkCallers(legacyFrontend(), extractPins([workflow(...feBase, uses('completion-action', V1))]));
   assert.deepEqual(checks(feWrong), ['CALLER_MISSING']);
   assert.match(feWrong[0].message, /frontend-production-completion-action/);
-  // the live frontend record (.github#216): completion manual until .github#217, so no completion caller is required
-  assert.equal(profile(FE).capabilities.completion, 'manual');
+  // the live frontend record (.github#217): completion automatic, run only by the org sweep, so no completion caller
+  // is required (checkCompletionSweep checks the sweep instead)
+  assert.equal(profile(FE).capabilities.completion, 'automatic');
+  assert.equal(profile(FE).completionRunner, 'org-sweep');
   assert.deepEqual(checkCallers(profile(FE), extractPins([workflow(...feBase)])), []);
+  // the same record with the default runner still requires the repository caller
+  const feRepositoryRunner = { ...profile(FE), completionRunner: 'repository' };
+  assert.deepEqual(checks(checkCallers(feRepositoryRunner, extractPins([workflow(...feBase)]))), ['CALLER_MISSING']);
   const gate = extractPins([{ path: 'p', text: `    uses: ChipIn-one/.github/.github/workflows/pr-gate.yml@${V1} # v1.0.0` }]);
   assert.deepEqual(checks(checkCallers(profile(BE), gate)), ['CALLER_MISSING'], 'pr-gate covers admission, link and metadata; BE milestones still needed');
 });
 
-// the frontend record with the engine on, as .github#217 will write it; the live record (.github#216) keeps completion manual
+// a deployment-receipt record with the engine on and the default runner (a repository caller)
 const receiptProfile = () => validateRegistry({
   schemaVersion: 1, standardVersion: 'v1', project: { number: 5, statuses: ['Backlog', 'Done'] },
   repositories: [{
@@ -97,10 +103,73 @@ test('deployment-receipt: the completion caller needs the deployment_status and 
   assert.match(inspect(split)[0].message, /no deployment_status trigger/);
   // no caller at all is CALLER_MISSING's finding, not this one
   assert.deepEqual(inspect([]), []);
-  // other strategies and the live frontend record are not checked for these triggers
-  for (const name of [FE, KB, BE, META]) {
+  // other strategies are not checked for these triggers
+  for (const name of [KB, BE, META]) {
     assert.deepEqual(checkCompletionCaller(profile(name), [receiptCaller(['on: push'])], extractPins([receiptCaller(['on: push'])])), [], name);
   }
+  // org-sweep (the live frontend record): a caller is optional, but one that exists must still have both triggers
+  assert.deepEqual(checks(checkCompletionCaller(profile(FE), [receiptCaller(['on: push'])], extractPins([receiptCaller(['on: push'])]))),
+    ['COMPLETION_TRIGGER_MISSING']);
+  assert.deepEqual(checkCompletionCaller(profile(FE), [receiptCaller(RECEIPT_ON)], extractPins([receiptCaller(RECEIPT_ON)])), []);
+  assert.deepEqual(checkCompletionCaller(profile(FE), [], []), []);
+});
+
+// the org sweep of this repository (.github/workflows/frontend-production-completion.yml), read from disk
+const ORG_SWEEP = { path: '.github/workflows/frontend-production-completion.yml',
+  text: readFileSync(new URL('../.github/workflows/frontend-production-completion.yml', import.meta.url), 'utf8') };
+
+test('completionRunner org-sweep: no repository caller, but a scheduled org sweep must run the engine for the repository', () => {
+  const fe = profile(FE);
+  assert.ok(completionSweepCovers(ORG_SWEEP, FE), 'the live org sweep covers chipin-frontend');
+  assert.equal(completionSweepCovers(ORG_SWEEP, KB), false);
+  assert.deepEqual(checkCompletionSweep(fe, [ORG_SWEEP]), []);
+  const missing = checkCompletionSweep(fe, []);
+  assert.deepEqual(missing.map(f => [f.check, f.severity]), [['COMPLETION_SWEEP_MISSING', 'drift']]);
+  assert.match(missing[0].message, /no scheduled workflow in ChipIn-one\/\.github runs completion\.mjs --repository ChipIn-one\/chipin-frontend/);
+  // without the schedule trigger, or for another repository, the workflow does not count
+  const unscheduled = { ...ORG_SWEEP, text: ORG_SWEEP.text.replace(/^  schedule:\n    - cron: [^\n]*\n/m, '') };
+  assert.notEqual(unscheduled.text, ORG_SWEEP.text);
+  assert.deepEqual(checks(checkCompletionSweep(fe, [unscheduled])), ['COMPLETION_SWEEP_MISSING']);
+  const other = { ...ORG_SWEEP, text: ORG_SWEEP.text.replace('--repository ChipIn-one/chipin-frontend', '--repository ChipIn-one/chipin-frontend-x') };
+  assert.deepEqual(checks(checkCompletionSweep(fe, [other])), ['COMPLETION_SWEEP_MISSING']);
+  // a commented-out run line does not count
+  const commented = { ...ORG_SWEEP, text: ORG_SWEEP.text.replace(/^(\s*)run: node automation/m, '$1# run: node automation') };
+  assert.deepEqual(checks(checkCompletionSweep(fe, [commented])), ['COMPLETION_SWEEP_MISSING']);
+  const RUN = '        run: node automation/completion.mjs --repository ChipIn-one/chipin-frontend';
+  const variant = (replace, by) => {
+    const text = ORG_SWEEP.text.replace(replace, by);
+    assert.notEqual(text, ORG_SWEEP.text, `variant applies: ${replace}`);
+    return { ...ORG_SWEEP, text };
+  };
+  const covers = file => completionSweepCovers(file, FE);
+  // M2: quoted repository and a trailing comment are accepted
+  assert.ok(covers(variant(RUN, '        run: node automation/completion.mjs --repository "ChipIn-one/chipin-frontend"  # the FE sweep')));
+  assert.ok(covers(variant(RUN, "        run: node automation/completion.mjs --repository 'ChipIn-one/chipin-frontend'")));
+  assert.equal(covers(variant(RUN, '        run: node automation/completion.mjs --repository "ChipIn-one/chipin-frontend\'')), false, 'unbalanced quotes');
+  // M1: the run line must be the step's own run key, not text inside a block scalar
+  assert.equal(covers(variant(RUN, '        run: |\n          echo skipped\n          run: node automation/completion.mjs --repository ChipIn-one/chipin-frontend')), false);
+  assert.equal(covers(variant(RUN, '        run: >-\n          node automation/completion.mjs --repository ChipIn-one/chipin-frontend')), false);
+  assert.equal(covers(variant(RUN, '        with:\n          run: node automation/completion.mjs --repository ChipIn-one/chipin-frontend\n        run: echo noop')), false, 'nested key');
+  // M1: a constant-false if on the step or the job disables the sweep
+  for (const value of ['false', '${{ false }}', "'false'", '0']) {
+    assert.equal(covers(variant(RUN, `        if: ${value}\n${RUN}`)), false, `step if ${value}`);
+    assert.equal(covers(variant('    runs-on: ubuntu-latest', `    if: ${value}\n    runs-on: ubuntu-latest`)), false, `job if ${value}`);
+  }
+  assert.ok(covers(variant(RUN, `        if: github.event_name != 'pull_request'\n${RUN}`)), 'a real condition is kept');
+  // M1: the sweep env must write, write Awaiting release and keep Project reconciliation on
+  assert.equal(covers(variant('          CHIPIN_COMPLETION_WRITE: "1"\n', '')), false, 'no write');
+  assert.equal(covers(variant('          CHIPIN_COMPLETION_WRITE: "1"', '          CHIPIN_COMPLETION_WRITE: "0"')), false);
+  assert.equal(covers(variant('          CHIPIN_COMPLETION_AWAITING_RELEASE: "1"\n', '')), false, 'no Awaiting release');
+  assert.equal(covers(variant('          CHIPIN_COMPLETION_AWAITING_RELEASE: "1"', '          CHIPIN_COMPLETION_AWAITING_RELEASE: "1"\n          CHIPIN_COMPLETION_PROJECT_RECONCILE: "0"')), false, 'reconcile off');
+  assert.ok(covers(variant('          CHIPIN_COMPLETION_AWAITING_RELEASE: "1"', '          CHIPIN_COMPLETION_AWAITING_RELEASE: 1\n          CHIPIN_COMPLETION_PROJECT_RECONCILE: "1"')), 'unquoted and explicit on');
+  // env may come from the job or the workflow level
+  const stepEnv = /^        env:\n(?: {10}.*\n)+/m;
+  const envBlock = ORG_SWEEP.text.match(stepEnv)[0];
+  const jobLevel = variant(stepEnv, '').text.replace('    runs-on: ubuntu-latest', `    env:\n${envBlock.split('\n').slice(1).map(l => l.replace(/^ {10}/, '      ')).join('\n')}    runs-on: ubuntu-latest`);
+  assert.ok(covers({ ...ORG_SWEEP, text: jobLevel }), 'job-level env');
+  // every repository with the default runner (or the engine off) is not checked here
+  for (const name of [BE, KB, META, NOTIF]) assert.deepEqual(checkCompletionSweep(profile(name), []), [], name);
+  assert.deepEqual(checkCompletionSweep(receiptProfile(), []), []);
 });
 
 test('workflow triggers are read from the top-level on block only', () => {
@@ -232,7 +301,7 @@ function fakeSource(over = {}) {
     [FE]: [workflow(uses('issue-admission-action', V1, 'v1.0.0'), uses('development-link-action', V1, 'v1.0.0'), uses('pr-metadata-action', V1, 'v1.0.0'), uses('create-milestone-action', V1, 'v1.0.0'), uses('frontend-production-completion-action', V1, 'v1.0.0'))],
     [BE]: [workflow(uses('issue-admission-action', 'f'.repeat(40)), uses('development-link-action', 'f'.repeat(40)), uses('create-milestone-action', 'f'.repeat(40)))],
     [KB]: [workflow(uses('development-link-action', 'f'.repeat(40)))],
-    [META]: [],
+    [META]: [ORG_SWEEP],
     [NOTIF]: [],
   };
   const na = { state: 'unavailable' };
@@ -270,6 +339,23 @@ test('audit: .github and FE conform; BE and KB show the expected drift; unregist
   assert.deepEqual(report.summary, { repositories: 5, conformant: 3, drift: 2, unreadable: 0, unregistered: 1 });
   assert.equal(by(NOTIF).status, 'CONFORMANT', 'every capability is off, protection is unavailable on the plan');
   assert.match(renderSummary(report), /UNREGISTERED \(no action\)\n- ChipIn-one\/chipin-backend-python/);
+});
+
+test('audit: org-sweep record conforms only while the org sweep runs it; the shared read follows the audited records', async () => {
+  const noSweep = await audit({ source: fakeSource({ workflowFiles: async repo => (repo === META ? [] : (await fakeSource().workflowFiles(repo))) }), repositories: [FE] });
+  assert.equal(noSweep.repositories[0].status, 'DRIFT');
+  assert.deepEqual(checks(noSweep.repositories[0].findings), ['COMPLETION_SWEEP_MISSING']);
+  // M3: a subset without org-sweep records never reads the shared workflows (the live registry has FE on org-sweep)
+  const reads = [];
+  await audit({ source: fakeSource({ workflowFiles: async repo => { reads.push(repo); return []; } }), repositories: [BE] });
+  assert.deepEqual(reads, [BE]);
+  // M3: a failed shared read makes only the org-sweep records UNREADABLE
+  const failing = fakeSource();
+  const broken = await audit({ source: { ...failing, workflowFiles: async (repo, ref) => { if (repo === META) throw new Error('GET workflows -> 502'); return failing.workflowFiles(repo, ref); } }, repositories: [FE, BE] });
+  const by = name => broken.repositories.find(r => r.repository === name);
+  assert.equal(by(FE).status, 'UNREADABLE');
+  assert.match(by(FE).error, /org sweep workflows unreadable: GET workflows -> 502/);
+  assert.equal(by(BE).status, 'DRIFT', 'BE is audited normally');
 });
 
 test('audit: merge past a red required check is drift for protection-unavailable repositories', async () => {

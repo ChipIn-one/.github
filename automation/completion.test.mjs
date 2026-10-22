@@ -32,9 +32,9 @@ const FE = "ChipIn-one/chipin-frontend";
 const HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const MERGE = "1111111111111111111111111111111111111111";
 
-// The live frontend record (.github#216) is canonical master + deployment-receipt with the engine off
-// (capabilities.completion manual) until .github#217. The dev/main record before the cutover stays the rollback
-// target of chipin-frontend#497, so the production-merge path keeps its tests on that record.
+// The live frontend record is canonical master + deployment-receipt (.github#216) with the engine on since
+// .github#217 (capabilities.completion automatic, completionRunner org-sweep). The dev/main record before the cutover
+// stays the rollback target of chipin-frontend#497, so the production-merge path keeps its tests on that record.
 const legacyFrontendRegistry = (registry = loadRegistry()) => ({
   ...registry,
   repositories: registry.repositories.map((profile) => {
@@ -909,7 +909,8 @@ test("org workflow for the frontend runs the shared engine with Awaiting release
   assert.doesNotMatch(workflow, /github\.token/u);
   assert.match(workflow, /CHIPIN_COMPLETION_WRITE: "1"/u);
   assert.match(workflow, /CHIPIN_COMPLETION_AWAITING_RELEASE: "1"/u);
-  // engine off for the frontend (.github#216 until #217): the sweep is a green no-op, not a red run
+  // kept from .github#216: harmless while the frontend record is automatic (.github#217), a green no-op if it is
+  // switched back to manual
   assert.match(workflow, /CHIPIN_COMPLETION_SKIP_MANUAL: "1"/u);
   assert.doesNotMatch(workflow, /CHIPIN_COMPLETION_PROJECT_RECONCILE/u, "Project reconciliation stays on");
   assert.match(workflow, /run: node automation\/completion\.mjs --repository ChipIn-one\/chipin-frontend$/mu);
@@ -956,12 +957,18 @@ const RECEIPT_SHA = "cccccccccccccccccccccccccccccccccccccccc";
 const OLD_RECEIPT_SHA = "dddddddddddddddddddddddddddddddddddddddd";
 const MERGE_2 = "3333333333333333333333333333333333333333";
 
-// the frontend record as .github#217 will write it: the live record (.github#216) with the engine switched on
+// the live frontend record with the engine on (.github#217)
+const ENGINE_ON = /^      completion: automatic {5}# automatic \| manual; engine on since #217 \(Promote evidence checked in cutover step 7\)$/mu;
 async function receiptRegistry() {
   const live = await readFile(new URL("../workflow-registry.yaml", import.meta.url), "utf8");
-  const engineOff = /^      completion: manual {8}# automatic \| manual; the engine stays off for chipin-frontend until #217$/mu;
-  assert.match(live, engineOff, "the live frontend record keeps the engine off");
-  return loadRegistry({ text: live.replace(engineOff, "      completion: automatic") });
+  assert.match(live, ENGINE_ON, "the live frontend record has the engine on");
+  return loadRegistry({ text: live });
+}
+// the frontend record switched back off (the .github#216 state, rollback of .github#217): org-sweep needs automatic,
+// so the runner returns to its default
+async function engineOffRegistry() {
+  const live = await readFile(new URL("../workflow-registry.yaml", import.meta.url), "utf8");
+  return loadRegistry({ text: live.replace(ENGINE_ON, "      completion: manual").replace(/^    completionRunner: org-sweep[^\n]*\n/mu, "") });
 }
 
 function deployment({ id = 900, sha = RECEIPT_SHA, environment = "Production", creator = "vercel[bot]", createdAt = "2026-10-08T10:00:00Z" } = {}) {
@@ -1047,22 +1054,26 @@ test("deployment-receipt: the cutover registry record validates and runs the new
   assert.equal(profile.completion, "deployment-receipt");
   assert.equal(profile.capabilities.completion, "automatic");
   assert.deepEqual(profile.productionEvidence, { environment: "Production", creator: "vercel[bot]" });
-  // the live record (.github#216): same strategy and evidence on master, engine off until .github#217
-  const live = loadRegistry().repositories.find((candidate) => candidate.repository === FE);
-  assert.equal(live.completion, "deployment-receipt");
-  assert.deepEqual(live.branches, { default: "master", integration: "master", promotion: null });
-  assert.deepEqual(live.productionEvidence, profile.productionEvidence);
-  assert.equal(live.capabilities.completion, "manual");
+  // .github#217: no FE caller, the org sweep is the only runner
+  assert.equal(profile.completionRunner, "org-sweep");
+  assert.deepEqual(profile.branches, { default: "master", integration: "master", promotion: null });
+  // the engine-off record (.github#216, rollback of #217) keeps strategy and evidence
+  const off = (await engineOffRegistry()).repositories.find((candidate) => candidate.repository === FE);
+  assert.equal(off.completion, "deployment-receipt");
+  assert.deepEqual(off.productionEvidence, profile.productionEvidence);
+  assert.equal(off.capabilities.completion, "manual");
+  assert.equal(off.completionRunner, "repository");
 });
 
-test("frontend engine off (.github#216): a direct run refuses, the org sweep skips as a green no-op before any read", async () => {
+test("frontend engine off (.github#216 state): a direct run refuses, the org sweep skips as a green no-op before any read", async () => {
   const client = receiptClient();
-  await assert.rejects(() => runCompletion(client, { repository: FE, awaitingRelease: true }),
+  const offRegistry = await engineOffRegistry();
+  await assert.rejects(() => runCompletion(client, { repository: FE, registry: offRegistry, awaitingRelease: true }),
     (error) => error instanceof CompletionBlocked && error.code === "COMPLETION_NOT_AUTOMATIC");
   assert.deepEqual(client.log, []);
 
   // the org workflow's options (CHIPIN_COMPLETION_SKIP_MANUAL=1, Awaiting release on, Project reconciliation on)
-  const receipt = await runCompletion(client, { repository: FE, awaitingRelease: true, skipWhenManual: true });
+  const receipt = await runCompletion(client, { repository: FE, registry: offRegistry, awaitingRelease: true, skipWhenManual: true });
   assert.deepEqual(client.log, [], "no Issue, Project, Deployment or branch read");
   assert.deepEqual(mutations(client), []);
   assert.equal(receipt.skipped.code, "COMPLETION_NOT_AUTOMATIC");
@@ -1077,7 +1088,7 @@ test("frontend engine off (.github#216): a direct run refuses, the org sweep ski
     "::notice title=Completion skipped::completion skipped for ChipIn-one/chipin-frontend: capabilities.completion is manual"
     + " in workflow-registry.yaml (no Issue closed, no Project #5 Status written)");
 
-  // skipWhenManual never skips an automatic record: with the engine on (.github#217) the same run sweeps
+  // skipWhenManual never skips an automatic record: with the live record (engine on, .github#217) the same run sweeps
   const on = receiptClient();
   const swept = await runCompletion(on, { repository: FE, registry: await receiptRegistry(), reconcileProjectStatus: false, skipWhenManual: true });
   assert.equal(swept.skipped, undefined);

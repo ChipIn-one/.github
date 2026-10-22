@@ -209,6 +209,10 @@ const COMPLETION = ['production-merge', 'integration-merge', 'deployment-receipt
 export const AUTOMATIC_COMPLETION_STRATEGIES = Object.freeze(['production-merge', 'integration-merge', 'deployment-receipt']);
 // deployment-receipt reads its production evidence from GitHub Deployments; the record names which ones count.
 const PRODUCTION_EVIDENCE_STRATEGY = 'deployment-receipt';
+// Who runs the engine for an automatic record (.github#217): `repository` = a completion caller in the repository
+// itself (templates/caller-completion-*.yml); `org-sweep` = only the org sweep in ChipIn-one/.github, which runs
+// `completion.mjs --repository <it>` on a schedule (owner decision for chipin-frontend). Conformance reads it.
+export const COMPLETION_RUNNERS = Object.freeze(['repository', 'org-sweep']);
 const DEPLOYMENT_CREATOR = /^[a-z\d](?:[a-z\d-]{0,38})(?:\[bot\])?$/i;
 const PROTECTION = ['ruleset', 'protection', 'unavailable'];
 const RELEASE_STRATEGIES = ['semver-by-impact', 'deploy-tag', 'none'];
@@ -265,7 +269,7 @@ function normalizeRepository(record, index) {
   const where = `repositories[${index}]`;
   assertKeys(where, record,
     ['repository', 'kind', 'visibility', 'owner', 'branches', 'deploymentProfile', 'completion', 'protection', 'requiredChecks', 'release'],
-    ['capabilities', 'productionEvidence']);
+    ['capabilities', 'productionEvidence', 'completionRunner']);
   assertString(`${where}.repository`, record.repository, REPOSITORY);
   assertEnum(`${where}.kind`, record.kind, KINDS);
   assertEnum(`${where}.visibility`, record.visibility, VISIBILITY);
@@ -330,6 +334,11 @@ function normalizeRepository(record, index) {
     fail('REGISTRY_VALUE', `${where}: capabilities.completion "automatic" contradicts completion "${record.completion}"`
       + ` (the completion engine implements ${AUTOMATIC_COMPLETION_STRATEGIES.join(' | ')})`);
   }
+  const completionRunner = record.completionRunner ?? 'repository';
+  assertEnum(`${where}.completionRunner`, completionRunner, COMPLETION_RUNNERS);
+  if (completionRunner === 'org-sweep' && (record.kind === 'meta' || capabilities.completion !== 'automatic')) {
+    fail('REGISTRY_VALUE', `${where}: completionRunner org-sweep needs capabilities.completion "automatic" on a code or docs repository`);
+  }
 
   const deepFreeze = value => (value && typeof value === 'object' ? Object.freeze(value) : value);
   return Object.freeze({
@@ -344,6 +353,7 @@ function normalizeRepository(record, index) {
     }),
     deploymentProfile: record.deploymentProfile,
     completion: record.completion,
+    completionRunner,
     // present only for deployment-receipt, so the other profiles keep their exact shape
     ...(productionEvidence ? { productionEvidence: deepFreeze(productionEvidence) } : {}),
     protection: record.protection,

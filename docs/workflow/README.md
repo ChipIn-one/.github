@@ -71,6 +71,7 @@ The file is read by a strict built-in YAML subset reader, so the repository need
 | `branches` | `default`, `integration`, optional `promotion` |
 | `deploymentProfile` | `none`, `staging`, `production` |
 | `completion` | `production-merge`, `integration-merge`, `deployment-receipt`, `manual` |
+| `completionRunner` | optional, `repository` (default) or `org-sweep`: who runs the completion engine. `repository` = a completion caller in the repository; `org-sweep` = only an org sweep in `ChipIn-one/.github` that runs `completion.mjs --repository <it>` on a schedule, no repository caller (needs `capabilities.completion: automatic`, not for `meta`); see [completion.md](completion.md#deployment-receipt) |
 | `productionEvidence` | only with `completion: deployment-receipt`, required there: `{ environment, creator }`, the GitHub Deployments that count as production receipts (e.g. `{ environment: Production, creator: "vercel[bot]" }`); needs `deploymentProfile: production`; see [completion.md](completion.md#deployment-receipt) |
 | `protection` | `ruleset`, `protection`, `unavailable` (Free plan + private) |
 | `requiredChecks` | names of checks the integration branch must require |
@@ -82,7 +83,7 @@ Defaults by `kind` apply to capabilities a record does not list: `code` — ever
 
 `chipin-frontend` is on canonical `master` since [#216](https://github.com/ChipIn-one/.github/issues/216) (cutover [chipin-frontend#497](https://github.com/ChipIn-one/chipin-frontend/issues/497)): `branches: { default: master, integration: master }` (no promotion), `completion: deployment-receipt` with
 `productionEvidence: { environment: Production, creator: "vercel[bot]" }`, `release: deploy-tag / production-deploy` (tags come with [#171](https://github.com/ChipIn-one/.github/issues/171)/[#172](https://github.com/ChipIn-one/.github/issues/172)), and
-`capabilities.completion: manual`: the completion engine stays off for it until [#217](https://github.com/ChipIn-one/.github/issues/217). FE PRs are routed `feature -> master` only; the dev/main record is kept in tests as the rollback target of the cutover window. Rollback is a `git revert` of the whole #216 commit, not an edit of the record alone (the tests assert the live record).
+`capabilities.completion: automatic` with `completionRunner: org-sweep` since [#217](https://github.com/ChipIn-one/.github/issues/217): by owner decision the frontend has no completion caller of its own; the org sweep `.github/workflows/frontend-production-completion.yml` (every 15 min) closes FE Issues on a Vercel `Production` receipt (written at Promote) and writes `Awaiting release`. FE PRs are routed `feature -> master` only; the dev/main record is kept in tests as the rollback target of the cutover window. Rollback is a `git revert` of the whole #216 commit, not an edit of the record alone (the tests assert the live record); revert #217 first (engine off, `completionRunner` dropped).
 
 Repositories outside the registry are not managed by the standard. The conformance audit lists organization repositories that are not registered
 (currently `slack-rofls` and `chipin-backend-python`, excluded by owner decision) as `UNREGISTERED` and takes no action.

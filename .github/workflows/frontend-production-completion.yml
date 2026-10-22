@@ -1,13 +1,15 @@
 # Org sweep of the frontend completion (docs/workflow/completion.md). Runs the shared engine
 # automation/completion.mjs for chipin-frontend with the organization PAT CHIPIN_ISSUE_WRITE_TOKEN; the strategy and
 # whether the engine runs at all come from the registry record of the pinned checkout (this repository's master).
-# Since the cutover to canonical `master` (chipin-frontend#497, .github#216) the record says
-# `completion: deployment-receipt` with `capabilities.completion: manual`: with CHIPIN_COMPLETION_SKIP_MANUAL=1 the
-# engine returns a `skipped` receipt before any GitHub read, so every run is a green no-op (no Issue closed, no
-# Project #5 Status written) until .github#217 switches the capability to `automatic`. From then on this same run is
-# the org fallback of deployment-receipt: close on a valid production receipt, and move Todo / In Progress to
-# `Awaiting release` for merged but not yet received work (the repository GITHUB_TOKEN cannot write the org Project,
-# so this writer lives here). Rollback to the dev/main record (production-merge, automatic) needs no change here.
+# Since .github#217 the record says `completion: deployment-receipt`, `capabilities.completion: automatic` and
+# `completionRunner: org-sweep`: by owner decision (2026-10-22) chipin-frontend has no completion caller of its own, so
+# this run is the only FE completion writer. It closes an Issue once every linked PR's merge commit is in a valid
+# Vercel `Production` receipt (written by vercel[bot] at Promote to Production) and moves Todo / In Progress to
+# `Awaiting release` for merged but not yet promoted work (the repository GITHUB_TOKEN cannot write the org Project).
+# Latency: up to 15 minutes after the Promote. Conformance checks that this workflow keeps covering the repository
+# (COMPLETION_SWEEP_MISSING). Emergency switch-off: set `capabilities.completion: manual` AND drop `completionRunner`
+# in the frontend record (validation rejects org-sweep with manual); CHIPIN_COMPLETION_SKIP_MANUAL=1 then makes this run
+# a green no-op (harmless while the record is automatic). Rollback to the dev/main record needs no change here.
 # Runs only from trusted master pushes and the schedule; no branch-selectable dispatch.
 name: Frontend production completion
 

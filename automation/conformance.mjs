@@ -74,9 +74,10 @@ const REQUIRED_USES = [
   ['prMetadata', ['pr-metadata-action', 'pr-gate'], p => p.capabilities.prMetadata === 'required'],
   ['milestones', ['create-milestone-action'], p => p.capabilities.milestones === 'enabled'],
   // the accepted caller follows the registry strategy (docs/workflow/completion.md); integration-merge and
-  // deployment-receipt both use the shared completion-action (deployment-receipt triggers: checkCompletionCaller)
+  // deployment-receipt both use the shared completion-action (deployment-receipt triggers: checkCompletionCaller).
+  // `completionRunner: org-sweep` (.github#217) needs no repository caller; checkCompletionSweep checks the org sweep.
   ['completion', p => (p.completion === 'production-merge' ? ['frontend-production-completion-action'] : ['completion-action']),
-    p => p.capabilities.completion === 'automatic'],
+    p => p.capabilities.completion === 'automatic' && p.completionRunner !== 'org-sweep'],
 ];
 
 export function checkCallers(profile, pins) {
@@ -123,6 +124,97 @@ export function checkCompletionCaller(profile, workflows, pins) {
   return [finding('COMPLETION_TRIGGER_MISSING', 'drift',
     `completion is deployment-receipt but the completion-action caller (${[...paths].join(', ')}) has no ${missing.join(' or ')} trigger.`,
     `Use templates/caller-completion-deployment-receipt.yml: deployment_status (success only) closes on the production receipt, push to ${profile.branches.integration} writes Awaiting release.`)];
+}
+
+// `completionRunner: org-sweep` (.github#217): the engine runs only from an org sweep workflow of ChipIn-one/.github
+// (integration branch), so the repository needs no caller. The sweep must exist and be live: a workflow with a
+// `schedule` trigger and a job step whose own `run:` key (not text inside a block scalar) is
+// `node automation/completion.mjs --repository <repository>` (repository optionally quoted, trailing comment allowed),
+// with no constant-false `if:` on the step or its job, and an env (workflow, job or step) that writes
+// (CHIPIN_COMPLETION_WRITE=1), writes Awaiting release (CHIPIN_COMPLETION_AWAITING_RELEASE=1) and does not switch
+// Project reconciliation off (CHIPIN_COMPLETION_PROJECT_RECONCILE=0).
+const escapeRegExp = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const indentOf = line => line.length - line.trimStart().length;
+const isBlank = line => line.trim() === '' || /^\s*#/.test(line);
+const scalar = value => String(value ?? '').replace(/\s+#.*$/, '').trim().replace(/^(['"])(.*)\1$/, '$2');
+const BLOCK_SCALAR = /:\s*[|>][-+0-9]*\s*(?:#.*)?$/;
+const CONSTANT_FALSE = /^(?:false|0|\$\{\{\s*(?:false|0)\s*\}\})$/i;
+
+// Top-level keys of the mapping whose keys sit at `indent` in lines[from, to): { key: { value, line } }; the bodies of
+// block scalars and nested mappings are skipped.
+function mappingKeys(lines, from, to, indent) {
+  const keys = {};
+  for (let i = from; i < to; i += 1) {
+    const line = lines[i];
+    if (isBlank(line) || indentOf(line) !== indent) continue;
+    const match = /^\s*(?:-\s+)?([A-Za-z_][\w-]*)\s*:(.*)$/.exec(line);
+    if (match) keys[match[1]] = { value: match[2], line: i };
+  }
+  return keys;
+}
+// End (exclusive) of the block that starts at line `at` and holds everything indented deeper than `indent`.
+function blockEnd(lines, at, indent) {
+  let end = at + 1;
+  while (end < lines.length && (isBlank(lines[end]) || indentOf(lines[end]) > indent)) end += 1;
+  return end;
+}
+// `NAME: value` entries of an `env:` mapping (flow form or block form) found at keys.env.
+function envOf(lines, keys, indent) {
+  if (!keys.env) return {};
+  const inline = /^\s*\{(.*)\}\s*(?:#.*)?$/.exec(keys.env.value);
+  if (inline) return Object.fromEntries(inline[1].split(',').map(pair => pair.split(':')).filter(pair => pair.length >= 2).map(([k, ...v]) => [k.trim(), scalar(v.join(':'))]));
+  const end = blockEnd(lines, keys.env.line, indent);
+  const inner = lines.slice(keys.env.line + 1, end).find(line => !isBlank(line));
+  if (!inner) return {};
+  return Object.fromEntries(Object.entries(mappingKeys(lines, keys.env.line + 1, end, indentOf(inner))).map(([k, v]) => [k, scalar(v.value)]));
+}
+
+export function completionSweepCovers(file, repository) {
+  const text = String(file.text);
+  if (!workflowTriggers(text).includes('schedule')) return false;
+  const lines = text.split(/\r?\n/);
+  const run = new RegExp(`^node automation/completion\\.mjs\\s+--repository\\s+(['"]?)${escapeRegExp(repository)}\\1$`);
+  const top = mappingKeys(lines, 0, lines.length, 0);
+  if (!top.jobs) return false;
+  const workflowEnv = envOf(lines, top, 0);
+  const jobsEnd = blockEnd(lines, top.jobs.line, 0);
+  const jobLines = lines.slice(top.jobs.line + 1, jobsEnd);
+  const jobIndent = indentOf(jobLines.find(line => !isBlank(line)) ?? '');
+  for (const job of Object.values(mappingKeys(lines, top.jobs.line + 1, jobsEnd, jobIndent))) {
+    const jobEnd = blockEnd(lines, job.line, jobIndent);
+    const firstKey = lines.slice(job.line + 1, jobEnd).find(line => !isBlank(line));
+    if (!firstKey) continue;
+    const jobKeys = mappingKeys(lines, job.line + 1, jobEnd, indentOf(firstKey));
+    if (jobKeys.if && CONSTANT_FALSE.test(scalar(jobKeys.if.value))) continue;
+    if (!jobKeys.steps) continue;
+    const jobEnv = envOf(lines, jobKeys, indentOf(firstKey));
+    const stepsEnd = blockEnd(lines, jobKeys.steps.line, indentOf(firstKey));
+    for (let i = jobKeys.steps.line + 1; i < stepsEnd; i += 1) {
+      const dash = /^(\s*)-(\s+)\S/.exec(lines[i]);
+      if (!dash) continue;
+      const dashIndent = dash[1].length;
+      const keyColumn = dashIndent + 1 + dash[2].length;
+      const stepEnd = blockEnd(lines, i, dashIndent);
+      const stepKeys = mappingKeys(lines, i + 1, stepEnd, keyColumn);
+      const first = /^\s*-\s+([A-Za-z_][\w-]*)\s*:(.*)$/.exec(lines[i]);
+      if (first) stepKeys[first[1]] = { value: first[2], line: i };
+      i = stepEnd - 1;
+      if (!stepKeys.run || BLOCK_SCALAR.test(`run:${stepKeys.run.value}`) || !run.test(scalar(stepKeys.run.value))) continue;
+      if (stepKeys.if && CONSTANT_FALSE.test(scalar(stepKeys.if.value))) continue;
+      const env = { ...workflowEnv, ...jobEnv, ...envOf(lines, stepKeys, keyColumn) };
+      if (env.CHIPIN_COMPLETION_WRITE === '1' && env.CHIPIN_COMPLETION_AWAITING_RELEASE === '1'
+        && env.CHIPIN_COMPLETION_PROJECT_RECONCILE !== '0') return true;
+    }
+  }
+  return false;
+}
+
+export function checkCompletionSweep(profile, sharedWorkflows) {
+  if (profile.completionRunner !== 'org-sweep' || profile.capabilities.completion !== 'automatic') return [];
+  if ((sharedWorkflows ?? []).some(file => completionSweepCovers(file, profile.repository))) return [];
+  return [finding('COMPLETION_SWEEP_MISSING', 'drift',
+    `completionRunner is org-sweep but no scheduled workflow in ${SHARED} runs completion.mjs --repository ${profile.repository}.`,
+    `Add the org sweep (like .github/workflows/frontend-production-completion.yml) or set completionRunner: repository and add the repository caller.`)];
 }
 
 export async function checkPins(profile, pins, source, tags) {
@@ -253,6 +345,7 @@ export async function auditRepository(profile, source, shared) {
     const findings = [
       ...checkCallers(profile, pins),
       ...checkCompletionCaller(profile, workflows, pins),
+      ...checkCompletionSweep(profile, shared.workflows),
       ...await checkPins(profile, pins, source, shared.tags),
       ...checkDependabot(profile, profile.capabilities.dependabot === 'required' ? await source.repoFile(profile.repository, '.github/dependabot.yml', ref) ?? await source.repoFile(profile.repository, '.github/dependabot.yaml', ref) : null),
       ...checkRouting(profile, profile.capabilities.agentRouting === 'required' ? await source.repoFile(profile.repository, 'AGENTS.md', ref) : null, profile.capabilities.agentRouting === 'required' ? await source.repoFile(profile.repository, '.ai/context.md', ref) : null),
@@ -293,14 +386,28 @@ export async function audit({ source, registry = loadRegistry(), repositories = 
   const report = { schemaVersion: 1, contract: CONFORMANCE_CONTRACT, generatedAt: new Date().toISOString(), standardVersion: registry.standardVersion, repositories: [], unregistered: [], summary: {} };
   let shared;
   try {
-    shared = { tags: sortTags(await source.tags()), projectPullRequests: await source.projectPullRequests() };
+    shared = { tags: sortTags(await source.tags()), projectPullRequests: await source.projectPullRequests(), workflows: [], workflowsError: null };
   } catch (error) {
     report.repositories = profiles.map(p => ({ repository: p.repository, kind: p.kind, status: 'UNREADABLE', findings: [], notes: [], error: `shared read failed: ${String(error.message).slice(0, 200)}` }));
     report.summary = summarize(report);
     return report;
   }
   report.latestTag = shared.tags[0]?.name ?? null;
-  for (const profile of profiles) report.repositories.push(await auditRepository(profile, source, shared));
+  // org sweep workflows (checkCompletionSweep): read only when an audited record relies on one; a failed read makes
+  // only those records UNREADABLE
+  const sweepProfiles = profiles.filter(p => p.completionRunner === 'org-sweep');
+  if (sweepProfiles.length) {
+    try {
+      shared.workflows = await source.workflowFiles(SHARED, getRepositoryProfile(SHARED, registry)?.branches.integration ?? 'master');
+    } catch (error) { shared.workflowsError = String(error.message ?? error).slice(0, 200); }
+  }
+  for (const profile of profiles) {
+    if (shared.workflowsError && profile.completionRunner === 'org-sweep') {
+      report.repositories.push({ repository: profile.repository, kind: profile.kind, status: 'UNREADABLE', findings: [], notes: [], error: `org sweep workflows unreadable: ${shared.workflowsError}` });
+      continue;
+    }
+    report.repositories.push(await auditRepository(profile, source, shared));
+  }
   if (!repositories) {
     try {
       const org = await source.orgRepositories();

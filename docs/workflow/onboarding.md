@@ -9,8 +9,9 @@ existing caller workflows of `chipin-frontend` (on its canonical `master` since 
 2. **Callers.** Copy `templates/caller-pr-gate.yml` (and `caller-create-milestone.yml` when `milestones: enabled`) into the repository, set the integration branch
    from the registry and pin the tagged SHA with a version comment (`@<sha> # v1.x.y`). Admission, the Development link and PR metadata accept only the
    routes the record allows: an implementation PR into `branches.integration`, plus `integration -> promotion` release PRs when `branches.promotion` is set;
-   every other base is rejected. A repository with `capabilities.completion: automatic` also needs its completion caller ([completion.md](completion.md));
-   with `manual` (for example `chipin-frontend` until [#217](https://github.com/ChipIn-one/.github/issues/217)) none is required.
+   every other base is rejected. A repository with `capabilities.completion: automatic` also needs its completion caller ([completion.md](completion.md)),
+   unless its record says `completionRunner: org-sweep` (an org sweep in `ChipIn-one/.github` runs the engine, e.g. `chipin-frontend` since
+   [#217](https://github.com/ChipIn-one/.github/issues/217)); with `manual` none is required.
 3. **Dependabot.** Add `.github/dependabot.yml` with ecosystem `github-actions` (weekly, target = integration branch) plus the repository's package ecosystem.
 4. **Secret.** Add the read-only org token as `CHIPIN_DEV_READ_TOKEN` in the repository.
 5. **Agent context.** Add the routing block to `AGENTS.md` and a `.ai/context.md` following `templates/ai-context.md`.
