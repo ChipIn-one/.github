@@ -144,6 +144,13 @@ export async function evaluateIssueForIntegrationCompletion(issue, {
         "Linked PR " + identity + " is outside " + repository + "; v1 will not guess cross-repository completion.",
       );
     }
+    if (pullRequest.headRepository !== repository) {
+      return leaveOpen(
+        "ambiguous-development",
+        "Linked PR #" + pullRequest.number + " comes from " + (pullRequest.headRepository ?? "an unknown repository")
+          + ", not from " + repository + "; fork pull requests are not completion evidence.",
+      );
+    }
 
     if (!pullRequest.mergedAt || !pullRequest.mergeCommitSha) {
       return leaveOpen(
@@ -188,23 +195,46 @@ export async function evaluateIssueForIntegrationCompletion(issue, {
   const freshness = resolveScopeFreshnessFloor(issue, mergedAtValues);
   if (freshness.blocker) return freshness.blocker;
 
-  const hasFreshImplementationEvidence = freshness.floor === null
-    || mergedAtValues.some((mergedAt) => isAfter(mergedAt, freshness.floor));
+  // The #178 refinement ignores a reopen that undoes an early manual close made after the merge, because
+  // on the frontend the release (and the automatic close) comes later. With integration-merge the merge
+  // itself is terminal evidence and the integration branch is the default branch, so GitHub's native
+  // auto-close (or the engine) closes right after the merge; a human reopen after that means "not done":
+  // every reopen after the last merge counts, and the Issue stays open until a fresh linked PR merges.
+  const lastMergedAt = latestTimestamp(mergedAtValues);
+  const lateReopens = (issue.scopeHistory?.reopenedAt ?? [])
+    .filter((reopenedAt) => isAfter(reopenedAt, lastMergedAt))
+    .map((reopenedAt) => ({ at: reopenedAt, kind: "reopened" }));
+  const reasons = [...(freshness.reasons ?? []), ...lateReopens]
+    .filter((reason) => lastMergedAt === null || isAfter(reason.at, lastMergedAt));
+  const hasFreshImplementationEvidence = reasons.length === 0
+    && (freshness.floor === null || mergedAtValues.some((mergedAt) => isAfter(mergedAt, freshness.floor)));
   if (!hasFreshImplementationEvidence) {
-    const lastMergedAt = latestTimestamp(mergedAtValues);
-    const reasons = (freshness.reasons ?? [])
-      .filter((reason) => lastMergedAt === null || isAfter(reason.at, lastMergedAt))
+    const described = [...new Map(reasons.map((reason) => [reason.kind + reason.at, reason])).values()]
       .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
       .map((reason) => reason.kind + " at " + reason.at);
     return leaveOpen(
       "scope-changed-after-implementation",
       "The Issue was edited or reopened after all currently linked implementation PRs merged"
-        + (reasons.length > 0 ? " (" + reasons.join(", ") + ")" : "")
+        + (described.length > 0 ? " (" + described.join(", ") + ")" : "")
         + ". Link and merge fresh required implementation evidence before automatic completion.",
     );
   }
 
   return { action: "close-completed", code: "integration-complete", detail: receipts.join(" ") };
+}
+
+/**
+ * Fail closed when the token cannot see every sub-issue: the REST list only returns Issues the token may
+ * read (private cross-repository sub-issues disappear), while `sub_issues_summary.total` counts them all.
+ */
+export async function readSubIssueTotal(client, repository, number) {
+  const { owner, repo } = splitRepository(repository);
+  const current = await client.request("/repos/" + owner + "/" + repo + "/issues/" + number);
+  const total = current?.sub_issues_summary?.total;
+  if (!Number.isInteger(total) || total < 0) {
+    throw blocked("UNREADABLE_SUB_ISSUE_SUMMARY", "Issue #" + number + " has no readable sub_issues_summary.total");
+  }
+  return total;
 }
 
 export async function readBranchHead(client, repository, branch) {
@@ -260,6 +290,11 @@ export async function runIntegrationCompletionSweep(client, profile, {
     let relationships;
     try {
       relationships = await readRequiredRelationships(client, repository, issue.number);
+      const total = await readSubIssueTotal(client, repository, issue.number);
+      if (relationships.subIssues.length !== total) {
+        throw new Error("only " + relationships.subIssues.length + " of " + total
+          + " sub-issue(s) are visible to this token (private or cross-repository sub-issues are hidden)");
+      }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       results.push({
@@ -270,13 +305,25 @@ export async function runIntegrationCompletionSweep(client, profile, {
       continue;
     }
 
-    const decision = await evaluateIssueForIntegrationCompletion({ ...issue, ...relationships }, {
-      repository,
-      integrationBranch,
-      integrationHeadSha,
-      containsCommit,
-      readScopeHistory: (candidate) => readScopeHistory(client, repository, candidate),
-    });
+    let decision;
+    try {
+      decision = await evaluateIssueForIntegrationCompletion({ ...issue, ...relationships }, {
+        repository,
+        integrationBranch,
+        integrationHeadSha,
+        containsCommit,
+        readScopeHistory: (candidate) => readScopeHistory(client, repository, candidate),
+      });
+    } catch (error) {
+      // one unreadable compare (a merge commit gone after a force-push) must not abort the sweep
+      const detail = error instanceof Error ? error.message : String(error);
+      results.push({
+        issue,
+        decision: leaveOpen("integration-evidence-unreadable",
+          "Implementation evidence could not be read for this Issue; skipped until the next run: " + detail),
+      });
+      continue;
+    }
     if (decision.action !== "close-completed") {
       const projectReconciliation = await reconcileProject(issue);
       results.push({

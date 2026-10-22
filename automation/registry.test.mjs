@@ -216,6 +216,7 @@ test('loadRegistry reports an unreadable file as a registry error', () => {
 
 test('listRepositories filters by kind and capability', () => {
   assert.deepEqual(listRepositories({ kinds: ['code', 'docs'], capability: 'developmentLink' }), [FE, BE, KB]);
+  assert.deepEqual(listRepositories({ kinds: ['code', 'docs', 'meta'], capability: 'developmentLink' }), [FE, BE, KB, META]);
   assert.deepEqual(listRepositories({ capability: 'milestones', values: ['enabled'] }), [FE, BE]);
   assert.deepEqual(listRepositories({ capability: 'prMetadata' }), [FE, BE]);
   assert.deepEqual(listRepositories({ capability: 'admission', values: ['advisory'] }), [BE, KB, META]);
@@ -224,9 +225,9 @@ test('listRepositories filters by kind and capability', () => {
 });
 
 test('admission and intake scope is the registry: every repository with admission on, owner from its record', async () => {
-  const taskRepositories = listRepositories({ kinds: ['code', 'docs'], capability: 'developmentLink' });
+  const taskRepositories = listRepositories({ kinds: ['code', 'docs', 'meta'], capability: 'developmentLink' });
   assert.deepEqual([...SUPPORTED_REPOSITORIES], taskRepositories);
-  assert.deepEqual(taskRepositories, [FE, BE, KB], 'chipin-notifications is registered with every task capability off');
+  assert.deepEqual(taskRepositories, [FE, BE, KB, META], 'chipin-notifications is registered with every task capability off; .github PRs are linked since #179');
   assert.deepEqual(listRepositories({ capability: 'admission' }), [FE, BE, KB, META]);
   assert.deepEqual(admissionRepositories(), [FE, BE, KB, META]);
   for (const repository of [FE, BE, KB, META]) assert.equal(isSupportedIntakeRepository(repository), true);
@@ -248,14 +249,14 @@ test('admission and intake scope is the registry: every repository with admissio
 });
 
 test('consumers resolve the same behavior from the registry as the old literals', () => {
-  assert.deepEqual([...SUPPORTED_REPOSITORIES].sort(), [BE, FE, KB]);
+  assert.deepEqual([...SUPPORTED_REPOSITORIES].sort(), [META, BE, FE, KB]);
   assert.equal(integrationBranch(FE), 'dev');
   assert.equal(integrationBranch(BE), 'develop');
   assert.equal(integrationBranch(KB), 'master');
-  for (const repository of [FE, BE, KB]) {
+  for (const repository of [FE, BE, KB, META]) {
     assert.equal(readTaskIdentityMarker(`Task identity: ${repository}#12`).repository, repository);
   }
-  assert.throws(() => readTaskIdentityMarker(`Task identity: ${META}#12`), /./);
+  assert.throws(() => readTaskIdentityMarker(`Task identity: ${NOTIF}#12`), /./);
   assert.throws(() => readTaskIdentityMarker('Task identity: ChipIn-one/chipin-frontendX#12'), /./);
 });
 

@@ -82,6 +82,7 @@ test("integration-merge: the fail-closed gates leave the Issue open", async () =
     [issue({ linkedPullRequests: [linkedPr()], linkedPullRequestTotalCount: 2 }), "ambiguous-development"],
     [issue({ linkedPullRequests: [linkedPr(), linkedPr()] }), "ambiguous-development"],
     [issue({ linkedPullRequests: [linkedPr({ repository: FE, headRepository: FE })] }), "ambiguous-development"],
+    [issue({ linkedPullRequests: [linkedPr({ headRepository: "evil/fork" })] }), "ambiguous-development"],
     [issue({ linkedPullRequests: [linkedPr({ mergedAt: null, mergeCommitSha: null })] }), "implementation-not-merged"],
     [issue({ linkedPullRequests: [linkedPr({ mergeCommitSha: "abc" })] }), "implementation-not-merged"],
     [issue({ linkedPullRequests: [linkedPr({ baseRefName: "feature/other" })] }), "ambiguous-development"],
@@ -137,11 +138,19 @@ test("integration-merge: scope changes after the last merge block, the #178 refi
   });
   assert.equal((await evaluateIssueForIntegrationCompletion(ticked, context())).action, "close-completed");
 
-  // early manual close after the merge, reopened -> ignored
+  // close after the merge (GitHub's native auto-close or the engine), then a human reopen -> for
+  // integration-merge every reopen after the last merge counts (the #178 exemption is frontend-only)
   const reopened = issue({
-    scopeHistory: { readable: true, closedAt: ["2026-10-02T10:00:00Z"], reopenedAt: ["2026-10-04T10:00:00Z"], renamedAt: [], bodyRevisions: [] },
+    scopeHistory: { readable: true, closedAt: ["2026-10-01T10:00:02Z"], reopenedAt: ["2026-10-04T10:00:00Z"], renamedAt: [], bodyRevisions: [] },
   });
-  assert.equal((await evaluateIssueForIntegrationCompletion(reopened, context())).action, "close-completed");
+  const reopenedDecision = await evaluateIssueForIntegrationCompletion(reopened, context());
+  assert.equal(reopenedDecision.code, "scope-changed-after-implementation");
+  assert.match(reopenedDecision.detail, /reopened at 2026-10-04T10:00:00Z/u);
+  // a reopen before the last merge is refreshed by that merge
+  const reopenedBefore = issue({
+    scopeHistory: { readable: true, closedAt: ["2026-09-20T10:00:00Z"], reopenedAt: ["2026-09-25T10:00:00Z"], renamedAt: [], bodyRevisions: [] },
+  });
+  assert.equal((await evaluateIssueForIntegrationCompletion(reopenedBefore, context())).action, "close-completed");
 
   // title rename after the merge -> scope changed
   const renamed = issue({
@@ -200,7 +209,14 @@ function candidateNode(overrides = {}) {
   };
 }
 
-function fakeClient({ nodes = [candidateNode()], compareStatus = "ahead", issueUpdatedAt = "2026-10-07T10:00:00Z", log = [] } = {}) {
+function fakeClient({
+  nodes = [candidateNode()],
+  compareStatus = "ahead",
+  compareError = null,
+  issueUpdatedAt = "2026-10-07T10:00:00Z",
+  subIssueTotal = 0,
+  log = [],
+} = {}) {
   return {
     log,
     graphql: async (query) => {
@@ -216,9 +232,14 @@ function fakeClient({ nodes = [candidateNode()], compareStatus = "ahead", issueU
     request: async (path, options = {}) => {
       log.push((options.method ?? "GET") + " " + path);
       if (path.endsWith("/commits/master")) return { sha: HEAD };
-      if (path.includes("/compare/")) return { status: compareStatus, merge_base_commit: { sha: MERGE } };
+      if (path.includes("/compare/")) {
+        if (compareError) throw new Error(compareError);
+        return { status: compareStatus, merge_base_commit: { sha: MERGE } };
+      }
       if (/\/issues\/\d+$/u.test(path) && (options.method ?? "GET") === "GET") {
-        return { state: "open", updated_at: issueUpdatedAt };
+        const issue = { state: "open", updated_at: issueUpdatedAt };
+        if (subIssueTotal !== null) issue.sub_issues_summary = { total: subIssueTotal, completed: 0, percent_completed: 0 };
+        return issue;
       }
       if (/\/issues\/\d+$/u.test(path) && options.method === "PATCH") {
         assert.deepEqual(options.body, { state: "closed", state_reason: "completed" });
@@ -260,6 +281,28 @@ test("integration sweep never writes for an Issue without Development evidence o
   const [open] = await runIntegrationCompletionSweep(diverged, orgProfile(), { reconcileProjectStatus: false });
   assert.equal(open.decision.code, "integration-history-diverged");
   assert.ok(!diverged.log.some((entry) => entry.startsWith("PATCH ")));
+});
+
+test("integration sweep fails closed when the token cannot see every sub-issue, and skips an Issue whose compare fails", async () => {
+  const hidden = fakeClient({ subIssueTotal: 1 });
+  const [hiddenResult] = await runIntegrationCompletionSweep(hidden, orgProfile(), { reconcileProjectStatus: false });
+  assert.equal(hiddenResult.decision.code, "required-relationships-unreadable");
+  assert.match(hiddenResult.decision.detail, /only 0 of 1 sub-issue\(s\) are visible/u);
+  assert.ok(!hidden.log.some((entry) => entry.startsWith("PATCH ")));
+
+  const noSummary = fakeClient({ subIssueTotal: null });
+  const [noSummaryResult] = await runIntegrationCompletionSweep(noSummary, orgProfile(), { reconcileProjectStatus: false });
+  assert.equal(noSummaryResult.decision.code, "required-relationships-unreadable");
+  assert.match(noSummaryResult.decision.detail, /sub_issues_summary/u);
+
+  const broken = fakeClient({
+    nodes: [candidateNode(), candidateNode({ number: 2, url: "https://github.com/ChipIn-one/.github/issues/2" })],
+    compareError: "HTTP 404 compare",
+  });
+  const results = await runIntegrationCompletionSweep(broken, orgProfile(), { reconcileProjectStatus: false });
+  assert.equal(results.length, 2, "one failing compare does not abort the sweep");
+  assert.deepEqual(results.map((result) => result.decision.code), ["integration-evidence-unreadable", "integration-evidence-unreadable"]);
+  assert.ok(!broken.log.some((entry) => entry.startsWith("PATCH ")));
 });
 
 test("integration sweep requires the Project config when reconciliation is on and fails closed on an unreadable head", async () => {
@@ -370,16 +413,18 @@ test("registry: .github and the knowledge base are automatic integration-merge, 
   }), /contradicts completion "deployment-receipt"/u);
 });
 
-test("org workflow for .github runs only from trusted master pushes and the schedule, with the repository token", async () => {
+test("org workflow for .github runs only from trusted master pushes and the schedule, with the org write token", async () => {
   const workflow = await readFile(new URL("../.github/workflows/integration-completion.yml", import.meta.url), "utf8");
   assert.match(workflow, /^  push:$/mu);
   assert.match(workflow, /^    branches:\n      - master$/mu);
   assert.match(workflow, /^  schedule:$/mu);
   assert.doesNotMatch(workflow, /workflow_dispatch:/u);
-  assert.match(workflow, /^permissions:\n  contents: read\n  issues: write\n  pull-requests: read$/mu);
-  assert.match(workflow, /CHIPIN_CANONICAL_WRITE_TOKEN: \$\{\{ github\.token \}\}/u);
+  // the PAT does the reads and writes (private cross-repository relationships, Project #5 repair)
+  assert.match(workflow, /^permissions:\n  contents: read\n\n/mu);
+  assert.match(workflow, /CHIPIN_CANONICAL_WRITE_TOKEN: \$\{\{ secrets\.CHIPIN_ISSUE_WRITE_TOKEN \}\}/u);
+  assert.doesNotMatch(workflow, /github\.token/u);
   assert.match(workflow, /CHIPIN_COMPLETION_WRITE: "1"/u);
-  assert.match(workflow, /CHIPIN_COMPLETION_PROJECT_RECONCILE: "0"/u);
+  assert.doesNotMatch(workflow, /CHIPIN_COMPLETION_PROJECT_RECONCILE/u);
   assert.match(workflow, /node automation\/completion\.mjs --repository "\$GITHUB_REPOSITORY"/u);
   assert.match(workflow, /cancel-in-progress: false/u);
 });

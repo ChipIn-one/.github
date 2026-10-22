@@ -1,8 +1,9 @@
 # Closes Issues of this repository whose Development-linked PRs merged into master
-# (completion: integration-merge in workflow-registry.yaml).
-# The Issues to close live in this repository, so the repository token with issues: write
-# suffices and no PAT is used. Project #5 repair is off (CHIPIN_COMPLETION_PROJECT_RECONCILE=0)
-# because GITHUB_TOKEN cannot read org Projects; the Done mirror is Project-side.
+# (completion: integration-merge in workflow-registry.yaml; docs/workflow/completion.md).
+# Writes use the organization PAT CHIPIN_ISSUE_WRITE_TOKEN, like the frontend fallback: the gates read
+# blockers and sub-issues that may live in private repositories (chipin-backend, knowledge base), which the
+# repository GITHUB_TOKEN cannot see, and Project #5 reconciliation (open Issue still showing derived Done)
+# stays on. Runs only from trusted master pushes and the schedule; no branch-selectable dispatch.
 name: Integration completion
 
 on:
@@ -14,8 +15,6 @@ on:
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: read
 
 concurrency:
   group: integration-completion
@@ -37,7 +36,6 @@ jobs:
           node-version: "24.21.0"
       - name: Reconcile integration completion
         env:
-          CHIPIN_CANONICAL_WRITE_TOKEN: ${{ github.token }}
+          CHIPIN_CANONICAL_WRITE_TOKEN: ${{ secrets.CHIPIN_ISSUE_WRITE_TOKEN }}
           CHIPIN_COMPLETION_WRITE: "1"
-          CHIPIN_COMPLETION_PROJECT_RECONCILE: "0"
         run: node automation/completion.mjs --repository "$GITHUB_REPOSITORY"
