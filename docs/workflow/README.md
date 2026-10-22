@@ -131,8 +131,9 @@ Composite actions remain the units of logic and tests; direct action calls from 
   - Unsure between `none` and `patch`: if a consumer that moves its pin to the new tag gets different behaviour, it is `patch`.
 - A merged PR without a valid section blocks the run (`INVALID_VERSION_IMPACT`, red run on `master`), and the block persists for every later merge because the
   range is "everything since the previous tag". Remedy: edit the body of the *merged* PR (add `## Version impact` with the keyword), then re-run the failed
-  `Release on master` run (the engine re-reads PR bodies on every run); placing the tag by hand is the fallback. Dependabot PRs have no such section: until the
-  engine learns a rule for `dependabot[bot]`, add the section to the Dependabot PR body before merging (or apply the remedy after).
+  `Release on master` run (the engine re-reads PR bodies on every run); placing the tag by hand is the fallback. Dependabot PRs have no such section: a PR authored
+  by `dependabot[bot]` without the section counts as `none` (receipt `impactRaw: dependabot-default`); to release a Dependabot change, add the section with
+  `patch` to its body (an explicit section always wins and is validated like any other). The remedy above stays for human PRs.
 - Consumers pin a **SHA** with a version comment: `@<sha> # v1.0.0`. This keeps the fail-closed pin policy and lets Dependabot (ecosystem `github-actions`) raise the pin.
   Dependabot `github-actions` is enabled in every registry repository (`dependabot: required`), weekly, targeting the integration branch.
 - Compatibility inside v1: inputs of actions and reusable workflows are never removed and never change meaning; new inputs are optional.

@@ -73,6 +73,7 @@ function fakeStore({ graph, branches = {}, tags = {}, pulls = [], releases = {} 
         url: "https://github.com/x/y/pull/" + pull.number,
         mergedAt: pull.mergedAt ?? "2026-10-01T00:00:00Z",
         baseRef: pull.baseRef ?? "dev",
+        author: pull.author ?? null,
         mergeCommitSha: pull.mergeCommitSha ?? pull.commits[0],
       }));
     },
@@ -407,6 +408,73 @@ test("plan: a PR merged into another base or outside the range is not counted; t
   assert.ok(!plan.includedPullRequests.some((pull) => pull.number === 20));
 });
 
+// .github-like history: master, tag v1.1.0 on a; PR#30 merged as b, PR#31 merged as c.
+function orgHistory(pulls) {
+  return {
+    graph: { [sha("a")]: [], [sha("b")]: [sha("a")], [sha("c")]: [sha("b")] },
+    branches: { master: sha("c") },
+    tags: { "v1.1.0": sha("a") },
+    pulls: pulls.map((pull, index) => ({
+      baseRef: "master", commits: [index === 0 ? sha("b") : sha("c")], mergedAt: "2026-10-0" + (index + 1) + "T10:00:00Z", ...pull,
+    })),
+  };
+}
+const DEPENDABOT_BODY = "Bumps [actions/checkout](https://github.com/actions/checkout) from 4 to 5.\n\n---\n\n<details><summary>Dependabot commands</summary></details>\n";
+
+test("plan: a dependabot[bot] PR without a Version impact section counts as none; an explicit section wins; others still block", async () => {
+  // alone in range -> NO_RELEASE, receipt shows the derived default
+  const alone = await runRelease(fakeStore(orgHistory([
+    { number: 30, author: "dependabot[bot]", body: DEPENDABOT_BODY },
+  ])), { mode: "plan", repository: ORG, profile: orgProfile, ref: sha("b"), initialVersion: null });
+  assert.equal(alone.outcome, "NO_RELEASE");
+  assert.equal(alone.impact, "none");
+  assert.equal(alone.tag, null);
+  const [entry] = alone.includedPullRequests;
+  assert.equal(entry.number, 30);
+  assert.equal(entry.author, "dependabot[bot]");
+  assert.equal(entry.impact, "none");
+  assert.equal(entry.impactRaw, "dependabot-default");
+  assert.equal(entry.impactReason, "dependabot[bot] without a Version impact section → none");
+  assert.match(formatReleaseSummary(alone), /\| #30 \| none \(dependabot default\) \|/u);
+
+  // does not raise the max next to a human patch PR
+  const mixed = await planRelease(fakeStore(orgHistory([
+    { number: 30, author: "dependabot[bot]", body: DEPENDABOT_BODY },
+    { number: 31, author: "someone", body: "## Version impact\n\npatch\n" },
+  ])), { repository: ORG, profile: orgProfile, ref: "master" });
+  assert.equal(mixed.outcome, "PLANNED");
+  assert.equal(mixed.impact, "patch");
+  assert.equal(mixed.version, "1.1.1");
+
+  // an explicit section on a Dependabot PR is parsed as for any PR
+  const explicit = await planRelease(fakeStore(orgHistory([
+    { number: 30, author: "dependabot[bot]", body: DEPENDABOT_BODY + "\n## Version impact\n\npatch\n" },
+  ])), { repository: ORG, profile: orgProfile, ref: sha("b") });
+  assert.equal(explicit.impact, "patch");
+  assert.equal(explicit.includedPullRequests[0].impactRaw, "patch");
+  assert.equal(explicit.includedPullRequests[0].impactReason, null);
+  for (const bad of ["## Version impact\n\nhotfix\n", "## Version impact\n\n"]) {
+    await assert.rejects(
+      planRelease(fakeStore(orgHistory([{ number: 30, author: "dependabot[bot]", body: DEPENDABOT_BODY + "\n" + bad }])), {
+        repository: ORG, profile: orgProfile, ref: sha("b"),
+      }),
+      (error) => error.code === "INVALID_VERSION_IMPACT" && /#30/u.test(error.message),
+      bad,
+    );
+  }
+
+  // a non-Dependabot PR (or an unknown author) without the section still blocks
+  for (const author of ["someone", "dependabot", null]) {
+    await assert.rejects(
+      planRelease(fakeStore(orgHistory([{ number: 30, author, body: DEPENDABOT_BODY }])), {
+        repository: ORG, profile: orgProfile, ref: sha("b"),
+      }),
+      (error) => error.code === "INVALID_VERSION_IMPACT" && /#30 \(missing/u.test(error.message),
+      String(author),
+    );
+  }
+});
+
 test("runRelease turns a blocked plan into a BLOCKED receipt and keeps the included inventory", async () => {
   const receipt = await runRelease(fakeStore(frontendHistory({ bodies: { 10: "nothing" } })), {
     mode: "plan", repository: FE, profile: feProfile, ref: "main", initialVersion: null,
@@ -481,7 +549,7 @@ test("GitHub store maps REST endpoints, paginates compare and resolves annotated
         ];
       }
       if (path.endsWith("/commits/" + sha("1") + "/pulls")) {
-        return [{ number: 10, title: "t", body: "b", html_url: "u", merged_at: "2026-10-01T10:00:00Z", base: { ref: "dev" }, merge_commit_sha: sha("1") }];
+        return [{ number: 10, title: "t", body: "b", html_url: "u", merged_at: "2026-10-01T10:00:00Z", base: { ref: "dev" }, user: { login: "dependabot[bot]" }, merge_commit_sha: sha("1") }];
       }
       if (path.endsWith("/commits/" + sha("2") + "/pulls")) {
         return [
@@ -503,8 +571,9 @@ test("GitHub store maps REST endpoints, paginates compare and resolves annotated
   assert.equal(comparison.totalCommits, 3);
   assert.deepEqual(comparison.commits.map((commit) => commit.sha), [sha("1"), sha("2"), sha("3")]);
   assert.deepEqual(await store.listCommitPulls(sha("1")), [{
-    number: 10, title: "t", body: "b", url: "u", mergedAt: "2026-10-01T10:00:00Z", baseRef: "dev", mergeCommitSha: sha("1"),
+    number: 10, title: "t", body: "b", url: "u", mergedAt: "2026-10-01T10:00:00Z", baseRef: "dev", author: "dependabot[bot]", mergeCommitSha: sha("1"),
   }]);
+  assert.equal((await store.listCommitPulls(sha("2")))[0].author, null, "a pull without user maps to author null");
   assert.deepEqual((await store.listCommitPulls(sha("2"))).map((pull) => [pull.number, pull.mergeCommitSha]), [
     [11, sha("2")],
     [12, null],

@@ -8,6 +8,7 @@
 // reads it back, then creates the Release and reads it back. A rerun on an already released commit is a
 // no-op (`ALREADY_RELEASED`); a tag that exists on another commit, a missing or invalid impact line, an
 // unreachable previous tag or a commit outside the release branch end as `BLOCKED` (exit 1), never guessed.
+// The one derived default: a `dependabot[bot]` PR without the section counts as `none` (resolvePullImpact).
 
 import fs from "node:fs";
 import process from "node:process";
@@ -108,6 +109,22 @@ export function parseVersionImpact(body) {
   const keywords = new Set([...cleaned.matchAll(/\b(none|patch|minor|major)\b/giu)].map((hit) => hit[1].toLowerCase()));
   if (keywords.size > 1) return { impact: null, raw, reason: "first line names more than one impact keyword: " + JSON.stringify(raw) };
   return { impact: match[1].toLowerCase(), raw };
+}
+
+export const DEPENDABOT_LOGIN = "dependabot[bot]";
+
+/**
+ * Impact of one merged PR. A PR authored by `dependabot[bot]` whose body has no `## Version impact`
+ * heading at all counts as `none` (`raw: "dependabot-default"`); any present section, even an empty or
+ * invalid one, is parsed as for every other PR, so an explicit value always wins and a bad one blocks.
+ */
+export function resolvePullImpact(pull) {
+  const parsed = parseVersionImpact(pull.body);
+  const missingSection = parsed.impact === null && parsed.raw === null && /^missing /u.test(parsed.reason ?? "");
+  if (missingSection && pull.author === DEPENDABOT_LOGIN) {
+    return { impact: "none", raw: "dependabot-default", reason: DEPENDABOT_LOGIN + " without a Version impact section → none" };
+  }
+  return parsed;
 }
 
 export function readTaskIdentity(body) {
@@ -242,6 +259,7 @@ export function githubStore(client, repository) {
           url: pull.html_url ?? null,
           mergedAt: pull.merged_at ?? null,
           baseRef: pull.base?.ref ?? null,
+          author: pull.user?.login ?? null,
           mergeCommitSha,
         });
       }
@@ -334,7 +352,7 @@ async function collectIncludedPullRequests(store, commits, integrationBranch, pr
     }
     for (const pull of merged) {
       if (included.has(pull.number)) continue;
-      const impact = parseVersionImpact(pull.body);
+      const impact = resolvePullImpact(pull);
       included.set(pull.number, {
         number: pull.number,
         title: pull.title,
@@ -342,6 +360,7 @@ async function collectIncludedPullRequests(store, commits, integrationBranch, pr
         mergedAt: pull.mergedAt,
         mergeCommitSha: pull.mergeCommitSha,
         taskIdentity: readTaskIdentity(pull.body),
+        author: pull.author ?? null,
         impact: impact.impact,
         impactRaw: impact.raw,
         impactReason: impact.reason ?? null,
@@ -577,7 +596,9 @@ export function formatReleaseSummary(receipt) {
   if (pulls.length > 0) {
     lines.push("", "| PR | Impact | Task identity | Merged |", "| --- | --- | --- | --- |");
     for (const pull of pulls) {
-      lines.push("| #" + pull.number + " | " + (pull.impact ?? "invalid: " + pull.impactReason) + " | "
+      const impactCell = pull.impact === null ? "invalid: " + pull.impactReason
+        : pull.impactRaw === "dependabot-default" ? pull.impact + " (dependabot default)" : pull.impact;
+      lines.push("| #" + pull.number + " | " + impactCell + " | "
         + (pull.taskIdentity ?? "-") + " | " + pull.mergedAt + " |");
     }
   }
