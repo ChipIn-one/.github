@@ -1,5 +1,7 @@
 // Shared GitHub transport and active canonical-schema readers.
 
+import { setTimeout as delay } from "node:timers/promises";
+
 const API = "https://api.github.com";
 const GRAPHQL = `${API}/graphql`;
 const API_VERSION = "2026-03-10";
@@ -192,10 +194,86 @@ export async function readIssueProjectItems(client, repository, number, projectN
 
 const PROJECT_GROWTH_REREADS = 2;
 
-export async function readProjectSnapshot(client, config) {
+/**
+ * Delays before re-reading a phantom Project items page (see isPhantomProjectItemsPage).
+ * The phantom answer is per request, not time-correlated: a back-to-back re-read of the same
+ * page usually returns the real one, so short delays suffice.
+ */
+export const PROJECT_PAGE_RETRY_DELAYS_MS = Object.freeze([100, 250, 500, 1000, 2000, 4000]);
+
+/** Wall-clock budget of one whole Project read (all pages, retries and growth re-reads). */
+export const PROJECT_READ_DEADLINE_MS = 60_000;
+
+/**
+ * GitHub's Projects v2 items connection intermittently (observed on Project #5 in issue #221
+ * at roughly one request in four, first page and cursor pages alike) answers HTTP 200, without
+ * `errors`, with a degenerate empty connection:
+ *   { totalCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] }
+ * Re-reading the same page returns the real one. On a cursor page this used to end the read
+ * short ("incomplete: read 200 of 280"); on the first page it silently produced an empty
+ * snapshot. endCursor is deliberately not part of the match: an empty page reporting
+ * totalCount 0 is suspect whatever cursor it carries, and a re-read is harmless.
+ */
+export function isPhantomProjectItemsPage(connection) {
+  return Array.isArray(connection?.nodes)
+    && connection.nodes.length === 0
+    && connection.totalCount === 0
+    && connection.pageInfo?.hasNextPage === false;
+}
+
+function projectReadError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+/**
+ * One budget for a whole Project read: `deadline` is an absolute time from `now()`.
+ * Options: { deadlineMs = PROJECT_READ_DEADLINE_MS, now = Date.now }.
+ */
+export function projectReadBudget({ deadlineMs = PROJECT_READ_DEADLINE_MS, now = Date.now } = {}) {
+  return { deadline: now() + deadlineMs, deadlineMs, now };
+}
+
+function assertWithinBudget(budget, extraMs = 0) {
+  if (budget && budget.now() + extraMs > budget.deadline) {
+    throw projectReadError("PROJECT_READ_DEADLINE", `Project items read exceeded its ${budget.deadlineMs} ms budget`);
+  }
+}
+
+/**
+ * Reads one Project items page and re-reads the same page while the answer is phantom.
+ * Retries are bounded by retryDelaysMs and by the read's budget. A page still phantom after
+ * every retry throws PROJECT_ITEMS_PHANTOM: never a short read, never an empty Project. Only a
+ * caller that passes allowEmptyProject: true accepts a persistent empty first page (no
+ * production caller does; Project #5 is never empty).
+ * `after` is the page's cursor (null for the first page); `skip` disables the check when the
+ * caller ignores the items connection on this request.
+ */
+export async function readProjectItemsPage(client, query, variables, {
+  select, after = null, skip = false, allowEmptyProject = false, budget = null,
+  retryDelaysMs = PROJECT_PAGE_RETRY_DELAYS_MS, wait = delay,
+} = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    assertWithinBudget(budget);
+    const data = await client.graphql(query, variables);
+    if (skip || !isPhantomProjectItemsPage(select(data))) return data;
+    if (attempt >= retryDelaysMs.length) {
+      if (after == null && allowEmptyProject) return data;
+      throw projectReadError("PROJECT_ITEMS_PHANTOM", after == null
+        ? `Project items first page stayed empty (totalCount 0) after ${retryDelaysMs.length} retries; refusing to treat the Project as empty`
+        : `Project items page stayed empty after ${retryDelaysMs.length} retries (totalCount 0 after cursor ${after})`);
+    }
+    assertWithinBudget(budget, retryDelaysMs[attempt]);
+    await wait(retryDelaysMs[attempt]);
+  }
+}
+
+export async function readProjectSnapshot(client, config, options = {}) {
+  const budget = projectReadBudget(options);
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await readProjectSnapshotOnce(client, config);
+      return await readProjectSnapshotOnce(client, config, { ...options, budget });
     } catch (error) {
       // Items added while the pages were read make items.length exceed the totalCount of the
       // first page. Growth is re-read from the first page; a short read still fails closed.
@@ -204,7 +282,7 @@ export async function readProjectSnapshot(client, config) {
   }
 }
 
-async function readProjectSnapshotOnce(client, config) {
+async function readProjectSnapshotOnce(client, config, options) {
   const items = [];
   const fields = [];
   let itemsAfter = null;
@@ -216,12 +294,12 @@ async function readProjectSnapshotOnce(client, config) {
   let projectId = null;
 
   do {
-    const data = await client.graphql(PROJECT_QUERY, {
+    const data = await readProjectItemsPage(client, PROJECT_QUERY, {
       org: config.organization,
       number: config.project.number,
       itemsAfter,
       fieldsAfter,
-    });
+    }, { ...options, after: itemsAfter, skip: itemsDone, select: (page) => page?.organization?.projectV2?.items });
     const project = data.organization?.projectV2;
     if (!project) throw new Error(`Project #${config.project.number} is unavailable`);
     if (projectId !== null && project?.id && projectId !== project.id) {

@@ -6,7 +6,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
-import { GitHubClient } from './github-metadata.mjs';
+import { GitHubClient, projectReadBudget, readProjectItemsPage } from './github-metadata.mjs';
 import { getRepositoryProfile, loadRegistry } from './registry.mjs';
 
 export const CONFORMANCE_CONTRACT = 'chipin-conformance/v1';
@@ -537,7 +537,7 @@ export class GitHubConformanceStore {
 const notAvailable = error => /403|Upgrade to GitHub/.test(String(error?.message)) && /Upgrade to GitHub|private repositor/i.test(String(error?.message));
 
 export class GitHubConformanceSource {
-  constructor(client, registry = loadRegistry()) { this.client = client; this.project = registry.project.number; }
+  constructor(client, registry = loadRegistry(), { pageRetry = {} } = {}) { this.client = client; this.project = registry.project.number; this.pageRetry = pageRetry; }
   async repoFile(repository, path, ref) {
     const data = await this.client.request(`/repos/${repository}/contents/${path}?ref=${encodeURIComponent(ref)}`, { allow404: true });
     if (!data) return null;
@@ -578,12 +578,22 @@ export class GitHubConformanceSource {
   async projectPullRequests() {
     const rows = [];
     let after = null;
+    let totalCount = null;
+    let read = 0;
+    const budget = projectReadBudget(this.pageRetry);
     for (;;) {
-      const data = await this.client.graphql('query($n:Int!,$a:String){organization(login:"ChipIn-one"){projectV2(number:$n){items(first:100,after:$a){pageInfo{hasNextPage endCursor} nodes{content{__typename ... on PullRequest{number repository{nameWithOwner}}}}}}}}', { n: this.project, a: after });
-      const items = data?.organization?.projectV2?.items;
-      if (!items?.pageInfo) throw new Error('Project #5 items unreadable');
+      const select = d => d?.organization?.projectV2?.items;
+      const data = await readProjectItemsPage(this.client, 'query($n:Int!,$a:String){organization(login:"ChipIn-one"){projectV2(number:$n){items(first:100,after:$a){totalCount pageInfo{hasNextPage endCursor} nodes{content{__typename ... on PullRequest{number repository{nameWithOwner}}}}}}}}', { n: this.project, a: after }, { ...this.pageRetry, budget, after, select });
+      const items = select(data);
+      if (!items?.pageInfo || !Array.isArray(items.nodes) || !Number.isInteger(items.totalCount)) throw new Error('Project #5 items unreadable');
+      totalCount ??= items.totalCount;
+      read += items.nodes.length;
       for (const node of items.nodes) if (node?.content?.__typename === 'PullRequest') rows.push({ repository: node.content.repository.nameWithOwner, number: node.content.number });
-      if (!items.pageInfo.hasNextPage) return rows;
+      if (!items.pageInfo.hasNextPage) {
+        if (read !== totalCount) throw new Error(`Project #5 items pagination is incomplete: read ${read} of ${totalCount}`);
+        return rows;
+      }
+      if (!items.pageInfo.endCursor) throw new Error('Project #5 items pagination cursor is missing');
       after = items.pageInfo.endCursor;
     }
   }

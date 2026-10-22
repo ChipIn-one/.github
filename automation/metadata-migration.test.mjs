@@ -11,7 +11,7 @@ import {
   verifyOrgSchema,
   verifyProjectSnapshot,
 } from "./metadata-migration.mjs";
-import { readIssueProjectItems } from "./github-metadata.mjs";
+import { GitHubClient, isPhantomProjectItemsPage, readIssueProjectItems } from "./github-metadata.mjs";
 
 const config = {
   project: { number: 5, statusField: "Status", statusValues: ["Backlog", "Todo", "In Progress"] },
@@ -385,6 +385,129 @@ test("project items that grow during pagination are re-read; a short read still 
   };
   await assert.rejects(readProjectSnapshot(short, { organization: "ChipIn-one", project: { number: 5 } }), /incomplete: read 1 of 2/);
   assert.equal(shortPasses, 1);
+});
+
+// Shape observed live on Project #5 (issue #221): a page (first or cursor) answered with HTTP 200,
+// no `errors`, and an empty connection reporting totalCount 0 while the Project holds 280 items.
+const PHANTOM_ITEMS = { totalCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] };
+
+test("phantom empty cursor pages are re-read instead of ending the Project snapshot (#221)", async () => {
+  const page = (numbers, totalCount, next = null) => ({
+    totalCount,
+    pageInfo: { hasNextPage: next !== null, endCursor: next },
+    nodes: numbers.map((number) => ({ id: "I" + number, content: { __typename: "Issue", number, repository: { nameWithOwner: "ChipIn-one/chipin-frontend" } }, fieldValueByName: null })),
+  });
+  const fields = { totalCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] };
+  const project = (items) => ({ organization: { projectV2: { id: "P", fields, items } } });
+  const realPages = { root: page([1, 2], 5, "c1"), c1: page([3, 4], 5, "c2"), c2: page([5], 5) };
+  const waits = [];
+  const options = { retryDelaysMs: [1, 2, 3], wait: async (ms) => { waits.push(ms); } };
+
+  // Before the fix, page c2 phantom ended the read with "incomplete: read 4 of 5".
+  const phantomOnce = { c2: 2 };
+  const calls = [];
+  const flaky = {
+    graphql: async (_query, variables) => {
+      const key = variables.itemsAfter ?? "root";
+      calls.push(key);
+      if (phantomOnce[key] > 0) { phantomOnce[key] -= 1; return project(PHANTOM_ITEMS); }
+      return project(realPages[key]);
+    },
+  };
+  const snapshot = await readProjectSnapshot(flaky, { organization: "ChipIn-one", project: { number: 5 } }, options);
+  assert.deepEqual(snapshot.items.map((item) => item.number), [1, 2, 3, 4, 5]);
+  assert.equal(snapshot.totalCount, 5);
+  assert.deepEqual(calls, ["root", "c1", "c2", "c2", "c2"], "the same cursor is re-read, not the whole snapshot");
+  assert.deepEqual(waits, [1, 2]);
+
+  // A page that stays phantom after every retry fails closed with its own error.
+  waits.length = 0;
+  const stuck = {
+    graphql: async (_query, variables) => project(variables.itemsAfter === "c2" ? PHANTOM_ITEMS : realPages[variables.itemsAfter ?? "root"]),
+  };
+  await assert.rejects(readProjectSnapshot(stuck, { organization: "ChipIn-one", project: { number: 5 } }, options),
+    (error) => error.code === "PROJECT_ITEMS_PHANTOM" && /page stayed empty after 3 retries \(totalCount 0 after cursor c2\)/.test(error.message));
+  assert.deepEqual(waits, [1, 2, 3]);
+
+  // A phantom first page used to yield an "empty" snapshot; it is re-read like any other page.
+  let firstReads = 0;
+  const phantomFirst = {
+    graphql: async (_query, variables) => {
+      const key = variables.itemsAfter ?? "root";
+      if (key === "root" && (firstReads += 1) === 1) return project(PHANTOM_ITEMS);
+      return project(realPages[key]);
+    },
+  };
+  const full = await readProjectSnapshot(phantomFirst, { organization: "ChipIn-one", project: { number: 5 } }, options);
+  assert.equal(full.items.length, 5);
+  assert.equal(firstReads, 2);
+});
+
+test("a first page that stays empty fails closed unless the caller allows an empty Project (#221)", async () => {
+  const fields = { totalCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] };
+  let reads = 0;
+  const empty = { graphql: async () => { reads += 1; return { organization: { projectV2: { id: "P", fields, items: PHANTOM_ITEMS } } }; } };
+  const options = { retryDelaysMs: [0, 0, 0], wait: async () => {} };
+  await assert.rejects(readProjectSnapshot(empty, { organization: "ChipIn-one", project: { number: 5 } }, options),
+    (error) => error.code === "PROJECT_ITEMS_PHANTOM" && /first page stayed empty \(totalCount 0\) after 3 retries; refusing to treat the Project as empty/.test(error.message));
+  assert.equal(reads, 4);
+
+  reads = 0;
+  const none = await readProjectSnapshot(empty, { organization: "ChipIn-one", project: { number: 5 } }, { ...options, allowEmptyProject: true });
+  assert.equal(none.items.length, 0);
+  assert.equal(none.totalCount, 0);
+  assert.equal(reads, 4, "an allowed empty Project is still re-read before it is believed");
+});
+
+test("phantom re-reads stop at the read's overall deadline (#221)", async () => {
+  let clock = 0;
+  const fields = { totalCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] };
+  let reads = 0;
+  const empty = { graphql: async () => { reads += 1; return { organization: { projectV2: { id: "P", fields, items: PHANTOM_ITEMS } } }; } };
+  const options = { retryDelaysMs: [100, 250, 500, 1000], deadlineMs: 400, now: () => clock, wait: async (ms) => { clock += ms; } };
+  await assert.rejects(readProjectSnapshot(empty, { organization: "ChipIn-one", project: { number: 5 } }, options),
+    (error) => error.code === "PROJECT_READ_DEADLINE" && /exceeded its 400 ms budget/.test(error.message));
+  assert.equal(reads, 3, "100 + 250 fit the budget, the 500 ms wait does not");
+  assert.equal(clock, 350);
+});
+
+test("once items are done, the next fields pages do not re-read the ignored items connection (#221)", async () => {
+  const item = { id: "I1", content: { __typename: "Issue", number: 1, repository: { nameWithOwner: "ChipIn-one/chipin-frontend" } }, fieldValueByName: null };
+  const fieldNode = (id) => ({ __typename: "ProjectV2Field", id, name: id, dataType: "TEXT", isIssueField: false, issueField: null });
+  const calls = [];
+  const client = {
+    graphql: async (_query, variables) => {
+      calls.push(variables.fieldsAfter ?? "root");
+      return { organization: { projectV2: { id: "P",
+        fields: variables.fieldsAfter
+          ? { totalCount: 2, pageInfo: { hasNextPage: false, endCursor: "f2" }, nodes: [fieldNode("F2")] }
+          : { totalCount: 2, pageInfo: { hasNextPage: true, endCursor: "f1" }, nodes: [fieldNode("F1")] },
+        items: variables.itemsAfter ? PHANTOM_ITEMS : { totalCount: 1, pageInfo: { hasNextPage: false, endCursor: "i1" }, nodes: [item] },
+      } } };
+    },
+  };
+  const snapshot = await readProjectSnapshot(client, { organization: "ChipIn-one", project: { number: 5 } }, { retryDelaysMs: [0, 0], wait: async () => {} });
+  assert.deepEqual(calls, ["root", "f1"]);
+  assert.deepEqual(snapshot.fields.map((field) => field.id), ["F1", "F2"]);
+  assert.deepEqual(snapshot.items.map((entry) => entry.number), [1]);
+});
+
+test("phantom page predicate matches an empty zero-count final page", () => {
+  assert.equal(isPhantomProjectItemsPage(PHANTOM_ITEMS), true);
+  assert.equal(isPhantomProjectItemsPage({ ...PHANTOM_ITEMS, totalCount: 280 }), false);
+  assert.equal(isPhantomProjectItemsPage({ ...PHANTOM_ITEMS, nodes: [{ id: "I1" }] }), false);
+  assert.equal(isPhantomProjectItemsPage({ ...PHANTOM_ITEMS, pageInfo: { hasNextPage: true, endCursor: "c" } }), false);
+  // endCursor is not part of the match: an empty final page reporting totalCount 0 is suspect either way.
+  assert.equal(isPhantomProjectItemsPage({ ...PHANTOM_ITEMS, pageInfo: { hasNextPage: false, endCursor: "c" } }), true);
+  assert.equal(isPhantomProjectItemsPage(undefined), false);
+});
+
+test("GraphQL errors next to partial data fail the read instead of returning a short page", async () => {
+  const client = new GitHubClient("t", async () => new Response(JSON.stringify({
+    data: { organization: { projectV2: { id: "P", items: { totalCount: 280, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } },
+    errors: [{ type: "RESOURCE_LIMITS_EXCEEDED", message: "Resource limits for this query exceeded." }],
+  }), { status: 200 }));
+  await assert.rejects(client.graphql("query { x }", {}), /Resource limits/);
 });
 
 test("issue-side Project items are read for one Project and fail closed when incomplete", async () => {

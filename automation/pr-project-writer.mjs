@@ -21,7 +21,7 @@ function prIdentity(pr) {
 }
 
 export async function reconcileProjectPR({reader,writer,config,number,expectedSha,
-  admit=preflightPr,reread=readAdmission,verifyNative=assertSingleNativeIssue,verifyIncluded=verifyRelease,branches=undefined}) {
+  admit=preflightPr,reread=readAdmission,verifyNative=assertSingleNativeIssue,verifyIncluded=verifyRelease,branches=undefined,pageRetry={}}) {
   if (!Number.isInteger(number)||number<=0 || !/^[a-f0-9]{40}$/.test(expectedSha||""))
     throw new Error("PROJECT_REQUEST: exact PR identity and SHA required");
   const pr=await reader.request(ROOT+"/pulls/"+number);
@@ -121,7 +121,7 @@ export async function reconcileProjectPR({reader,writer,config,number,expectedSh
     for(const entry of postScanReceipts)
       assertFreshReceipt(entry.receipt,{issue:entry.issue,revision:entry.revision});
   };
-  const project=await ensureProjectPR(writer,pr.node_id,{beforeWrite});
+  const project=await ensureProjectPR(writer,pr.node_id,{beforeWrite,pageRetry});
   return {contractVersion:"chipin-pr-project-reconcile/v1",number,kind,sha:expectedSha,
     itemId:project.id,created:project.created,readBack:project.readBack,admission:admitted.status};
 }

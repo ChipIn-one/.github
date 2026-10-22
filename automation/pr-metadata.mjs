@@ -2,7 +2,7 @@ import process from "node:process";
 import { setTimeout as wait } from "node:timers/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { GitHubClient } from "./github-metadata.mjs";
+import { GitHubClient, projectReadBudget, readProjectItemsPage } from "./github-metadata.mjs";
 import { preflightPr } from "./issue-admission-pr.mjs";
 import { readAdmission, assertFreshReceipt } from "./issue-admission.mjs";
 import { reconcileDevelopmentLink, readTaskIdentityMarker } from "./development-link.mjs";
@@ -114,13 +114,18 @@ export async function assertSingleNativeIssue(client,number,issueNumber,requireL
   return nodes.length===1;
 }
 
-export async function readProject(client) {
+export async function readProject(client,pageRetry={}) {
   const items=[];const seen=new Set(); let cursor=null, projectId=null, count=null;
+  const budget=projectReadBudget(pageRetry);
   do {
     let result;
     try {
-      result=await client.graphql(PROJECT_QUERY,{after:cursor});
+      result=await readProjectItemsPage(client,PROJECT_QUERY,{after:cursor},
+        {...pageRetry,budget,after:cursor,select:(data)=>data?.organization?.projectV2?.items});
     } catch (error) {
+      // A phantom page or an exhausted budget is a read failure, not a permission problem.
+      if (error?.code==="PROJECT_ITEMS_PHANTOM"||error?.code==="PROJECT_READ_DEADLINE")
+        throw Object.assign(new Error("PROJECT: "+error.message,{cause:error}),{code:error.code});
       throw new Error("PROJECT_PERMISSION: Project #5 GraphQL read failed; configure FE token with org Projects v2 read/write: "+error.message);
     }
     const p=result?.organization?.projectV2;
@@ -145,8 +150,8 @@ export async function readProject(client) {
 // the mutation, bypass admission, or treat a missing item as a success.
 const PROJECT_READBACK_DELAYS_MS = Object.freeze([1000, 2000, 4000, 6000, 8000, 10000]);
 
-export async function ensureProjectPR(client,prId,{beforeWrite,retryWait=wait}={}) {
-  const before=await readProject(client);
+export async function ensureProjectPR(client,prId,{beforeWrite,retryWait=wait,pageRetry={}}={}) {
+  const before=await readProject(client,pageRetry);
   const existing=uniqueProjectItem(before.items,prId);
   let addedId=null;
   if (!existing) {
@@ -163,7 +168,7 @@ export async function ensureProjectPR(client,prId,{beforeWrite,retryWait=wait}={
     if(attempt>0) await retryWait(PROJECT_READBACK_DELAYS_MS[attempt-1]);
     // Fail closed on malformed pages, permissions and duplicates. Only a valid,
     // complete Project read lacking this particular PR is retryable.
-    const after=await readProject(client);
+    const after=await readProject(client,pageRetry);
     const found=uniqueProjectItem(after.items,prId);
     if(!found) continue;
     if(addedId && found.id!==addedId)
