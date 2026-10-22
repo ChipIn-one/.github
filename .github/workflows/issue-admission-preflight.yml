@@ -29,7 +29,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Node 24.21.0
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: '24.21.0'
       - name: Authenticate human orchestrator artifact when dispatch actor is shared Actions bot
@@ -61,7 +61,7 @@ jobs:
             node automation/issue-admission-human-orchestrator.mjs fresh
           fi
       - name: Upload immutable run-attempt evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: chipin-admission-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.client_payload.request_id }}
           path: admission-envelope.json
