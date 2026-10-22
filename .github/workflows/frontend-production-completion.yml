@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   close-completed-issues:
-    name: Close frontend Issues completed in production
+    name: Reconcile frontend completion and Awaiting release
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   AWAITING_RELEASE_STATUS,
   CompletionBlocked,
+  evaluateAwaitingReleaseCandidate,
   evaluateIssueForIntegrationCompletion,
   formatCompletionSummary,
   projectStatusCoordinates,
@@ -561,6 +562,13 @@ function projectClient({
 
 const mutations = (client) => client.log.filter((entry) => entry.startsWith("mutation") || entry.startsWith("PATCH "));
 const feIssue = (overrides = {}) => ({ number: 1, updatedAt: "2026-10-07T10:00:00Z", ...overrides });
+// a normalized frontend sweep candidate with full evidence: one same-repository PR merged into dev
+const READABLE_HISTORY = Object.freeze({ readable: true, closedAt: [], reopenedAt: [], renamedAt: [], bodyRevisions: [] });
+const fePr = (overrides = {}) => linkedPr({
+  number: 101, baseRefName: "dev", headRefName: "feat/x-1", repository: FE, headRepository: FE, ...overrides,
+});
+const feCandidate = (overrides = {}) => issue({ linkedPullRequests: [fePr()], scopeHistory: READABLE_HISTORY, ...overrides });
+const FE_PROJECT_CONFIG = { organization: "ChipIn-one", project: { number: 5, statusField: "Status" } };
 
 test("awaiting release: production-merge sweep moves Todo and In Progress to Awaiting release and reads it back", async () => {
   for (const from of ["Todo", "In Progress"]) {
@@ -568,13 +576,13 @@ test("awaiting release: production-merge sweep moves Todo and In Progress to Awa
     const receipt = await runCompletion(client, { repository: FE, awaitingRelease: true });
     assert.equal(receipt.results[0].decision.code, "awaiting-production", from);
     assert.equal(client.state.ITEM_1, AWAITING_RELEASE_STATUS, from);
-    assert.deepEqual(receipt.awaitingRelease, { enabled: true, updated: [1], skipped: 0 });
+    assert.deepEqual(receipt.awaitingRelease, { enabled: true, updated: [1], skipped: 0, failed: [] });
     assert.match(receipt.results[0].decision.detail, new RegExp("Awaiting release: awaiting-release-set\\. Project Status " + from + " -> Awaiting release\\.", "u"));
     assert.deepEqual(mutations(client), ["mutation SetCompletionAwaitingRelease"], "only the Status write, never a close");
     // read-back after the write
     const writeAt = client.log.indexOf("mutation SetCompletionAwaitingRelease");
     assert.equal(client.log.slice(writeAt + 1).filter((entry) => entry === "query CompletionProjectItemStatus").length, 1);
-    assert.match(formatCompletionSummary(receipt), /Awaiting release: on \(set 1, unchanged 0\)/u);
+    assert.match(formatCompletionSummary(receipt), /Awaiting release: on \(set 1, unchanged 0, failed 0\)/u);
   }
 });
 
@@ -584,7 +592,7 @@ test("awaiting release: a rerun on Awaiting release is a no-op without a mutatio
   const before = mutations(client).length;
   const receipt = await runCompletion(client, { repository: FE, awaitingRelease: true });
   assert.equal(mutations(client).length, before);
-  assert.deepEqual(receipt.awaitingRelease, { enabled: true, updated: [], skipped: 1 });
+  assert.deepEqual(receipt.awaitingRelease, { enabled: true, updated: [], skipped: 1, failed: [] });
   assert.match(receipt.results[0].decision.detail, /awaiting-release-current/u);
 });
 
@@ -609,7 +617,7 @@ test("awaiting release: Done, Backlog, unknown and empty Status are left untouch
   const receipt = await runCompletion(backlog, { repository: FE, awaitingRelease: true });
   assert.equal(backlog.state.ITEM_1, "Backlog");
   assert.deepEqual(mutations(backlog), []);
-  assert.deepEqual(receipt.awaitingRelease, { enabled: true, updated: [], skipped: 1 });
+  assert.deepEqual(receipt.awaitingRelease, { enabled: true, updated: [], skipped: 1, failed: [] });
 });
 
 test("awaiting release: an open Issue showing derived Done is first repaired by the frontend sweep, then moved on", async () => {
@@ -685,14 +693,14 @@ test("awaiting release: only awaiting-production results are touched, and the sn
     statuses: { ITEM_1: "Todo", ITEM_2: "In Progress" },
   });
   const results = [
-    { issue: feIssue({ number: 1 }), decision: { action: "leave-open", code: "awaiting-production", detail: "a." } },
+    { issue: feCandidate({ number: 1 }), decision: { action: "leave-open", code: "awaiting-production", detail: "a." } },
     { issue: feIssue({ number: 2 }), decision: { action: "leave-open", code: "missing-development", detail: "b." } },
     { issue: feIssue({ number: 3 }), decision: { action: "closed", code: "closed-completed", detail: "c." } },
   ];
   const reconciled = await reconcileAwaitingRelease(client, results, {
     repository: FE, projectConfig: { organization: "ChipIn-one", project: { number: 5, statusField: "Status" } },
   });
-  assert.deepEqual(reconciled.awaitingRelease, { enabled: true, updated: [1], skipped: 0 });
+  assert.deepEqual(reconciled.awaitingRelease, { enabled: true, updated: [1], skipped: 0, failed: [] });
   assert.equal(client.state.ITEM_2, "In Progress", "another decision code never changes Status");
   assert.equal(reconciled.results[1], results[1]);
   assert.equal(reconciled.results[2], results[2]);
@@ -702,14 +710,134 @@ test("awaiting release: only awaiting-production results are touched, and the sn
   const untouched = await reconcileAwaitingRelease(none, results.slice(1), {
     repository: FE, projectConfig: { organization: "ChipIn-one", project: { number: 5, statusField: "Status" } },
   });
-  assert.deepEqual(untouched.awaitingRelease, { enabled: true, updated: [], skipped: 0 });
+  assert.deepEqual(untouched.awaitingRelease, { enabled: true, updated: [], skipped: 0, failed: [] });
   assert.deepEqual(none.log, [], "no Project read without a candidate");
+});
+
+test("awaiting release: every linked PR is re-verified, in any order (a later open PR blocks the write)", async () => {
+  const merged = fePr();
+  const open = fePr({ number: 102, mergedAt: null, mergeCommitSha: null });
+  for (const linkedPullRequests of [[merged, open], [open, merged]]) {
+    const verdict = await evaluateAwaitingReleaseCandidate(feCandidate({ linkedPullRequests }), { repository: FE });
+    assert.equal(verdict.eligible, false);
+    assert.equal(verdict.code, "implementation-not-merged");
+
+    const client = projectClient();
+    const reconciled = await reconcileAwaitingRelease(client, [
+      { issue: feCandidate({ linkedPullRequests }), decision: { action: "leave-open", code: "awaiting-production", detail: "a." } },
+    ], { repository: FE, projectConfig: FE_PROJECT_CONFIG });
+    assert.match(reconciled.results[0].decision.detail, /Awaiting release: awaiting-release-skipped:implementation-not-merged\./u);
+    assert.deepEqual(reconciled.awaitingRelease, { enabled: true, updated: [], skipped: 1, failed: [] });
+    assert.deepEqual(client.log, [], "no Project read or write for an ineligible candidate");
+  }
+});
+
+test("awaiting release: another repository, a fork head, a non-canonical main PR, a linked branch or incomplete linkage are skipped", async () => {
+  const cases = [
+    [feCandidate({ linkedPullRequests: [fePr(), fePr({ number: 5, repository: ORG, headRepository: ORG })] }), "ambiguous-development"],
+    [feCandidate({ linkedPullRequests: [fePr({ headRepository: "someone/chipin-frontend" })] }), "ambiguous-development"],
+    [feCandidate({ linkedPullRequests: [fePr({ baseRefName: "main", headRefName: "feat/x" })] }), "ambiguous-production"],
+    [feCandidate({ linkedPullRequests: [fePr({ baseRefName: "release" })] }), "ambiguous-development"],
+    [feCandidate({ linkedPullRequests: [fePr(), fePr()] }), "ambiguous-development"],
+    [feCandidate({ linkedPullRequests: [fePr({ mergeCommitSha: "abc" })] }), "implementation-not-merged"],
+    [feCandidate({ linkedBranchCount: 1 }), "development-branch-pending"],
+    [feCandidate({ linkedPullRequestTotalCount: 2 }), "ambiguous-development"],
+    [feCandidate({ linkedPullRequests: [], linkedPullRequestTotalCount: 0 }), "missing-development"],
+    [feCandidate({ state: "CLOSED" }), "already-closed"],
+  ];
+  for (const [candidate, code] of cases) {
+    const verdict = await evaluateAwaitingReleaseCandidate(candidate, { repository: FE });
+    assert.equal(verdict.eligible, false, code);
+    assert.equal(verdict.code, code);
+  }
+  // the canonical same-repository dev -> main release PR is valid evidence
+  const release = fePr({ number: 103, baseRefName: "main", headRefName: "dev" });
+  assert.deepEqual(await evaluateAwaitingReleaseCandidate(feCandidate({ linkedPullRequests: [fePr(), release] }), { repository: FE }),
+    { eligible: true });
+});
+
+test("awaiting release: scope freshness (#178) is re-checked before the write", async () => {
+  // merged 2026-10-01; closed before the merge and reopened after it: a real scope change
+  const reopened = feCandidate({
+    scopeHistory: { ...READABLE_HISTORY, closedAt: ["2026-09-30T10:00:00Z"], reopenedAt: ["2026-10-02T10:00:00Z"] },
+  });
+  const reopenedVerdict = await evaluateAwaitingReleaseCandidate(reopened, { repository: FE });
+  assert.equal(reopenedVerdict.code, "scope-changed-after-implementation");
+
+  // checkbox-only body edit after the merge: still eligible
+  const revisions = (after) => [
+    { editedAt: "2026-09-01T10:00:00Z", body: "Scope\n- [ ] one\n- [ ] two" },
+    { editedAt: "2026-10-03T10:00:00Z", body: after },
+  ];
+  const checkbox = feCandidate({ lastEditedAt: "2026-10-03T10:00:00Z",
+    scopeHistory: { ...READABLE_HISTORY, bodyRevisions: revisions("Scope\n- [x] one\n- [X] two") } });
+  assert.deepEqual(await evaluateAwaitingReleaseCandidate(checkbox, { repository: FE }), { eligible: true });
+  const textEdit = feCandidate({ lastEditedAt: "2026-10-03T10:00:00Z",
+    scopeHistory: { ...READABLE_HISTORY, bodyRevisions: revisions("Scope\n- [ ] one\n- [ ] two\n- [ ] three") } });
+  assert.equal((await evaluateAwaitingReleaseCandidate(textEdit, { repository: FE })).code, "scope-changed-after-implementation");
+
+  // history read through the callback when the sweep result carries none; unreadable or throwing fails closed
+  const withoutHistory = feCandidate({ scopeHistory: undefined });
+  delete withoutHistory.scopeHistory;
+  let reads = 0;
+  assert.deepEqual(await evaluateAwaitingReleaseCandidate(withoutHistory, {
+    repository: FE, readScopeHistory: async () => { reads += 1; return READABLE_HISTORY; },
+  }), { eligible: true });
+  assert.equal(reads, 1);
+  const unreadable = await evaluateAwaitingReleaseCandidate(withoutHistory, {
+    repository: FE, readScopeHistory: async () => ({ readable: false, detail: "timeline unreadable" }),
+  });
+  assert.equal(unreadable.code, "scope-history-unreadable");
+  const throwing = await evaluateAwaitingReleaseCandidate(withoutHistory, {
+    repository: FE, readScopeHistory: async () => { throw new Error("boom"); },
+  });
+  assert.equal(throwing.code, "scope-history-unreadable");
+
+  const client = projectClient();
+  const reconciled = await reconcileAwaitingRelease(client, [
+    { issue: withoutHistory, decision: { action: "leave-open", code: "awaiting-production", detail: "a." } },
+  ], { repository: FE, projectConfig: FE_PROJECT_CONFIG, readScopeHistory: async () => ({ readable: false, detail: "x" }) });
+  assert.match(reconciled.results[0].decision.detail, /awaiting-release-skipped:scope-history-unreadable/u);
+  assert.deepEqual(client.log, []);
+});
+
+test("awaiting release: a failed write on one Issue is recorded and the run continues; missing option stops before any write", async () => {
+  const client = projectClient({
+    nodes: [feCandidateNode({ number: 1 }), feCandidateNode({ number: 2 })],
+    statuses: { ITEM_1: "Todo", ITEM_2: "Todo" },
+  });
+  const graphql = client.graphql;
+  client.graphql = async (query, variables = {}) => {
+    const data = await graphql(query, variables);
+    if (query.includes("CompletionProjectItemStatus") && variables.itemId === "ITEM_1"
+      && client.log.includes("mutation SetCompletionAwaitingRelease")) {
+      return { node: { ...data.node, fieldValueByName: { name: "In Progress" } } };
+    }
+    return data;
+  };
+  const results = [1, 2].map((number) => ({
+    issue: feCandidate({ number }), decision: { action: "leave-open", code: "awaiting-production", detail: "a." },
+  }));
+  const reconciled = await reconcileAwaitingRelease(client, results, { repository: FE, projectConfig: FE_PROJECT_CONFIG });
+  assert.deepEqual(reconciled.awaitingRelease, { enabled: true, updated: [2], skipped: 0, failed: [1] });
+  assert.match(reconciled.results[0].decision.detail, /Awaiting release: awaiting-release-failed: Project Status of Issue #1 did not read back/u);
+  assert.match(reconciled.results[1].decision.detail, /awaiting-release-set/u);
+  assert.equal(client.state.ITEM_2, AWAITING_RELEASE_STATUS);
+  assert.match(formatCompletionSummary({ repository: FE, strategy: "production-merge", projectNumber: 5,
+    projectReconciliation: true, awaitingRelease: reconciled.awaitingRelease, results: reconciled.results }),
+  /Awaiting release: on \(set 1, unchanged 0, failed 1\)/u);
+
+  const noOption = projectClient({ fields: [statusField(["Backlog", "Todo", "In Progress", "Done"])] });
+  await assert.rejects(() => reconcileAwaitingRelease(noOption, results, { repository: FE, projectConfig: FE_PROJECT_CONFIG }),
+    (error) => error instanceof CompletionBlocked && error.code === "PROJECT_STATUS_OPTION");
+  assert.deepEqual(mutations(noOption), []);
+  assert.ok(!noOption.log.includes("query CompletionProjectItemStatus"), "coordinates are resolved before any item read");
 });
 
 test("awaiting release: off by default and with Project reconciliation off; no Project reads beyond the existing ones", async () => {
   const off = projectClient();
   const receipt = await runCompletion(off, { repository: FE });
-  assert.deepEqual(receipt.awaitingRelease, { enabled: false, updated: [], skipped: 0 });
+  assert.deepEqual(receipt.awaitingRelease, { enabled: false, updated: [], skipped: 0, failed: [] });
   assert.equal(off.log.filter((entry) => entry === "query MetadataProject").length, 1, "only the frontend sweep's own snapshot");
   assert.ok(!off.log.includes("query CompletionProjectItemStatus"));
   assert.equal(off.state.ITEM_1, "Todo");
@@ -736,7 +864,7 @@ test("awaiting release: integration-merge never runs the writer (the merge is te
   const client = projectClient({ repository: ORG, nodes: [unmerged, candidateNode({ number: 2 })], statuses: { ITEM_1: "In Progress", ITEM_2: "Todo" } });
   const receipt = await runCompletion(client, { repository: ORG, awaitingRelease: true });
   assert.equal(receipt.strategy, "integration-merge");
-  assert.deepEqual(receipt.awaitingRelease, { enabled: false, updated: [], skipped: 0 });
+  assert.deepEqual(receipt.awaitingRelease, { enabled: false, updated: [], skipped: 0, failed: [] });
   assert.deepEqual(receipt.results.map((result) => result.decision.code), ["implementation-not-merged", "closed-completed"]);
   assert.ok(!client.log.includes("query CompletionProjectItemStatus"));
   assert.ok(!client.log.includes("mutation SetCompletionAwaitingRelease"));
