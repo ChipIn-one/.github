@@ -559,8 +559,8 @@ test("release-action, reusable workflow and caller templates: plan by default, a
 
   // this repository's own caller (#175) follows the integration template and pins a tag SHA
   const caller = await readFile(new URL("../.github/workflows/release-on-master.yml", import.meta.url), "utf8");
-  assert.match(caller, /^on:\n  push:\n    branches: \[master\]/mu);
-  assert.doesNotMatch(caller, /workflow_dispatch|pull_request/u);
+  // the trigger block is exactly one push to master: nothing else between `on:` and `permissions:`
+  assert.match(caller, /^on:\n  push:\n    branches: \[master\][^\n]*\npermissions:/mu);
   assert.match(caller, /^permissions:\n  contents: write/mu);
   assert.match(caller, /uses: ChipIn-one\/\.github\/\.github\/workflows\/release\.yml@[0-9a-f]{40} +# v\d+\.\d+\.\d+$/mu);
   assert.match(caller, /apply: true/u);

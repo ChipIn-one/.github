@@ -13,7 +13,7 @@ permissions:
   contents: write               # tags and GitHub Releases in this repository (the called workflow inherits this)
   pull-requests: read           # inventory: merged pull requests of the commits since the previous tag
 concurrency:
-  group: release-${{ github.repository }}   # one release run at a time; a later push waits, never cancels
+  group: release-${{ github.repository }}   # one release run at a time; the newest push waits in the queue (GitHub keeps one pending run per group)
   cancel-in-progress: false
 jobs:
   release:

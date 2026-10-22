@@ -24,7 +24,7 @@ The standard is specified in full; implementation lands task by task. Statements
 | --- | --- | --- |
 | Registry `workflow-registry.yaml` + loader `automation/registry.mjs` | implemented | [#150](https://github.com/ChipIn-one/.github/issues/150) |
 | Admission and intake scope from the registry (`.github` admitted, owner per record) | implemented | [#183](https://github.com/ChipIn-one/.github/issues/183) |
-| Release tags and SHA pins, Dependabot in all repositories | planned | [#151](https://github.com/ChipIn-one/.github/issues/151) |
+| Release tags and SHA pins, Dependabot in all repositories | implemented (tags by hand until #175) | [#151](https://github.com/ChipIn-one/.github/issues/151) |
 | Release engine, reusable `release.yml`, `.github` tag and Release on merge to `master` | implemented | [#169](https://github.com/ChipIn-one/.github/issues/169), [#175](https://github.com/ChipIn-one/.github/issues/175) |
 | Native relationships reconciler and blocker gate | implemented; scheduled runs plan only until live acceptance | [#136](https://github.com/ChipIn-one/.github/issues/136), [#152](https://github.com/ChipIn-one/.github/issues/152) |
 | Reusable `pr-gate` / `issue-gate` | planned | [#153](https://github.com/ChipIn-one/.github/issues/153) |
@@ -127,6 +127,10 @@ Composite actions remain the units of logic and tests; direct action calls from 
   - `minor` — a backward-compatible addition: a new module, action or reusable workflow, a new optional input or output, a new registry field or record.
   - `major` — a removed or renamed input, a changed meaning of an existing one, a new required input, a registry schema change (`v2`); an explicit owner decision.
   - Unsure between `none` and `patch`: if a consumer that moves its pin to the new tag gets different behaviour, it is `patch`.
+- A merged PR without a valid section blocks the run (`INVALID_VERSION_IMPACT`, red run on `master`), and the block persists for every later merge because the
+  range is "everything since the previous tag". Remedy: edit the body of the *merged* PR (add `## Version impact` with the keyword), then re-run the failed
+  `Release on master` run (the engine re-reads PR bodies on every run); placing the tag by hand is the fallback. Dependabot PRs have no such section: until the
+  engine learns a rule for `dependabot[bot]`, add the section to the Dependabot PR body before merging (or apply the remedy after).
 - Consumers pin a **SHA** with a version comment: `@<sha> # v1.0.0`. This keeps the fail-closed pin policy and lets Dependabot (ecosystem `github-actions`) raise the pin.
   Dependabot `github-actions` is enabled in every registry repository (`dependabot: required`), weekly, targeting the integration branch.
 - Compatibility inside v1: inputs of actions and reusable workflows are never removed and never change meaning; new inputs are optional.

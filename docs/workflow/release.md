@@ -1,12 +1,12 @@
 # Release policy
 
 Native tags and GitHub Releases for ChipIn repositories. Owner decisions of 2026-10-21 (epic [#167](https://github.com/ChipIn-one/.github/issues/167)); the per-repository rule lives in the
-`release` block of [`workflow-registry.yaml`](../../workflow-registry.yaml). This page is the policy; the automation is built by the tasks listed under Rollout and is not active until they land.
+`release` block of [`workflow-registry.yaml`](../../workflow-registry.yaml). This page is the policy; the automation lands task by task (Rollout below) and is active only where a caller exists (`.github` since #175).
 
 ## Rules
 
 1. **The version is a git tag** `vX.Y.Z` (prefix from `release.tagPrefix`, default `v`) plus a native GitHub Release. No task changes a version; `package.json` does not carry the release version.
-2. **The increment comes from `## Version impact`** of the PRs included since the previous tag: the maximum of `major` > `minor` > `patch` > `none`. A missing or invalid value blocks the release (no guessing). `major` from 0.x is rejected: `1.0.0` is an explicit owner decision.
+2. **The increment comes from `## Version impact`** of the PRs included since the previous tag: the maximum of `major` > `minor` > `patch` > `none`. A missing or invalid value blocks the release (no guessing) and keeps blocking every later run until the merged PR body is fixed and the run repeated, or a tag is placed by hand ([README §4](README.md#4-versioning-and-pins)). `major` from 0.x is rejected: `1.0.0` is an explicit owner decision.
 3. **All `none` means no new version:** no tag and no Release are created; the change ships as part of the previous version.
 4. **Only a human merges.** Tags and Releases are created automatically *after* a human merge (or a successful production deploy), never before, and never by merging.
 5. **Release notes are generated:** native GitHub generated notes from the merged PRs plus an "Included Issues" block built from the inventory (`Task identity` of the included PRs). Nothing is written by hand.
