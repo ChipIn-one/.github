@@ -87,6 +87,34 @@ export function parseDeclarations(body) {
   return result;
 }
 
+// The body without its well-formed declaration lines: every line inside the single "## Dependencies"
+// section (outside code fences) that parseDeclarations reads as a declaration with a valid target in a
+// registry repository is dropped; every other byte stays. Malformed declarations and targets outside the
+// registry stay (they are not relationship data the automation writes). Returns
+// null when the section is ambiguous (several "## Dependencies" headings), so callers can fail closed.
+// Used by the completion scope rule (.github#223): a body revision that differs only in these lines is a
+// relationship edit (intake/reconciler mirror), not a scope change.
+export function stripDeclarationLines(body, registry = loadRegistry()) {
+  const lines = String(body ?? '').split(/\r?\n/);
+  const section = locateSection(lines);
+  if (section.error) return null;
+  if (section.start < 0) return lines.join('\n');
+  const kept = [];
+  let fence = false;
+  lines.forEach((line, i) => {
+    if (i <= section.start || i >= section.end) { kept.push(line); return; }
+    if (/^\s*(```|~~~)/.test(line)) { fence = !fence; kept.push(line); return; }
+    const match = fence ? null : DECLARATION.exec(line.trim());
+    if (match) {
+      let target = null;
+      try { target = parseIssueRef(match[2]); } catch { /* malformed: keep the line */ }
+      if (target && getRepositoryProfile(target.repository, registry) !== null) return;
+    }
+    kept.push(line);
+  });
+  return kept.join('\n');
+}
+
 export const renderDeclaration = (kind, target) => `${LABEL_OF[kind]}: ${target}`;
 
 // Adds missing declaration lines to "## Dependencies" (creating it at the end); nothing else changes.

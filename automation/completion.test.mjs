@@ -17,6 +17,8 @@ import {
   formatCompletionSummary,
   projectStatusCoordinates,
   readBranchHead,
+  readDeclaredTargetStates,
+  readIssueRecord,
   readProductionDeployments,
   reconcileAwaitingRelease,
   runCompletion,
@@ -75,6 +77,8 @@ function issue({
   blockedBy = [],
   subIssues = [],
   scopeHistory,
+  body,
+  declaredTargetStates,
 } = {}) {
   const value = {
     number, state, updatedAt, createdAt, lastEditedAt, reopenedAt: null,
@@ -83,6 +87,8 @@ function issue({
     requiredRelationshipsReadable, blockedBy, subIssues,
   };
   if (scopeHistory !== undefined) value.scopeHistory = scopeHistory;
+  if (body !== undefined) value.body = body;
+  if (declaredTargetStates !== undefined) value.declaredTargetStates = declaredTargetStates;
   return value;
 }
 
@@ -195,6 +201,129 @@ test("integration-merge: scope changes after the last merge block, the #178 refi
     readScopeHistory: async () => ({ readable: false, detail: "timeline truncated" }),
   }));
   assert.equal(unreadable.code, "scope-history-unreadable");
+});
+
+// .github#217 shape: the intake `--relates-to` mirror appended a declaration after the PR merged (.github#223)
+const REL_BODY = "## Outcome\n\n- [ ] Ship it.\n\n## Dependencies\n\nParent: ChipIn-one/chipin-frontend#497\n"
+  + "Blocked by: ChipIn-one/.github#216\n\n## References\n\n- Plan.\n";
+const REL_BODY_MIRRORED = REL_BODY.replace("Blocked by: ChipIn-one/.github#216\n",
+  "Blocked by: ChipIn-one/.github#216\nRelates to: ChipIn-one/.github#221\n");
+const relationshipEdit = (before, after, extra = {}) => ({
+  lastEditedAt: "2026-10-03T10:00:00Z",
+  scopeHistory: {
+    readable: true, closedAt: [], reopenedAt: [], renamedAt: [],
+    bodyRevisions: [
+      { editedAt: "2026-09-01T10:00:00Z", body: before },
+      { editedAt: "2026-10-03T10:00:00Z", body: after },
+    ],
+    ...extra,
+  },
+});
+
+test("integration-merge: relationship declaration edits in ## Dependencies are not a scope change (#223)", async () => {
+  // added mirror line -> still complete
+  assert.equal((await evaluateIssueForIntegrationCompletion(issue(relationshipEdit(REL_BODY, REL_BODY_MIRRORED)), context())).action,
+    "close-completed");
+  // removed mirror line -> still complete
+  assert.equal((await evaluateIssueForIntegrationCompletion(issue(relationshipEdit(REL_BODY_MIRRORED, REL_BODY)), context())).action,
+    "close-completed");
+  // mirror line plus any other text change -> scope changed
+  const mixed = await evaluateIssueForIntegrationCompletion(
+    issue(relationshipEdit(REL_BODY, REL_BODY_MIRRORED.replace("Ship it.", "Ship it and more."))), context());
+  assert.equal(mixed.code, "scope-changed-after-implementation");
+  assert.match(mixed.detail, /text edited at 2026-10-03T10:00:00Z/u);
+  // mirror line plus an extra blank line -> scope changed (only the declaration lines themselves are ignored)
+  assert.equal((await evaluateIssueForIntegrationCompletion(
+    issue(relationshipEdit(REL_BODY, REL_BODY_MIRRORED.replace("#221\n", "#221\n\n"))), context())).code,
+  "scope-changed-after-implementation");
+  // a relation-looking line outside ## Dependencies -> scope changed
+  assert.equal((await evaluateIssueForIntegrationCompletion(
+    issue(relationshipEdit(REL_BODY, REL_BODY.replace("- Plan.\n", "- Plan.\nRelates to: ChipIn-one/.github#221\n"))), context())).code,
+  "scope-changed-after-implementation");
+  // a malformed declaration (not exactly owner/repo#number) is text, not relationship data -> scope changed
+  assert.equal((await evaluateIssueForIntegrationCompletion(
+    issue(relationshipEdit(REL_BODY, REL_BODY.replace("#216\n", "#216\nRelates to: see #221\n"))), context())).code,
+  "scope-changed-after-implementation");
+  // a second ## Dependencies section makes the projection ambiguous -> fail closed
+  assert.equal((await evaluateIssueForIntegrationCompletion(
+    issue(relationshipEdit(REL_BODY + "\n## Dependencies\n", REL_BODY_MIRRORED + "\n## Dependencies\n")), context())).code,
+  "scope-changed-after-implementation");
+  // a relationship-only edit plus a reopen after the merge -> the reopen still blocks
+  const reopened = await evaluateIssueForIntegrationCompletion(issue(relationshipEdit(REL_BODY, REL_BODY_MIRRORED, {
+    closedAt: ["2026-10-01T10:00:02Z"], reopenedAt: ["2026-10-04T10:00:00Z"],
+  })), context());
+  assert.equal(reopened.code, "scope-changed-after-implementation");
+  assert.match(reopened.detail, /reopened at 2026-10-04T10:00:00Z/u);
+  assert.doesNotMatch(reopened.detail, /text edited/u);
+  // title rename stays a scope change
+  assert.equal((await evaluateIssueForIntegrationCompletion(issue(relationshipEdit(REL_BODY, REL_BODY_MIRRORED, {
+    renamedAt: ["2026-10-04T10:00:00Z"],
+  })), context())).code, "scope-changed-after-implementation");
+});
+
+test("deployment-receipt: a relationship-only body revision does not block, a mixed one does (#223)", async () => {
+  const receiptContext = context({ repository: FE, findReceipt: async () => null });
+  const pr = linkedPr({ repository: FE, headRepository: FE });
+  const mirrored = await evaluateIssueForDeploymentReceiptCompletion(
+    issue({ linkedPullRequests: [pr], ...relationshipEdit(REL_BODY, REL_BODY_MIRRORED) }), receiptContext);
+  assert.equal(mirrored.code, "awaiting-production", "scope gate passed; only the missing receipt keeps it open");
+  const mixed = await evaluateIssueForDeploymentReceiptCompletion(
+    issue({ linkedPullRequests: [pr], ...relationshipEdit(REL_BODY, REL_BODY_MIRRORED.replace("Ship it.", "Ship more.")) }), receiptContext);
+  assert.equal(mixed.code, "scope-changed-after-implementation");
+});
+
+test("declared Blocked by without a native edge keeps the Issue open (relationship-not-reconciled, #223)", async () => {
+  const declared = "## Dependencies\n\nBlocked by: ChipIn-one/.github#300\n";
+  // integration-merge: declared after the merge, reconciler not yet run -> open
+  const pending = await evaluateIssueForIntegrationCompletion(issue({ body: declared }), context());
+  assert.equal(pending.code, "relationship-not-reconciled");
+  assert.match(pending.detail, /ChipIn-one\/\.github#300/u);
+  // unknown target state counts as open; a closed target would not block even with the edge
+  assert.equal((await evaluateIssueForIntegrationCompletion(issue({ body: declared, declaredTargetStates: { "ChipIn-one/.github#300": "open" } }), context())).code,
+    "relationship-not-reconciled");
+  assert.equal((await evaluateIssueForIntegrationCompletion(issue({ body: declared, declaredTargetStates: { "ChipIn-one/.github#300": "closed" } }), context())).action,
+    "close-completed");
+  // once the native edge exists the existing blocker gate decides
+  assert.equal((await evaluateIssueForIntegrationCompletion(issue({ body: declared, blockedBy: [{ repository: ORG, number: 300, state: "open" }] }), context())).code,
+    "blocked-by-open-issue");
+  assert.equal((await evaluateIssueForIntegrationCompletion(issue({ body: declared, blockedBy: [{ repository: ORG, number: 300, state: "closed" }] }), context())).action,
+    "close-completed");
+  // other declaration kinds and no body (legacy callers) do not trigger the gate
+  assert.equal((await evaluateIssueForIntegrationCompletion(issue({ body: "## Dependencies\n\nRelates to: ChipIn-one/.github#300\nBlocks: ChipIn-one/.github#301\n" }), context())).action,
+    "close-completed");
+  assert.equal((await evaluateIssueForIntegrationCompletion(issue(), context())).action, "close-completed");
+
+  // deployment-receipt: same gate before any receipt is consulted
+  let receiptReads = 0;
+  const receiptContext = context({ repository: FE, findReceipt: async () => { receiptReads += 1; return null; } });
+  const pr = linkedPr({ repository: FE, headRepository: FE });
+  const fe = "## Dependencies\n\nBlocked by: ChipIn-one/chipin-frontend#900\n";
+  assert.equal((await evaluateIssueForDeploymentReceiptCompletion(issue({ linkedPullRequests: [pr], body: fe }), receiptContext)).code,
+    "relationship-not-reconciled");
+  assert.equal(receiptReads, 0);
+  assert.equal((await evaluateIssueForDeploymentReceiptCompletion(
+    issue({ linkedPullRequests: [pr], body: fe, blockedBy: [{ repository: FE, number: 900, state: "open" }] }), receiptContext)).code,
+  "blocked-by-open-issue");
+});
+
+test("readIssueRecord and readDeclaredTargetStates feed the declared-blocker gate (reads only missing targets)", async () => {
+  const reads = [];
+  const client = { request: async (path) => {
+    reads.push(path);
+    if (path.endsWith("/issues/1")) return { sub_issues_summary: { total: 0 }, body: null };
+    if (path.endsWith("/issues/300")) return { state: "closed" };
+    if (path.endsWith("/issues/301")) return { state: "open" };
+    throw new Error("404");
+  } };
+  assert.deepEqual(await readIssueRecord(client, ORG, 1), { subIssueTotal: 0, body: "" });
+  await assert.rejects(() => readIssueRecord({ request: async () => ({ sub_issues_summary: { total: 0 }, body: 7 }) }, ORG, 1),
+    (error) => error.code === "UNREADABLE_ISSUE_BODY");
+  reads.length = 0;
+  const body = "## Dependencies\n\nBlocked by: ChipIn-one/.github#300\nBlocked by: ChipIn-one/.github#301\n"
+    + "Blocked by: ChipIn-one/.github#302\nBlocked by: ChipIn-one/.github#303\n";
+  const states = await readDeclaredTargetStates(client, { body, blockedBy: [{ repository: ORG, number: 303, state: "open" }] });
+  assert.deepEqual(states, { "ChipIn-one/.github#300": "closed", "ChipIn-one/.github#301": "open" });
+  assert.equal(reads.length, 3, "#303 has a native edge and is not read; #302 is unreadable and stays unknown");
 });
 
 test("integration-merge: the evaluator refuses incomplete context instead of guessing", async () => {
