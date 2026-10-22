@@ -34,6 +34,8 @@ function clientFor({target="main", main="success", frontend="success", branchPol
   };
   return {async request(path) {
     if (path.endsWith("/branches/"+target)) return base;
+    // Classic-protection fixture: no ruleset rules on dev/main required checks.
+    if (path.endsWith("/rules/branches/"+target+"?per_page=100")) return [];
     if (path.endsWith("/commits/"+SHA+"/check-runs?per_page=100&filter=latest"))
       return {total_count:checks.length,check_runs:checks};
     const m=path.match(/\/actions\/runs\/(\d+)$/u);
