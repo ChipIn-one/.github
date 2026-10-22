@@ -46,11 +46,13 @@ jobs:
     outputs:
       outcome: ${{ steps.release.outputs.outcome }}
       tag: ${{ steps.release.outputs.tag }}
-    env:
-      WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
-      WORKFLOW_SHA: ${{ job.workflow_sha }}
     steps:
+      # The `job` context is not available in job-level `env` (GitHub "Context availability"), only in
+      # step-level env/with; a job-level reference makes the whole file invalid and every call fails.
       - name: Require the pinned workflow source
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           set -euo pipefail
           if [[ "$WORKFLOW_REPOSITORY" != "ChipIn-one/.github" || ! "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]; then
@@ -65,6 +67,8 @@ jobs:
           path: chipin-workflow
           persist-credentials: false
       - name: Verify the checkout matches the pin
+        env:
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           set -euo pipefail
           head="$(git -C chipin-workflow rev-parse HEAD)"
