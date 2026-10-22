@@ -20,6 +20,9 @@ concurrency:
 
 jobs:
   validate-kb:
+    # Dependabot pull requests get no repository secrets (GitHub policy), so CHIPIN_DEV_READ_TOKEN is empty
+    # there and the KB checkout cannot be resolved; the check is skipped for them instead of failing (#210).
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
