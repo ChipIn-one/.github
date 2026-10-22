@@ -3,7 +3,7 @@
 Contract for native Issue relationships in the [ChipIn Workflow Standard v1](README.md#5-task-relationships).
 Implemented by [#136](https://github.com/ChipIn-one/.github/issues/136): `automation/relationships.mjs` (reconciler and CLI), the org workflow
 `.github/workflows/relationships-reconcile.yml`, and the blocker gate inside `readAdmission()`.
-Live acceptance on real FE↔BE pairs is [#152](https://github.com/ChipIn-one/.github/issues/152); until then scheduled runs only plan (see Rollout).
+Live acceptance on real FE↔BE pairs passed on 2026-10-22 ([#152](https://github.com/ChipIn-one/.github/issues/152), see Live acceptance); scheduled runs stay read-only plans until the owner sets `RELATIONSHIPS_RECONCILE_APPLY` ([#188](https://github.com/ChipIn-one/.github/issues/188)).
 
 ## Edges
 
@@ -15,8 +15,8 @@ Live acceptance on real FE↔BE pairs is [#152](https://github.com/ChipIn-one/.g
 | `Parent: owner/repo#N` | `parent` / `subIssues` | none |
 
 GitHub exposes them through GraphQL (`blockedBy`, `blocking`, `relatesTo`, `parent`, `subIssues`; mutations `addBlockedBy`, `addRelatesTo`, `addSubIssue`) and REST
-(`/issues/{n}/dependencies/blocked_by`, `/blocking`, `/sub_issues`). Cross-repository edges inside the organization and the Project #5 "blocked" rendering are verified
-by the live acceptance step of [#152](https://github.com/ChipIn-one/.github/issues/152).
+(`/issues/{n}/dependencies/blocked_by`, `/blocking`, `/sub_issues`). Cross-repository edges inside the organization and the Project #5 "blocked" rendering were verified
+by the live acceptance step of [#152](https://github.com/ChipIn-one/.github/issues/152) (below).
 
 ## Declaring
 
@@ -71,8 +71,18 @@ comment is updated to "Resolved". Issues that were never blocked get no comment.
 ### Rollout
 
 `relationships-reconcile.yml` runs `*/30` and on `workflow_dispatch`. Scheduled runs are **read-only plans** until the repository variable `RELATIONSHIPS_RECONCILE_APPLY` is `true`; a dispatch applies only
-with `apply=true`. Writes use `CHIPIN_ISSUE_WRITE_TOKEN` and need `--activate relationships-v1` plus `CHIPIN_RELATIONSHIPS_WRITE=1`. Do not set the variable before the live acceptance in #152 confirmed that
-the token can write cross-repository edges; a 403 ends as a `FAILED` receipt with the diagnostic and is never worked around.
+with `apply=true`. Writes use `CHIPIN_ISSUE_WRITE_TOKEN` and need `--activate relationships-v1` plus `CHIPIN_RELATIONSHIPS_WRITE=1`. The live acceptance in #152 confirmed that the token writes
+cross-repository edges; setting the variable is the owner's decision in [#188](https://github.com/ChipIn-one/.github/issues/188). A 403 ends as a `FAILED` receipt with the diagnostic and is never worked around.
+
+### Live acceptance (#152, 2026-10-22)
+
+Owner-approved edges for seven FE↔BE pairs, written one Issue at a time with `relationships.mjs declare --apply` (body line + native edge + read-back, all `APPLIED`, no blockers):
+`Blocked by: ChipIn-one/chipin-backend#143` on FE#271, `#157` on FE#363, `#146` on FE#308, `#174` on FE#337, `#180` on FE#449, `#95` on FE#132; `Relates to: ChipIn-one/chipin-backend#115` on FE#197
+(FE#454 ↔ BE#181 was already linked). Then one `workflow_dispatch` of `relationships-reconcile.yml` with `apply=true`
+([run 39750726683](https://github.com/ChipIn-one/.github/actions/runs/39750726683)): 155 Issues read, 121 `CLEAN`, 34 `APPLIED`, 0 `BLOCKED`/`FAILED`. The 34 are the reverse mirror lines the reconciler
+appends to the other side of every native edge (`Blocks: ChipIn-one/chipin-frontend#132` on BE#95, `Blocks: ChipIn-one/.github#188` on #152, …) and three `relates_to` edges that human-declared
+`Relates to:` lines had been waiting for (FE#454 ↔ FE#455, FE#455 ↔ FE#482, FE#454 ↔ KB#44). Gate check: `issue-admission-preflight.mjs --issue ChipIn-one/chipin-frontend#308` → `BLOCKED` with
+`BLOCKED_BY_DEPENDENCY` (BE#146 open). The Project #5 board shows the new `blocked` markers on the FE items.
 
 ## Gate
 

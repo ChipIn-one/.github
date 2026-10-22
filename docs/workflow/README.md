@@ -27,7 +27,7 @@ The standard is specified in full; implementation lands task by task. Statements
 | Admission and intake scope from the registry (`.github` admitted, owner per record) | implemented | [#183](https://github.com/ChipIn-one/.github/issues/183) |
 | Release tags and SHA pins, Dependabot in all repositories | implemented (tags by hand until #175) | [#151](https://github.com/ChipIn-one/.github/issues/151) |
 | Release engine, reusable `release.yml`, `.github` tag and Release on merge to `master` | implemented | [#169](https://github.com/ChipIn-one/.github/issues/169), [#175](https://github.com/ChipIn-one/.github/issues/175) |
-| Native relationships reconciler and blocker gate | implemented; scheduled runs plan only until live acceptance | [#136](https://github.com/ChipIn-one/.github/issues/136), [#152](https://github.com/ChipIn-one/.github/issues/152) |
+| Native relationships reconciler and blocker gate | implemented; live acceptance passed 2026-10-22; scheduled apply once `RELATIONSHIPS_RECONCILE_APPLY` is set (#188) | [#136](https://github.com/ChipIn-one/.github/issues/136), [#152](https://github.com/ChipIn-one/.github/issues/152) |
 | Reusable `pr-gate` / `issue-gate` | planned | [#153](https://github.com/ChipIn-one/.github/issues/153) |
 | Conformance audit | implemented; scheduled runs plan only until `CONFORMANCE_AUDIT_APPLY` is set | [#154](https://github.com/ChipIn-one/.github/issues/154) |
 | Backend / knowledge-base conformance packages | planned | [#155](https://github.com/ChipIn-one/.github/issues/155), [#158](https://github.com/ChipIn-one/.github/issues/158) |
