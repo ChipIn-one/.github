@@ -205,6 +205,8 @@ const KINDS = ['code', 'docs', 'meta'];
 const VISIBILITY = ['public', 'private'];
 const DEPLOYMENT_PROFILES = ['none', 'staging', 'production'];
 const COMPLETION = ['production-merge', 'integration-merge', 'deployment-receipt', 'manual'];
+// Strategies automation/completion.mjs implements; `capabilities.completion: automatic` needs one of them.
+export const AUTOMATIC_COMPLETION_STRATEGIES = Object.freeze(['production-merge', 'integration-merge']);
 const PROTECTION = ['ruleset', 'protection', 'unavailable'];
 const RELEASE_STRATEGIES = ['semver-by-impact', 'deploy-tag', 'none'];
 const RELEASE_TRIGGERS = ['promotion-merge', 'integration-merge', 'production-deploy'];
@@ -302,8 +304,9 @@ function normalizeRepository(record, index) {
   for (const [name, allowed] of Object.entries(CAPABILITY_VALUES)) {
     assertEnum(`${where}.capabilities.${name}`, capabilities[name], allowed);
   }
-  if (capabilities.completion === 'automatic' && record.completion === 'manual') {
-    fail('REGISTRY_VALUE', `${where}: capabilities.completion "automatic" contradicts completion "manual"`);
+  if (capabilities.completion === 'automatic' && !AUTOMATIC_COMPLETION_STRATEGIES.includes(record.completion)) {
+    fail('REGISTRY_VALUE', `${where}: capabilities.completion "automatic" contradicts completion "${record.completion}"`
+      + ` (the completion engine implements ${AUTOMATIC_COMPLETION_STRATEGIES.join(' | ')})`);
   }
 
   const deepFreeze = value => (value && typeof value === 'object' ? Object.freeze(value) : value);

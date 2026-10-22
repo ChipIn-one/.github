@@ -98,10 +98,10 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
   assert.deepEqual(getRepositoryProfile(KB), {
     repository: KB, kind: 'docs', visibility: 'private', owner: null,
     branches: { default: 'master', integration: 'master', promotion: null },
-    deploymentProfile: 'none', completion: 'manual', protection: 'unavailable', requiredChecks: [],
+    deploymentProfile: 'none', completion: 'integration-merge', protection: 'unavailable', requiredChecks: [],
     release: { strategy: 'none', trigger: null, tagPrefix: 'v' },
     capabilities: { admission: 'advisory', developmentLink: 'required', prMetadata: 'off',
-      relationships: 'required', completion: 'manual', milestones: 'off',
+      relationships: 'required', completion: 'automatic', milestones: 'off',
       dependabot: 'required', agentRouting: 'required' },
   });
   assert.deepEqual(getRepositoryProfile(META), {
@@ -111,7 +111,7 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
     requiredChecks: ['evaluate-fixtures'],
     release: { strategy: 'semver-by-impact', trigger: 'integration-merge', tagPrefix: 'v' },
     capabilities: { admission: 'advisory', developmentLink: 'required', prMetadata: 'off',
-      relationships: 'required', completion: 'manual', milestones: 'off',
+      relationships: 'required', completion: 'automatic', milestones: 'off',
       dependabot: 'required', agentRouting: 'required' },
   });
   assert.deepEqual(getRepositoryProfile(NOTIF), {
@@ -170,8 +170,17 @@ test('schema rejects invalid values', () => {
   rejects(() => validateRegistry(document([record({ branches: { default: '', integration: 'main' } })])), 'REGISTRY_VALUE');
   rejects(() => validateRegistry({ ...document(), project: { number: 0, statuses: ['A'] } }), 'REGISTRY_VALUE');
   rejects(() => validateRegistry({ ...document(), project: { number: 5, statuses: ['A', 'A'] } }), 'REGISTRY_VALUE');
+  // `automatic` needs a strategy the completion engine implements (automation/completion.mjs)
   rejects(() => validateRegistry(document([record({ completion: 'manual', capabilities: { completion: 'automatic' } })])),
     'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ completion: 'deployment-receipt', capabilities: { completion: 'automatic' } })])),
+    'REGISTRY_VALUE');
+  for (const completion of ['production-merge', 'integration-merge']) {
+    const ok = validateRegistry(document([record({ completion, capabilities: { completion: 'automatic' } })]));
+    assert.equal(ok.repositories[0].capabilities.completion, 'automatic');
+  }
+  assert.equal(validateRegistry(document([record({ completion: 'deployment-receipt', capabilities: { completion: 'manual' } })]))
+    .repositories[0].completion, 'deployment-receipt');
 });
 
 test('owner may be null only for docs repositories', () => {

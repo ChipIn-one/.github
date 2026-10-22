@@ -1,0 +1,56 @@
+# Without a native Development link the completion engine leaves the Issue open (missing-development).
+# The PR body must carry exactly one `Task identity: ChipIn-one/.github#N` line, and that Issue
+# must pass admission.
+name: Native Development link
+
+on:
+  pull_request:
+    branches:
+      - master
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+      - ready_for_review
+    paths-ignore:
+      - .github/workflows/native-development-link.yml
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Pull request number to reconcile.
+        required: true
+        type: string
+      expected_head_sha:
+        description: Exact current PR head SHA for workflow_dispatch (no stale event bypass).
+        required: true
+        type: string
+      task_identity:
+        description: Optional canonical ChipIn task identity; must match any PR body marker.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: native-development-link-${{ github.repository }}-${{ github.event.pull_request.number || inputs.pull_request_number }}
+  cancel-in-progress: true
+
+jobs:
+  reconcile:
+    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Reconcile native Issue ↔ PR Development relationship
+        uses: ChipIn-one/.github/automation/development-link-action@b3f45b9b2d47db4b2722fb6dfd3cae83f580132a # v1.2.0
+        with:
+          repository: ${{ github.repository }}
+          pull-request-number: ${{ github.event.pull_request.number || inputs.pull_request_number }}
+          expected-head-sha: ${{ github.event.pull_request.head.sha || inputs.expected_head_sha }}
+          task-identity: ${{ inputs.task_identity || '' }}
+          admission-token: ${{ secrets.CHIPIN_DEV_READ_TOKEN }}
+          token: ${{ github.token }}

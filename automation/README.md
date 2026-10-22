@@ -24,6 +24,10 @@ Validate locally with `node automation/registry.mjs --validate`; `automation-tes
 
 `release.mjs` turns "what merged since the previous tag" into a version, a tag and a GitHub Release for registry repositories with a release strategy (`plan` reads only; `apply` needs `--activate release-v1` and `CHIPIN_RELEASE_WRITE=1`). The version is the previous tag bumped by the maximum `## Version impact` of the included pull requests; a missing or invalid impact, a tag on another commit, a commit outside the release branch or a failed read-back blocks. `release-action/` wraps it for the reusable `.github/workflows/release.yml`; callers come from `templates/caller-release-*.yml`. See [docs/workflow/release.md](../docs/workflow/release.md).
 
+## Completion
+
+`completion.mjs` is the single completion engine: it reads the registry record, runs only when `capabilities.completion: automatic`, and picks the strategy from `completion`. `production-merge` (frontend) delegates unchanged to `frontend-production-completion.mjs`; `integration-merge` (`.github`, knowledge base) closes an Issue once every Development-linked PR is merged into `branches.integration` and its merge commit is still in that branch head. Both share the fail-closed gates (native Development link, merged PR evidence, no open blockers or incomplete sub-issues, no scope change after the last merge, stale-snapshot check); the only mutation is `state=closed`, `state_reason=completed`. `deployment-receipt` and `manual` do not run. Writes need `CHIPIN_COMPLETION_WRITE=1`; `CHIPIN_COMPLETION_PROJECT_RECONCILE=0` keeps repository-local runs away from Project #5. `completion-action/` wraps it for repository-local callers (`templates/caller-completion-integration.yml`, knowledge base); `.github` runs it through `.github/workflows/integration-completion.yml`. See [docs/workflow/completion.md](../docs/workflow/completion.md).
+
 ## Issue intake
 
 `issue-intake.mjs` provides one bounded create/finalize and reconcile path for new ChipIn issues. It reuses active schema IDs and shared Project/Issue readers from `github-metadata.mjs`; migration #117 is historical only.

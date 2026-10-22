@@ -10,6 +10,7 @@ Owned by `ChipIn-one/.github`; this directory is the first entry point for every
 | [relationships.md](relationships.md) | native Issue relationships contract and blocker gate |
 | [release.md](release.md) | release policy: tags, GitHub Releases, version from `Version impact` |
 | [conformance.md](conformance.md) | what the conformance audit checks |
+| [completion.md](completion.md) | completion policy: which merge closes an Issue per registry strategy, the evidence required, when the engine leaves it open |
 
 Task metadata (Issue Type, Priority, Severity, Project #5 Status, Milestone) stays defined by [github-issue-schema.md](../../github-issue-schema.md).
 Automation reference: [automation/README.md](../../automation/README.md).
@@ -30,6 +31,7 @@ The standard is specified in full; implementation lands task by task. Statements
 | Conformance audit | implemented; scheduled runs plan only until `CONFORMANCE_AUDIT_APPLY` is set | [#154](https://github.com/ChipIn-one/.github/issues/154) |
 | Backend / knowledge-base conformance packages | planned | [#155](https://github.com/ChipIn-one/.github/issues/155), [#158](https://github.com/ChipIn-one/.github/issues/158) |
 | Docs consolidation and routing blocks | planned | [#160](https://github.com/ChipIn-one/.github/issues/160) |
+| Completion engine by registry strategy (`.github` and knowledge base close after the integration merge) | implemented | [#179](https://github.com/ChipIn-one/.github/issues/179) |
 
 ## 1. Purpose and principles
 
@@ -44,7 +46,7 @@ Principles (fixed inside v1):
 2. Fail closed: unreadable, ambiguous or stale state blocks instead of being guessed.
 3. Only a human merges. Automation never closes an Issue because of Status `Done` and never changes Status because a PR merged.
 4. One writer per kind of metadata: intake — `automation/issue-intake.mjs`; relationships — `automation/relationships.mjs`;
-   Project — `pr-project-writer.mjs`; completion — `frontend-production-completion.mjs` (and future profile-specific writers). Executor agents have no write rights.
+   Project — `pr-project-writer.mjs`; completion — `automation/completion.mjs`, driven by the registry strategy ([completion.md](completion.md)). Executor agents have no write rights.
 5. Extensibility: a new repository is one registry record plus two caller files. Logic knows `kind` and capabilities, not the names FE/BE/KB.
 6. Cost: $0 of infrastructure beyond GitHub; CI minutes are saved with path filters and self-hosted runners where they exist.
 

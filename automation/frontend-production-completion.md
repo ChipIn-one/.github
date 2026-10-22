@@ -2,6 +2,8 @@
 
 This is the frontend-only terminal completion automation for `.github#40`.
 
+Since `.github#179` this module is also the `production-merge` strategy of the shared completion engine `completion.mjs` (see [docs/workflow/completion.md](../docs/workflow/completion.md)), which delegates to it for `ChipIn-one/chipin-frontend`. Its behaviour, entry points and tests are unchanged.
+
 The primary completion path is repository-local and event-driven: the frontend repository calls the shared completion action after a trusted push to production branch `main`, using only that repository's `GITHUB_TOKEN` with `issues: write`. That path deliberately skips Organization Project reads/writes. The privileged workflow in this repository remains the fallback/reconciliation path: it runs on trusted `master` pushes and on its scheduled cadence, uses `CHIPIN_ISSUE_WRITE_TOKEN`, and retains Project #5 reopen repair. It intentionally has no branch-selectable `workflow_dispatch`.
 
 Both paths use native GitHub Development linkage as implementation identity. A frontend PR merged to `dev` is integration evidence only. The automation closes an open Issue as `completed` only after every Development-linked implementation PR has unambiguous production evidence.
