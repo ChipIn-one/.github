@@ -17,7 +17,7 @@ Keep the axes separate:
 | Priority | Organization Issue Field `Priority` | `P0`, `P1`, `P2`, `P3` |
 | Severity | Organization Issue Field `Severity` | `Critical`, `Major`, `Minor`; use only when relevant |
 | Release target | Native repository Milestone (FE/BE only) | Optional concrete product release target; KB does not use product-release milestones |
-| Workflow position / completion mirror | ChipIn Project #5 `Status` | `Backlog`, `Todo`, `In Progress`; `Done` mirrors `closed/completed` only |
+| Workflow position / completion mirror | ChipIn Project #5 `Status` | `Backlog`, `Todo`, `In Progress`, `Awaiting release`; `Done` mirrors `closed/completed` only |
 | Completion state | Native GitHub Issue state/reason | open = unfinished; closed/completed = complete; closed/not planned = cancelled |
 | Parent / decomposition | Native GitHub issue relationships | Parent is optional; cross-repo product parent lives in KB when decomposition is needed |
 | PR implementation relationship | Native GitHub Development relationship | Do not use plain URLs or closing-keyword inference as a substitute for a required manual/native link |
@@ -86,15 +86,15 @@ Branch names, titles, closing keywords, plain URLs, matching numbers, and Milest
 fallbacks. Canonical implementation evidence exists only after the native Development relationship is
 read back from GitHub.
 
-Project #5 Status tracks active work as `Backlog -> Todo -> In Progress`. `Done` is retained only as a derived display state for an Issue already `closed/completed`. Do not use or recreate `DEV` or `PROD`; `Done` must never authorize Issue closure.
+Project #5 Status tracks active work as `Backlog -> Todo -> In Progress -> Awaiting release`. `Awaiting release` means the last required implementation PR merged into the integration branch of a repository whose completion needs a later step (frontend promotion to `main`); it is set only by the completion engine and is never a closure trigger. `Done` stays the derived mirror of `closed/completed`: a display state only for an Issue already `closed/completed`. Do not use or recreate `DEV` or `PROD`; `Done` must never authorize Issue closure.
 
 Native Issue state is the completion authority. Closing as completed means the task is complete; closing as not planned means it was cancelled or intentionally abandoned. Reopening makes the task unfinished again.
 
-Development-linked PRs are implementation evidence. Their merge state must not be copied into Project Status.
+Development-linked PRs are implementation evidence. Their merge state must not be copied into Project Status, except `Awaiting release`, which only the completion engine writes (docs/workflow/completion.md).
 
 For frontend code work, merge to integration branch `dev` is not completion. Close only after the required implementation is merged to production branch `main`.
 
-Repository-specific completion triggers other than the frontend rule above are outside this shared change and remain repository-owned.
+Completion triggers per repository are defined by the registry `completion` strategy (docs/workflow/completion.md).
 
 Knowledge-base and standalone non-code work close when their accepted durable outcome is complete on the canonical source of truth. Ambiguous completion evidence fails closed.
 

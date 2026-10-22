@@ -26,4 +26,4 @@ Before writing, the runner re-reads the Issue and abandons the terminal mutation
 
 Milestone and Project #5 Status are not completion gates. Project Status is mutated only to repair the invalid `open + Done` reopen state; backend completion policy is out of scope.
 
-The privileged fallback workflow uses the existing `CHIPIN_ISSUE_WRITE_TOKEN` through `CHIPIN_CANONICAL_WRITE_TOKEN`. The repository-local action accepts the frontend caller's `github.token` and disables Project reconciliation, so it needs no cross-repository or Organization Project secret.
+The privileged fallback workflow uses the existing `CHIPIN_ISSUE_WRITE_TOKEN` through `CHIPIN_CANONICAL_WRITE_TOKEN`; since .github#180 it runs this module through the shared engine `completion.mjs --repository ChipIn-one/chipin-frontend`, which afterwards sets `Awaiting release` for `awaiting-production` Issues ([docs/workflow/completion.md](../docs/workflow/completion.md)); this module itself is unchanged. The repository-local action accepts the frontend caller's `github.token` and disables Project reconciliation, so it needs no cross-repository or Organization Project secret.

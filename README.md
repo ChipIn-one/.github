@@ -50,6 +50,7 @@ Project #5 `Status` tracks workflow position plus one derived completion mirror:
 - `Backlog`
 - `Todo`
 - `In Progress`
+- `Awaiting release` — implementation merged into the integration branch, waiting for the release step (frontend `dev -> main`); written only by the completion engine, never closes an Issue
 - `Done` — display mirror for an Issue already `closed/completed`
 
 Do not use or recreate `DEV` or `PROD`. `Done` is not completion authority and must not cause an Issue to be closed.
@@ -60,7 +61,7 @@ Native GitHub Issue state is the terminal source of truth:
 - closed as completed = completed;
 - closed as not planned = cancelled / intentionally not completed.
 
-Development-linked PRs and their merge state remain implementation evidence and are not copied into Project Status.
+Development-linked PRs and their merge state remain implementation evidence and are not copied into Project Status, except `Awaiting release`, which only the completion engine writes ([docs/workflow/completion.md](docs/workflow/completion.md)).
 
 For frontend code work, merge to `dev` is integration only. Close the Issue only after the required implementation is merged to production branch `main`.
 

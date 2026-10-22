@@ -72,7 +72,7 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
   const registry = loadRegistry();
   assert.equal(registry.schemaVersion, 1);
   assert.equal(registry.standardVersion, 'v1');
-  assert.deepEqual(registry.project, { number: 5, statuses: ['Backlog', 'Todo', 'In Progress', 'Done'] });
+  assert.deepEqual(registry.project, { number: 5, statuses: ['Backlog', 'Todo', 'In Progress', 'Awaiting release', 'Done'] });
   assert.deepEqual(registry.repositories.map(profile => profile.repository), [FE, BE, KB, META, NOTIF]);
 
   assert.deepEqual(getRepositoryProfile(FE), {

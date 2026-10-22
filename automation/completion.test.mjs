@@ -3,12 +3,16 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
+  AWAITING_RELEASE_STATUS,
   CompletionBlocked,
   evaluateIssueForIntegrationCompletion,
   formatCompletionSummary,
+  projectStatusCoordinates,
   readBranchHead,
+  reconcileAwaitingRelease,
   runCompletion,
   runIntegrationCompletionSweep,
+  setAwaitingReleaseStatus,
 } from "./completion.mjs";
 import { AUTOMATIC_COMPLETION_STRATEGIES, loadRegistry, validateRegistry } from "./registry.mjs";
 
@@ -444,4 +448,320 @@ test("composite action and knowledge-base caller template run the engine with th
   assert.match(template, /token: \$\{\{ github\.token \}\}/u);
   assert.match(template, /cancel-in-progress: false/u);
   assert.doesNotMatch(template, /workflow_dispatch/u);
+});
+
+// ---- Awaiting release writer (.github#180) ----
+
+const STATUS_OPTIONS = ["Backlog", "Todo", "In Progress", "Awaiting release", "Done"];
+const statusOptionId = (name) => "OPT_" + name.replaceAll(" ", "_");
+const statusField = (options = STATUS_OPTIONS) => ({
+  __typename: "ProjectV2SingleSelectField",
+  id: "FIELD_STATUS",
+  name: "Status",
+  dataType: "SINGLE_SELECT",
+  isIssueField: false,
+  options: options.map((name) => ({ id: statusOptionId(name), name })),
+});
+
+function feCandidateNode({ number = 1, updatedAt = "2026-10-07T10:00:00Z" } = {}) {
+  return candidateNode({
+    number,
+    updatedAt,
+    url: "https://github.com/ChipIn-one/chipin-frontend/issues/" + number,
+    closedByPullRequestsReferences: {
+      totalCount: 1,
+      nodes: [{
+        number: 100 + number, url: "https://github.com/ChipIn-one/chipin-frontend/pull/" + (100 + number), state: "MERGED",
+        mergedAt: "2026-10-01T10:00:00Z", baseRefName: "dev", headRefName: "feat/x-" + number,
+        headRefOid: "2222222222222222222222222222222222222222",
+        repository: { nameWithOwner: FE }, headRepository: { nameWithOwner: FE }, mergeCommit: { oid: MERGE },
+      }],
+    },
+  });
+}
+
+/**
+ * Fake GitHub with Project #5: `statuses` maps Project item id -> Status, `items` lists memberships.
+ * Each Issue N of `repository` gets item `ITEM_N` unless `items` is given.
+ */
+function projectClient({
+  repository = FE,
+  nodes = [feCandidateNode()],
+  statuses = { ITEM_1: "Todo" },
+  items,
+  fields = [statusField()],
+  issueState = "open",
+  issueUpdatedAt = "2026-10-07T10:00:00Z",
+  readBackOverride = null,
+} = {}) {
+  const log = [];
+  const state = { ...statuses };
+  const memberships = items ?? nodes.map((node) => ({ id: "ITEM_" + node.number, repository, number: node.number }));
+  const optionName = (optionId) => STATUS_OPTIONS.find((name) => statusOptionId(name) === optionId) ?? null;
+  const readStatus = (itemId) => (readBackOverride && log.some((entry) => entry.startsWith("mutation"))
+    ? readBackOverride
+    : state[itemId] ?? null);
+  return {
+    log,
+    state,
+    graphql: async (query, variables = {}) => {
+      const name = query.trim().split(/[\s(]/u).slice(0, 2).join(" ");
+      log.push(name);
+      if (name === "query FrontendCompletionCandidates") {
+        return { repository: { issues: { totalCount: nodes.length, pageInfo: { hasNextPage: false, endCursor: null }, nodes } } };
+      }
+      if (name === "query MetadataProject") {
+        return {
+          organization: {
+            projectV2: {
+              id: "PROJECT_5",
+              fields: { totalCount: fields.length, pageInfo: { hasNextPage: false, endCursor: null }, nodes: fields },
+              items: {
+                totalCount: memberships.length,
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: memberships.map((item) => ({
+                  id: item.id,
+                  content: { __typename: "Issue", number: item.number, repository: { nameWithOwner: item.repository } },
+                  fieldValueByName: state[item.id] ? { __typename: "ProjectV2ItemFieldSingleSelectValue", name: state[item.id] } : null,
+                })),
+              },
+            },
+          },
+        };
+      }
+      if (name === "query FrontendCompletionProjectItem" || name === "query CompletionProjectItemStatus") {
+        const status = readStatus(variables.itemId);
+        return { node: { __typename: "ProjectV2Item", id: variables.itemId, fieldValueByName: status ? { name: status } : null } };
+      }
+      if (name === "mutation SetCompletionAwaitingRelease" || name === "mutation SetFrontendCompletionStatus") {
+        assert.equal(variables.projectId, "PROJECT_5");
+        assert.equal(variables.fieldId, "FIELD_STATUS");
+        state[variables.itemId] = optionName(variables.optionId);
+        return { updateProjectV2ItemFieldValue: { projectV2Item: { id: variables.itemId } } };
+      }
+      throw new Error("unexpected GraphQL: " + name);
+    },
+    listAll: async (path) => {
+      if (path.includes("/pulls?state=closed&base=main")) return [];
+      if (path.endsWith("/dependencies/blocked_by") || path.endsWith("/sub_issues")) return [];
+      throw new Error("unexpected list path: " + path);
+    },
+    request: async (path, options = {}) => {
+      log.push((options.method ?? "GET") + " " + path);
+      if (path.endsWith("/commits/master")) return { sha: HEAD };
+      if (path.includes("/compare/")) return { status: "ahead", merge_base_commit: { sha: MERGE } };
+      if (/\/issues\/\d+$/u.test(path) && (options.method ?? "GET") === "GET") {
+        return { state: issueState, updated_at: issueUpdatedAt, sub_issues_summary: { total: 0, completed: 0, percent_completed: 0 } };
+      }
+      if (/\/issues\/\d+$/u.test(path) && options.method === "PATCH") return { state: "closed", state_reason: "completed" };
+      throw new Error("unexpected request: " + path);
+    },
+  };
+}
+
+const mutations = (client) => client.log.filter((entry) => entry.startsWith("mutation") || entry.startsWith("PATCH "));
+const feIssue = (overrides = {}) => ({ number: 1, updatedAt: "2026-10-07T10:00:00Z", ...overrides });
+
+test("awaiting release: production-merge sweep moves Todo and In Progress to Awaiting release and reads it back", async () => {
+  for (const from of ["Todo", "In Progress"]) {
+    const client = projectClient({ statuses: { ITEM_1: from } });
+    const receipt = await runCompletion(client, { repository: FE, awaitingRelease: true });
+    assert.equal(receipt.results[0].decision.code, "awaiting-production", from);
+    assert.equal(client.state.ITEM_1, AWAITING_RELEASE_STATUS, from);
+    assert.deepEqual(receipt.awaitingRelease, { enabled: true, updated: [1], skipped: 0 });
+    assert.match(receipt.results[0].decision.detail, new RegExp("Awaiting release: awaiting-release-set\\. Project Status " + from + " -> Awaiting release\\.", "u"));
+    assert.deepEqual(mutations(client), ["mutation SetCompletionAwaitingRelease"], "only the Status write, never a close");
+    // read-back after the write
+    const writeAt = client.log.indexOf("mutation SetCompletionAwaitingRelease");
+    assert.equal(client.log.slice(writeAt + 1).filter((entry) => entry === "query CompletionProjectItemStatus").length, 1);
+    assert.match(formatCompletionSummary(receipt), /Awaiting release: on \(set 1, unchanged 0\)/u);
+  }
+});
+
+test("awaiting release: a rerun on Awaiting release is a no-op without a mutation", async () => {
+  const client = projectClient({ statuses: { ITEM_1: "Todo" } });
+  await runCompletion(client, { repository: FE, awaitingRelease: true });
+  const before = mutations(client).length;
+  const receipt = await runCompletion(client, { repository: FE, awaitingRelease: true });
+  assert.equal(mutations(client).length, before);
+  assert.deepEqual(receipt.awaitingRelease, { enabled: true, updated: [], skipped: 1 });
+  assert.match(receipt.results[0].decision.detail, /awaiting-release-current/u);
+});
+
+test("awaiting release: Done, Backlog, unknown and empty Status are left untouched", async () => {
+  const project = { id: "PROJECT_5", fields: [statusField()], items: [{ id: "ITEM_1", repository: FE, number: 1 }] };
+  for (const [status, code] of [
+    ["Done", "awaiting-release-skipped:Done"],
+    ["Backlog", "awaiting-release-skipped:Backlog"],
+    ["DEV", "awaiting-release-skipped:DEV"],
+    [null, "awaiting-release-skipped:none"],
+  ]) {
+    const client = projectClient({ statuses: status ? { ITEM_1: status } : {} });
+    const outcome = await setAwaitingReleaseStatus(client, feIssue(), project, FE);
+    assert.equal(outcome.mutated, false, String(status));
+    assert.equal(outcome.code, code);
+    assert.deepEqual(mutations(client), []);
+    assert.ok(!client.log.some((entry) => entry.startsWith("GET ")), "no Issue re-read when nothing is written");
+  }
+
+  // sweep level: Backlog stays Backlog
+  const backlog = projectClient({ statuses: { ITEM_1: "Backlog" } });
+  const receipt = await runCompletion(backlog, { repository: FE, awaitingRelease: true });
+  assert.equal(backlog.state.ITEM_1, "Backlog");
+  assert.deepEqual(mutations(backlog), []);
+  assert.deepEqual(receipt.awaitingRelease, { enabled: true, updated: [], skipped: 1 });
+});
+
+test("awaiting release: an open Issue showing derived Done is first repaired by the frontend sweep, then moved on", async () => {
+  // the unchanged frontend module repairs open + Done -> In Progress inside its sweep; the writer then reads
+  // the fresh item Status (In Progress) and sets Awaiting release
+  const client = projectClient({ statuses: { ITEM_1: "Done" } });
+  const receipt = await runCompletion(client, { repository: FE, awaitingRelease: true });
+  assert.deepEqual(mutations(client), ["mutation SetFrontendCompletionStatus", "mutation SetCompletionAwaitingRelease"]);
+  assert.equal(client.state.ITEM_1, AWAITING_RELEASE_STATUS);
+  assert.deepEqual(receipt.awaitingRelease.updated, [1]);
+});
+
+test("awaiting release: missing or ambiguous Project membership is noted without a mutation", async () => {
+  const client = projectClient();
+  const missing = await setAwaitingReleaseStatus(client, feIssue(), { id: "PROJECT_5", fields: [statusField()], items: [] }, FE);
+  assert.equal(missing.code, "project-membership-missing");
+  const otherRepository = await setAwaitingReleaseStatus(client, feIssue(),
+    { id: "PROJECT_5", fields: [statusField()], items: [{ id: "ITEM_X", repository: ORG, number: 1 }] }, FE);
+  assert.equal(otherRepository.code, "project-membership-missing");
+  const ambiguous = await setAwaitingReleaseStatus(client, feIssue(), {
+    id: "PROJECT_5", fields: [statusField()],
+    items: [{ id: "ITEM_1", repository: FE, number: 1 }, { id: "ITEM_2", repository: FE, number: 1 }],
+  }, FE);
+  assert.equal(ambiguous.code, "project-membership-ambiguous");
+  assert.deepEqual(client.log, [], "nothing is read or written for a missing or ambiguous membership");
+
+  const sweep = projectClient({ items: [] });
+  const receipt = await runCompletion(sweep, { repository: FE, awaitingRelease: true });
+  assert.match(receipt.results[0].decision.detail, /project-membership-missing/u);
+  assert.deepEqual(mutations(sweep), []);
+});
+
+test("awaiting release: a stale or closed Issue is skipped without a mutation", async () => {
+  const project = { id: "PROJECT_5", fields: [statusField()], items: [{ id: "ITEM_1", repository: FE, number: 1 }] };
+  const stale = projectClient({ issueUpdatedAt: "2026-10-07T10:00:01Z" });
+  const staleOutcome = await setAwaitingReleaseStatus(stale, feIssue(), project, FE);
+  assert.equal(staleOutcome.code, "stale-snapshot");
+  assert.deepEqual(mutations(stale), []);
+
+  const closed = projectClient({ issueState: "closed" });
+  const closedOutcome = await setAwaitingReleaseStatus(closed, feIssue(), project, FE);
+  assert.equal(closedOutcome.code, "issue-no-longer-open");
+  assert.deepEqual(mutations(closed), []);
+
+  const noSnapshotTime = projectClient();
+  assert.equal((await setAwaitingReleaseStatus(noSnapshotTime, feIssue({ updatedAt: null }), project, FE)).code, "stale-snapshot");
+  assert.deepEqual(mutations(noSnapshotTime), []);
+});
+
+test("awaiting release: a read-back mismatch or a missing option fails closed", async () => {
+  const project = { id: "PROJECT_5", fields: [statusField()], items: [{ id: "ITEM_1", repository: FE, number: 1 }] };
+  const mismatch = projectClient({ readBackOverride: "In Progress" });
+  await assert.rejects(() => setAwaitingReleaseStatus(mismatch, feIssue(), project, FE),
+    (error) => error instanceof CompletionBlocked && error.code === "PROJECT_STATUS_WRITE" && /did not read back as Awaiting release/u.test(error.message));
+
+  const noOption = projectClient();
+  await assert.rejects(() => setAwaitingReleaseStatus(noOption, feIssue(),
+    { ...project, fields: [statusField(["Backlog", "Todo", "In Progress", "Done"])] }, FE),
+  (error) => error.code === "PROJECT_STATUS_OPTION");
+  assert.deepEqual(mutations(noOption), []);
+
+  assert.throws(() => projectStatusCoordinates({ id: "P", fields: [statusField(), statusField()] }, AWAITING_RELEASE_STATUS),
+    (error) => error.code === "PROJECT_STATUS_FIELD");
+  assert.throws(() => projectStatusCoordinates({ id: "P", fields: [{ ...statusField(), isIssueField: true }] }, AWAITING_RELEASE_STATUS),
+    /project-local/u);
+  assert.deepEqual(projectStatusCoordinates({ id: "P", fields: [statusField()] }, AWAITING_RELEASE_STATUS),
+    { projectId: "P", fieldId: "FIELD_STATUS", optionId: "OPT_Awaiting_release" });
+});
+
+test("awaiting release: only awaiting-production results are touched, and the snapshot is read once per run", async () => {
+  const client = projectClient({
+    nodes: [feCandidateNode({ number: 1 }), feCandidateNode({ number: 2 })],
+    statuses: { ITEM_1: "Todo", ITEM_2: "In Progress" },
+  });
+  const results = [
+    { issue: feIssue({ number: 1 }), decision: { action: "leave-open", code: "awaiting-production", detail: "a." } },
+    { issue: feIssue({ number: 2 }), decision: { action: "leave-open", code: "missing-development", detail: "b." } },
+    { issue: feIssue({ number: 3 }), decision: { action: "closed", code: "closed-completed", detail: "c." } },
+  ];
+  const reconciled = await reconcileAwaitingRelease(client, results, {
+    repository: FE, projectConfig: { organization: "ChipIn-one", project: { number: 5, statusField: "Status" } },
+  });
+  assert.deepEqual(reconciled.awaitingRelease, { enabled: true, updated: [1], skipped: 0 });
+  assert.equal(client.state.ITEM_2, "In Progress", "another decision code never changes Status");
+  assert.equal(reconciled.results[1], results[1]);
+  assert.equal(reconciled.results[2], results[2]);
+  assert.equal(client.log.filter((entry) => entry === "query MetadataProject").length, 1);
+
+  const none = projectClient();
+  const untouched = await reconcileAwaitingRelease(none, results.slice(1), {
+    repository: FE, projectConfig: { organization: "ChipIn-one", project: { number: 5, statusField: "Status" } },
+  });
+  assert.deepEqual(untouched.awaitingRelease, { enabled: true, updated: [], skipped: 0 });
+  assert.deepEqual(none.log, [], "no Project read without a candidate");
+});
+
+test("awaiting release: off by default and with Project reconciliation off; no Project reads beyond the existing ones", async () => {
+  const off = projectClient();
+  const receipt = await runCompletion(off, { repository: FE });
+  assert.deepEqual(receipt.awaitingRelease, { enabled: false, updated: [], skipped: 0 });
+  assert.equal(off.log.filter((entry) => entry === "query MetadataProject").length, 1, "only the frontend sweep's own snapshot");
+  assert.ok(!off.log.includes("query CompletionProjectItemStatus"));
+  assert.equal(off.state.ITEM_1, "Todo");
+  assert.match(formatCompletionSummary(receipt), /Awaiting release: off/u);
+
+  const on = projectClient();
+  await runCompletion(on, { repository: FE, awaitingRelease: true });
+  assert.equal(on.log.filter((entry) => entry === "query MetadataProject").length, 2, "one extra snapshot for the writer");
+
+  // a repository-local run (no Project access) must not silently drop the flag: fail closed before any read
+  const local = projectClient();
+  await assert.rejects(() => runCompletion(local, { repository: FE, awaitingRelease: true, reconcileProjectStatus: false }),
+    (error) => error instanceof CompletionBlocked && error.code === "AWAITING_RELEASE_NEEDS_PROJECT");
+  assert.ok(!local.log.some((entry) => entry.includes("Project") || entry.startsWith("mutation")));
+});
+
+test("awaiting release: integration-merge never runs the writer (the merge is terminal)", async () => {
+  const unmerged = candidateNode({
+    closedByPullRequestsReferences: {
+      totalCount: 1,
+      nodes: [{ ...candidateNode().closedByPullRequestsReferences.nodes[0], state: "OPEN", mergedAt: null, mergeCommit: null }],
+    },
+  });
+  const client = projectClient({ repository: ORG, nodes: [unmerged, candidateNode({ number: 2 })], statuses: { ITEM_1: "In Progress", ITEM_2: "Todo" } });
+  const receipt = await runCompletion(client, { repository: ORG, awaitingRelease: true });
+  assert.equal(receipt.strategy, "integration-merge");
+  assert.deepEqual(receipt.awaitingRelease, { enabled: false, updated: [], skipped: 0 });
+  assert.deepEqual(receipt.results.map((result) => result.decision.code), ["implementation-not-merged", "closed-completed"]);
+  assert.ok(!client.log.includes("query CompletionProjectItemStatus"));
+  assert.ok(!client.log.includes("mutation SetCompletionAwaitingRelease"));
+  assert.deepEqual(client.state, { ITEM_1: "In Progress", ITEM_2: "Todo" });
+});
+
+test("org workflow for the frontend runs the shared engine with Awaiting release on, from master pushes and the schedule only", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/frontend-production-completion.yml", import.meta.url), "utf8");
+  assert.match(workflow, /^  push:$/mu);
+  assert.match(workflow, /^    branches:\n      - master$/mu);
+  assert.match(workflow, /^  schedule:$/mu);
+  assert.doesNotMatch(workflow, /workflow_dispatch:/u);
+  assert.match(workflow, /^permissions:\n  contents: read\n\n/mu);
+  assert.match(workflow, /CHIPIN_CANONICAL_WRITE_TOKEN: \$\{\{ secrets\.CHIPIN_ISSUE_WRITE_TOKEN \}\}/u);
+  assert.doesNotMatch(workflow, /github\.token/u);
+  assert.match(workflow, /CHIPIN_COMPLETION_WRITE: "1"/u);
+  assert.match(workflow, /CHIPIN_COMPLETION_AWAITING_RELEASE: "1"/u);
+  assert.doesNotMatch(workflow, /CHIPIN_COMPLETION_PROJECT_RECONCILE/u, "Project reconciliation stays on");
+  assert.match(workflow, /run: node automation\/completion\.mjs --repository ChipIn-one\/chipin-frontend$/mu);
+  assert.doesNotMatch(workflow, /frontend-production-completion\.mjs/u);
+  assert.match(workflow, /cancel-in-progress: false/u);
+
+  // the .github workflow never turns the writer on
+  const integration = await readFile(new URL("../.github/workflows/integration-completion.yml", import.meta.url), "utf8");
+  assert.doesNotMatch(integration, /CHIPIN_COMPLETION_AWAITING_RELEASE/u);
+  const action = await readFile(new URL("./completion-action/action.yml", import.meta.url), "utf8");
+  assert.doesNotMatch(action, /CHIPIN_COMPLETION_AWAITING_RELEASE/u);
 });

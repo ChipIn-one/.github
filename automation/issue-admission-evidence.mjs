@@ -25,7 +25,7 @@ export function assertCanonicalReceipt(receipt, { issue, revision, now = Date.no
     block('STALE_RECEIPT', 'Request a new canonical read from the trusted producer; never retimestamp.');
   }
   if (receipt.project?.number !== 5 || receipt.project?.membershipCount !== 1 ||
-    !receipt.project?.itemId || !['Todo', 'Backlog', 'In Progress'].includes(receipt.project?.status)) {
+    !receipt.project?.itemId || !['Todo', 'Backlog', 'In Progress', 'Awaiting release'].includes(receipt.project?.status)) {
     block('INVALID_RECEIPT', 'Canonical Project #5 membership/Status is required.');
   }
   return true;
