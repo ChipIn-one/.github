@@ -8,7 +8,8 @@
 // reads it back, then creates the Release and reads it back. A rerun on an already released commit is a
 // no-op (`ALREADY_RELEASED`); a tag that exists on another commit, a missing or invalid impact line, an
 // unreachable previous tag or a commit outside the release branch end as `BLOCKED` (exit 1), never guessed.
-// The one derived default: a `dependabot[bot]` PR without the section counts as `none` (resolvePullImpact).
+// The one derived default: a `dependabot[bot]` PR without the section counts as `none` for a `github_actions`
+// bump and `patch` for any other ecosystem, read from its head branch (resolvePullImpact).
 
 import fs from "node:fs";
 import process from "node:process";
@@ -115,13 +116,25 @@ export const DEPENDABOT_LOGIN = "dependabot[bot]";
 
 /**
  * Impact of one merged PR. A PR authored by `dependabot[bot]` whose body has no `## Version impact`
- * heading at all counts as `none` (`raw: "dependabot-default"`); any present section, even an empty or
- * invalid one, is parsed as for every other PR, so an explicit value always wins and a bad one blocks.
+ * heading at all gets a default from its head branch `dependabot/<ecosystem>/…` (`raw: "dependabot-default"`):
+ * `github_actions` → `none` (action pins change nothing a consumer pins), any other ecosystem → `patch`
+ * (a runtime dependency bump ships code). An unreadable head branch, or one outside `dependabot/`, still
+ * blocks. Any present section, even an empty or invalid one, is parsed as for every other PR, so an
+ * explicit value always wins and a bad one blocks.
  */
 export function resolvePullImpact(pull) {
   const parsed = parseVersionImpact(pull.body);
   if (parsed.missingSection === true && pull.author === DEPENDABOT_LOGIN) {
-    return { impact: "none", raw: "dependabot-default", reason: DEPENDABOT_LOGIN + " without a Version impact section → none" };
+    const ecosystem = /^dependabot\/([^/]+)\//u.exec(typeof pull.headRef === "string" ? pull.headRef : "")?.[1] ?? null;
+    if (ecosystem === null) {
+      return { ...parsed, reason: parsed.reason + "; " + DEPENDABOT_LOGIN + " head branch " + JSON.stringify(pull.headRef ?? null)
+        + " is not dependabot/<ecosystem>/…, so no default applies" };
+    }
+    if (ecosystem === "github_actions") {
+      return { impact: "none", raw: "dependabot-default", reason: DEPENDABOT_LOGIN + " github-actions bump without a Version impact section → none" };
+    }
+    return { impact: "patch", raw: "dependabot-default",
+      reason: DEPENDABOT_LOGIN + " " + ecosystem + " bump without a Version impact section → patch (runtime dependency)" };
   }
   return parsed;
 }
@@ -264,6 +277,7 @@ export function githubStore(client, repository) {
           mergedAt: pull.merged_at ?? null,
           baseRef: pull.base?.ref ?? null,
           author: pull.user?.login ?? null,
+          headRef: pull.head?.ref ?? null,
           mergeCommitSha,
         });
       }

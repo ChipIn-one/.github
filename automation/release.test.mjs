@@ -74,6 +74,7 @@ function fakeStore({ graph, branches = {}, tags = {}, pulls = [], releases = {} 
         mergedAt: pull.mergedAt ?? "2026-10-01T00:00:00Z",
         baseRef: pull.baseRef ?? "dev",
         author: pull.author ?? null,
+        headRef: pull.headRef ?? null,
         mergeCommitSha: pull.mergeCommitSha ?? pull.commits[0],
       }));
     },
@@ -420,11 +421,13 @@ function orgHistory(pulls) {
   };
 }
 const DEPENDABOT_BODY = "Bumps [actions/checkout](https://github.com/actions/checkout) from 4 to 5.\n\n---\n\n<details><summary>Dependabot commands</summary></details>\n";
+const DEPENDABOT_ACTIONS_REF = "dependabot/github_actions/master/github-actions-84fc34013c";
+const DEPENDABOT_NPM_REF = "dependabot/npm_and_yarn/dev/npm-minor-and-patch-eddd2e540d";
 
-test("plan: a dependabot[bot] PR without a Version impact section counts as none; an explicit section wins; others still block", async () => {
+test("plan: a dependabot[bot] github-actions PR without a Version impact section counts as none; an explicit section wins; others still block", async () => {
   // alone in range -> NO_RELEASE, receipt shows the derived default
   const alone = await runRelease(fakeStore(orgHistory([
-    { number: 30, author: "dependabot[bot]", body: DEPENDABOT_BODY },
+    { number: 30, author: "dependabot[bot]", headRef: DEPENDABOT_ACTIONS_REF, body: DEPENDABOT_BODY },
   ])), { mode: "plan", repository: ORG, profile: orgProfile, ref: sha("b"), initialVersion: null });
   assert.equal(alone.outcome, "NO_RELEASE");
   assert.equal(alone.impact, "none");
@@ -437,12 +440,12 @@ test("plan: a dependabot[bot] PR without a Version impact section counts as none
   assert.equal(entry.author, "dependabot[bot]");
   assert.equal(entry.impact, "none");
   assert.equal(entry.impactRaw, "dependabot-default");
-  assert.equal(entry.impactReason, "dependabot[bot] without a Version impact section → none");
+  assert.equal(entry.impactReason, "dependabot[bot] github-actions bump without a Version impact section → none");
   assert.match(formatReleaseSummary(alone), /\| #30 \| none \(dependabot default\) \|/u);
 
   // does not raise the max next to a human patch PR
   const mixed = await planRelease(fakeStore(orgHistory([
-    { number: 30, author: "dependabot[bot]", body: DEPENDABOT_BODY },
+    { number: 30, author: "dependabot[bot]", headRef: DEPENDABOT_ACTIONS_REF, body: DEPENDABOT_BODY },
     { number: 31, author: "someone", body: "## Version impact\n\npatch\n" },
   ])), { repository: ORG, profile: orgProfile, ref: "master" });
   assert.equal(mixed.outcome, "PLANNED");
@@ -451,14 +454,14 @@ test("plan: a dependabot[bot] PR without a Version impact section counts as none
 
   // an explicit section on a Dependabot PR is parsed as for any PR
   const explicit = await planRelease(fakeStore(orgHistory([
-    { number: 30, author: "dependabot[bot]", body: DEPENDABOT_BODY + "\n## Version impact\n\npatch\n" },
+    { number: 30, author: "dependabot[bot]", headRef: DEPENDABOT_ACTIONS_REF, body: DEPENDABOT_BODY + "\n## Version impact\n\npatch\n" },
   ])), { repository: ORG, profile: orgProfile, ref: sha("b") });
   assert.equal(explicit.impact, "patch");
   assert.equal(explicit.includedPullRequests[0].impactRaw, "patch");
   assert.equal(explicit.includedPullRequests[0].impactReason, null);
   for (const bad of ["## Version impact\n\nhotfix\n", "## Version impact\n\n"]) {
     await assert.rejects(
-      planRelease(fakeStore(orgHistory([{ number: 30, author: "dependabot[bot]", body: DEPENDABOT_BODY + "\n" + bad }])), {
+      planRelease(fakeStore(orgHistory([{ number: 30, author: "dependabot[bot]", headRef: DEPENDABOT_ACTIONS_REF, body: DEPENDABOT_BODY + "\n" + bad }])), {
         repository: ORG, profile: orgProfile, ref: sha("b"),
       }),
       (error) => error.code === "INVALID_VERSION_IMPACT" && /#30/u.test(error.message),
@@ -466,14 +469,67 @@ test("plan: a dependabot[bot] PR without a Version impact section counts as none
     );
   }
 
-  // a non-Dependabot PR (or an unknown author) without the section still blocks
+  // a non-Dependabot PR (or an unknown author) without the section still blocks, whatever its branch
   for (const author of ["someone", "dependabot", null]) {
     await assert.rejects(
-      planRelease(fakeStore(orgHistory([{ number: 30, author, body: DEPENDABOT_BODY }])), {
+      planRelease(fakeStore(orgHistory([{ number: 30, author, headRef: DEPENDABOT_ACTIONS_REF, body: DEPENDABOT_BODY }])), {
         repository: ORG, profile: orgProfile, ref: sha("b"),
       }),
       (error) => error.code === "INVALID_VERSION_IMPACT" && /#30 \(missing/u.test(error.message),
       String(author),
+    );
+  }
+});
+
+test("plan: a dependabot[bot] PR of another ecosystem without a section counts as patch; an unreadable branch blocks", async () => {
+  // npm_and_yarn alone -> patch release, reason names the ecosystem
+  const npm = await runRelease(fakeStore(orgHistory([
+    { number: 30, author: "dependabot[bot]", headRef: DEPENDABOT_NPM_REF, body: DEPENDABOT_BODY },
+  ])), { mode: "plan", repository: ORG, profile: orgProfile, ref: sha("b"), initialVersion: null });
+  assert.equal(npm.outcome, "PLANNED");
+  assert.equal(npm.impact, "patch");
+  assert.equal(npm.version, "1.1.1");
+  const [entry] = npm.includedPullRequests;
+  assert.equal(entry.impact, "patch");
+  assert.equal(entry.impactRaw, "dependabot-default");
+  assert.equal(entry.impactReason, "dependabot[bot] npm_and_yarn bump without a Version impact section → patch (runtime dependency)");
+  assert.match(formatReleaseSummary(npm), /\| #30 \| patch \(dependabot default\) \|/u);
+
+  // raises the max over a human none
+  const mixed = await planRelease(fakeStore(orgHistory([
+    { number: 30, author: "someone", body: "## Version impact\n\nnone\n" },
+    { number: 31, author: "dependabot[bot]", headRef: DEPENDABOT_NPM_REF, body: DEPENDABOT_BODY },
+  ])), { repository: ORG, profile: orgProfile, ref: "master" });
+  assert.equal(mixed.outcome, "PLANNED");
+  assert.equal(mixed.impact, "patch");
+  assert.equal(mixed.version, "1.1.1");
+
+  // other ecosystems follow the same rule
+  for (const headRef of ["dependabot/pip/dev/requests-2.32.0", "dependabot/docker/master/node-22"]) {
+    const plan = await planRelease(fakeStore(orgHistory([{ number: 30, author: "dependabot[bot]", headRef, body: DEPENDABOT_BODY }])), {
+      repository: ORG, profile: orgProfile, ref: sha("b"),
+    });
+    assert.equal(plan.impact, "patch", headRef);
+    assert.match(plan.includedPullRequests[0].impactReason, new RegExp("dependabot\\[bot\\] " + headRef.split("/")[1] + " bump", "u"));
+  }
+
+  // an explicit section on an npm bump wins
+  const explicit = await planRelease(fakeStore(orgHistory([
+    { number: 30, author: "dependabot[bot]", headRef: DEPENDABOT_NPM_REF, body: DEPENDABOT_BODY + "\n## Version impact\n\nnone\n" },
+  ])), { repository: ORG, profile: orgProfile, ref: sha("b") });
+  assert.equal(explicit.outcome, "NO_RELEASE");
+  assert.equal(explicit.impact, "none");
+  assert.equal(explicit.includedPullRequests[0].impactRaw, "none");
+  assert.equal(explicit.includedPullRequests[0].impactReason, null);
+
+  // missing or unknown head branch -> fail closed
+  for (const headRef of [undefined, null, "", "main", "feature/dependabot/npm", "dependabot/", "dependabot/npm_and_yarn"]) {
+    await assert.rejects(
+      planRelease(fakeStore(orgHistory([{ number: 30, author: "dependabot[bot]", headRef, body: DEPENDABOT_BODY }])), {
+        repository: ORG, profile: orgProfile, ref: sha("b"),
+      }),
+      (error) => error.code === "INVALID_VERSION_IMPACT" && /#30 \(missing/u.test(error.message) && /head branch/u.test(error.message),
+      String(headRef),
     );
   }
 });
@@ -552,7 +608,7 @@ test("GitHub store maps REST endpoints, paginates compare and resolves annotated
         ];
       }
       if (path.endsWith("/commits/" + sha("1") + "/pulls")) {
-        return [{ number: 10, title: "t", body: "b", html_url: "u", merged_at: "2026-10-01T10:00:00Z", base: { ref: "dev" }, user: { login: "dependabot[bot]" }, merge_commit_sha: sha("1") }];
+        return [{ number: 10, title: "t", body: "b", html_url: "u", merged_at: "2026-10-01T10:00:00Z", base: { ref: "dev" }, user: { login: "dependabot[bot]" }, head: { ref: "dependabot/npm_and_yarn/dev/x" }, merge_commit_sha: sha("1") }];
       }
       if (path.endsWith("/commits/" + sha("2") + "/pulls")) {
         return [
@@ -574,9 +630,10 @@ test("GitHub store maps REST endpoints, paginates compare and resolves annotated
   assert.equal(comparison.totalCommits, 3);
   assert.deepEqual(comparison.commits.map((commit) => commit.sha), [sha("1"), sha("2"), sha("3")]);
   assert.deepEqual(await store.listCommitPulls(sha("1")), [{
-    number: 10, title: "t", body: "b", url: "u", mergedAt: "2026-10-01T10:00:00Z", baseRef: "dev", author: "dependabot[bot]", mergeCommitSha: sha("1"),
+    number: 10, title: "t", body: "b", url: "u", mergedAt: "2026-10-01T10:00:00Z", baseRef: "dev", author: "dependabot[bot]", headRef: "dependabot/npm_and_yarn/dev/x", mergeCommitSha: sha("1"),
   }]);
   assert.equal((await store.listCommitPulls(sha("2")))[0].author, null, "a pull without user maps to author null");
+  assert.equal((await store.listCommitPulls(sha("2")))[0].headRef, null, "a pull without head maps to headRef null");
   assert.deepEqual((await store.listCommitPulls(sha("2"))).map((pull) => [pull.number, pull.mergeCommitSha]), [
     [11, sha("2")],
     [12, null],

@@ -132,8 +132,10 @@ Composite actions remain the units of logic and tests; direct action calls from 
 - A merged PR without a valid section blocks the run (`INVALID_VERSION_IMPACT`, red run on `master`), and the block persists for every later merge because the
   range is "everything since the previous tag". Remedy: edit the body of the *merged* PR (add `## Version impact` with the keyword), then re-run the failed
   `Release on master` run (the engine re-reads PR bodies on every run); placing the tag by hand is the fallback. Dependabot PRs have no such section: a PR authored
-  by `dependabot[bot]` without the section counts as `none` (receipt `impactRaw: dependabot-default`); to release a Dependabot change, add the section with
-  `patch` to its body (an explicit section always wins and is validated like any other). The remedy above stays for human PRs.
+  by `dependabot[bot]` without the section gets a default from its head branch (receipt `impactRaw: dependabot-default`): `dependabot/github_actions/…` counts
+  as `none` (an action pin bump changes nothing a consumer pins), any other ecosystem (`dependabot/npm_and_yarn/…`, `pip`, `docker`, …) counts as `patch`
+  (a runtime dependency bump ships code to production and needs a version). A Dependabot PR whose head branch is not `dependabot/<ecosystem>/…` still blocks.
+  To choose another value, add the section to its body (an explicit section always wins and is validated like any other). The remedy above stays for human PRs.
 - Consumers pin a **SHA** with a version comment: `@<sha> # v1.0.0`. This keeps the fail-closed pin policy and lets Dependabot (ecosystem `github-actions`) raise the pin.
   Dependabot `github-actions` is enabled in every registry repository (`dependabot: required`), weekly, targeting the integration branch.
 - Compatibility inside v1: inputs of actions and reusable workflows are never removed and never change meaning; new inputs are optional.
