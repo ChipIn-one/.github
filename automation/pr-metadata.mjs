@@ -10,9 +10,11 @@ import { loadRegistry, requireRepositoryProfile } from "./registry.mjs";
 
 const REPO = "ChipIn-one/chipin-frontend";
 const ROOT = "/repos/" + REPO;
-// Project number and the dev -> main route come from workflow-registry.yaml.
+// Project number and the PR routes come from workflow-registry.yaml: implementation -> branches.integration,
+// release integration -> promotion only while the record has a promotion branch (none on master, .github#216).
+// `branches` options below exist for tests of another registry layout (the dev/main rollback profile).
 const PROJECT = loadRegistry().project.number;
-const { integration: INTEGRATION_BRANCH, promotion: PROMOTION_BRANCH } = requireRepositoryProfile(REPO).branches;
+const FE_BRANCHES = Object.freeze({ ...requireRepositoryProfile(REPO).branches });
 const CATEGORIES = { implementation: "pr:implementation", release: "pr:release" };
 const PROJECT_QUERY = 'query PRMembership($after:String){ organization(login:"ChipIn-one"){ projectV2(number:5){id items(first:100,after:$after){totalCount pageInfo{hasNextPage endCursor} nodes{id content{__typename ... on PullRequest{id number repository{nameWithOwner}}}}}}}}';
 const PROJECT_ADD = 'mutation AddPR($project:ID!,$pr:ID!){addProjectV2ItemById(input:{projectId:$project,contentId:$pr}){item{id}}}';
@@ -28,11 +30,11 @@ export function isDependabotPR(pr) {
   return pr?.user?.login === DEPENDABOT_LOGIN || DEPENDABOT_BRANCH.test(pr?.head?.ref ?? "");
 }
 
-export function classifyPR(pr) {
+export function classifyPR(pr, {integration, promotion}=FE_BRANCHES) {
   if (pr.base?.repo?.full_name !== REPO || pr.head?.repo?.full_name !== REPO) throw new Error("SCOPE: same-repo frontend PR only");
-  if (pr.base.ref === INTEGRATION_BRANCH && ![PROMOTION_BRANCH, INTEGRATION_BRANCH].includes(pr.head.ref)) return "implementation";
-  if (pr.base.ref === PROMOTION_BRANCH && pr.head.ref === INTEGRATION_BRANCH) return "release";
-  throw new Error("ROUTE: only implementation→dev and dev→main");
+  if (pr.base.ref === integration && ![promotion, integration].includes(pr.head.ref)) return "implementation";
+  if (promotion && pr.base.ref === promotion && pr.head.ref === integration) return "release";
+  throw new Error("ROUTE: only implementation→"+integration+(promotion ? " and "+integration+"→"+promotion : ""));
 }
 export function implementationIdentity(body) {
   const identity = readTaskIdentityMarker(body);
@@ -171,11 +173,11 @@ export async function ensureProjectPR(client,prId,{beforeWrite,retryWait=wait}={
   throw new Error("PROJECT: missing PR item on read-back after "
     +(PROJECT_READBACK_DELAYS_MS.length+1)+" complete reads");
 }
-export async function verifyRelease(client,refs) {
+export async function verifyRelease(client,refs,{integration}=FE_BRANCHES) {
   const issues=[];
   for (const num of refs.prs) {
     const impl=await client.request(ROOT+"/pulls/"+num);
-    if (!impl?.merged_at || impl.base?.ref!==INTEGRATION_BRANCH) throw new Error("RELEASE: PR #"+num+" not merged into "+INTEGRATION_BRANCH);
+    if (!impl?.merged_at || impl.base?.ref!==integration) throw new Error("RELEASE: PR #"+num+" not merged into "+integration);
     const task=implementationIdentity(impl.body);
     // Release verification is read-only. It may NEVER add a missing native link
     // to an already-merged implementation PR (especially a terminal Issue).
@@ -331,7 +333,7 @@ export async function requiredShaCIGreen(client, pr) {
   return {ok: blockers.length === 0, blockers, branch, headSha: sha,
     required: checks.map(x => x.context)};
 }
-export async function reconcilePR(client,policy,number,expectedSha,{admissionClient,admissionConfig,admit=preflightPr}={}) {
+export async function reconcilePR(client,policy,number,expectedSha,{admissionClient,admissionConfig,admit=preflightPr,branches=FE_BRANCHES}={}) {
   if (policy?.repository!==REPO || policy.project!==PROJECT || policy.ownerPolicy?.allowIssueOwner!==true
       || !Array.isArray(policy.reviewerPolicy?.implementation) || !Array.isArray(policy.reviewerPolicy?.release))
     throw new Error("CONFIG: explicit FE Project #5, owner and reviewer policy required");
@@ -349,7 +351,7 @@ export async function reconcilePR(client,policy,number,expectedSha,{admissionCli
   }
   if (pr.state!=="open" || !pr.node_id || !pr.head?.sha) throw new Error("PR: unreadable or not open");
   if (!expectedSha || pr.head.sha!==expectedSha) throw new Error("SHA: event head no longer matches PR");
-  const kind=classifyPR(pr);
+  const kind=classifyPR(pr,branches);
   // Org #53 is the canonical authority; PR metadata is never an alternative
   // intake writer, and must not mutate Development/PR metadata without admission.
   if (!admissionClient || !admissionConfig) throw new Error("ADMISSION: read-only org credential and canonical config required");
@@ -374,7 +376,7 @@ export async function reconcilePR(client,policy,number,expectedSha,{admissionCli
     if (issue?.number!==identity.issueNumber || issue.pull_request) throw new Error("IDENTITY: target is not an Issue");
     taskIdentity=identity.canonical;
   } else {
-    await verifyRelease(client,releaseReferences(pr.body));
+    await verifyRelease(client,releaseReferences(pr.body),branches);
   }
   const fresh=await client.request(url);
   if (fresh.head?.sha!==pr.head.sha || fresh.head?.ref!==pr.head.ref ||

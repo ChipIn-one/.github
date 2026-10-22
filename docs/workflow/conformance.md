@@ -19,6 +19,8 @@ Organization repositories that are not in the registry are listed once as `UNREG
 
 Repositories are audited on their **integration branch** (`branches.integration`). Meta repositories (`kind: meta`) host the shared actions, so the caller checks do not apply to them until they adopt `pr-gate` (#153).
 
+`chipin-frontend` is audited on canonical `master` since [#216](https://github.com/ChipIn-one/.github/issues/216) (default = integration = `master`, no promotion branch): `requiredChecks: [frontend-ci]` must be enforced by the ruleset on `master`, Dependabot `github-actions` must target `master` (or the default branch), and `AGENTS.md` / `.ai/context.md` are read from `master`. Its record says `completion: deployment-receipt` with `capabilities.completion: manual` until [#217](https://github.com/ChipIn-one/.github/issues/217), so no completion caller is required and `COMPLETION_TRIGGER_MISSING` does not apply yet; from #217 the `completion-action` caller with `deployment_status` and `push` is required. A leftover `frontend-production-completion-action` caller is not a finding (the audit only checks required callers); it is removed in the frontend cutover ([chipin-frontend#497](https://github.com/ChipIn-one/chipin-frontend/issues/497)).
+
 ## Checks, remediation
 
 | Check id | Severity | Meaning | Remediation |

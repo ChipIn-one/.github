@@ -1,6 +1,7 @@
 # Caller template for repositories with completion: deployment-receipt
-# (registry: `completion: deployment-receipt` + `productionEvidence: { environment, creator }`; planned for
-# ChipIn-one/chipin-frontend after its master cutover, chipin-frontend#497). Copy to
+# (registry: `completion: deployment-receipt` + `productionEvidence: { environment, creator }`; ChipIn-one/chipin-frontend
+# has that record since .github#216 with `capabilities.completion: manual`; it adopts this caller when .github#217 turns
+# the engine on, chipin-frontend#497). Copy to
 # .github/workflows/completion.yml in the repository, set the integration branch, the production environment and the pin.
 # Triggers (docs/workflow/completion.md, deployment-receipt):
 # - deployment_status: a production receipt arrived (the platform, e.g. Vercel, writes the Deployment status). The job

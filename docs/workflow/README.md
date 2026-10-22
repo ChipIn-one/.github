@@ -80,11 +80,15 @@ The file is read by a strict built-in YAML subset reader, so the repository need
 Defaults by `kind` apply to capabilities a record does not list: `code` — everything required/automatic/enabled; `docs` — no `prMetadata` and no `milestones`;
 `meta` — no `prMetadata`. A record overrides the default. A capability `completion: automatic` contradicts a top-level `completion: manual` and fails validation.
 
+`chipin-frontend` is on canonical `master` since [#216](https://github.com/ChipIn-one/.github/issues/216) (cutover [chipin-frontend#497](https://github.com/ChipIn-one/chipin-frontend/issues/497)): `branches: { default: master, integration: master }` (no promotion), `completion: deployment-receipt` with
+`productionEvidence: { environment: Production, creator: "vercel[bot]" }`, `release: deploy-tag / production-deploy` (tags come with [#171](https://github.com/ChipIn-one/.github/issues/171)/[#172](https://github.com/ChipIn-one/.github/issues/172)), and
+`capabilities.completion: manual`: the completion engine stays off for it until [#217](https://github.com/ChipIn-one/.github/issues/217). FE PRs are routed `feature -> master` only; the dev/main record is kept in tests as the rollback target of the cutover window. Rollback is a `git revert` of the whole #216 commit, not an edit of the record alone (the tests assert the live record).
+
 Repositories outside the registry are not managed by the standard. The conformance audit lists organization repositories that are not registered
 (currently `slack-rofls` and `chipin-backend-python`, excluded by owner decision) as `UNREGISTERED` and takes no action.
 
 Consumers that used to hardcode repository names read the registry: the Development-link allowlist, task-identity pattern and integration-branch check
-(`development-link.mjs`), the milestone allowlist (`create-milestone.mjs`), and the PR-metadata owner, branches and Project number (`pr-metadata.mjs`).
+(`development-link.mjs`), the milestone allowlist (`create-milestone.mjs`), and the PR-metadata owner, branches (PR routes) and Project number (`pr-metadata.mjs`).
 The admission/intake modules (`issue-admission.mjs`, `issue-admission-pr.mjs`, `issue-intake.mjs`, `issue-admission-preflight.mjs`, the evidence and human-orchestrator checks) read their scope from the registry too ([#183](https://github.com/ChipIn-one/.github/issues/183)): every repository with `admission` not `off`, owner from the record.
 
 ## 3. Reusable workflows and callers
@@ -103,7 +107,7 @@ A caller in a repository is a template (`templates/caller-pr-gate.yml`, about 12
 name: PR gate
 on:
   pull_request:
-    branches: [dev]          # integration branch from the registry
+    branches: [master]       # integration branch from the registry
     types: [opened, reopened, edited, synchronize, ready_for_review]
 permissions: { contents: read, issues: write, pull-requests: write }
 jobs:

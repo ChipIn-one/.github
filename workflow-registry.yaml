@@ -19,18 +19,20 @@ repositories:
     kind: code                 # code | docs | meta
     visibility: public
     owner: syllik              # required native assignee; null is allowed for docs (chosen at intake)
-    branches: { default: main, integration: dev, promotion: main }
+    branches: { default: master, integration: master }   # canonical master, no promotion branch (chipin-frontend#497)
     deploymentProfile: production      # none | staging | production
-    completion: production-merge       # production-merge | integration-merge | deployment-receipt | manual
+    completion: deployment-receipt     # production-merge | integration-merge | deployment-receipt | manual
+    productionEvidence: { environment: Production, creator: "vercel[bot]" }
     protection: ruleset                # ruleset | protection | unavailable (Free + private)
     requiredChecks: [frontend-ci]
-    release: { strategy: semver-by-impact, trigger: promotion-merge, tagPrefix: v }   # tag + GitHub Release after a human merge of dev -> main
+    # tag + GitHub Release after every successful Vercel Production deploy; the tags arrive with #171/#172
+    release: { strategy: deploy-tag, trigger: production-deploy, tagPrefix: v }
     capabilities:
       admission: required       # required | advisory | off
       developmentLink: required
       prMetadata: required
       relationships: required   # blocked-by gate in admission
-      completion: automatic     # automatic | manual
+      completion: manual        # automatic | manual; the engine stays off for chipin-frontend until #217
       milestones: enabled
       dependabot: required
       agentRouting: required    # AGENTS.md routing block + .ai/context.md

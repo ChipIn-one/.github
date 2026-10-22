@@ -15,8 +15,9 @@ const ISSUE_REF = /^(ChipIn-one\/[A-Za-z0-9_.-]+)#([1-9]\d*)$/;
 
 // Admission scope is the registry (#183): every repository whose `admission` capability is not
 // `off`, with the required owner from its record (`owner: null` means an explicit --owner).
-export function admissionProfile(repository) {
-  const profile = getRepositoryProfile(repository);
+// `registry` defaults to the loaded workflow-registry.yaml; tests pass another one.
+export function admissionProfile(repository, registry = undefined) {
+  const profile = getRepositoryProfile(repository, registry);
   // Exact spelling only: the registry lookup is case-insensitive, but GitHub resolves mis-cased
   // repository names too, so a mis-cased target must be rejected before any write, as before.
   if (!profile || profile.repository !== repository || profile.capabilities.admission === 'off') return null;

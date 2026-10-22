@@ -6,8 +6,11 @@ import {
   readTaskIdentityMarker,
   reconcileDevelopmentLink,
 } from "./development-link.mjs";
+import { integrationBranch } from "./registry.mjs";
 
 const REPOSITORY = "ChipIn-one/chipin-frontend";
+// the PR base the Development link accepts is the registry integration branch (master since .github#216)
+const INTEGRATION = integrationBranch(REPOSITORY);
 
 function makeClient({
   issueNumber = 7,
@@ -169,7 +172,7 @@ test('link mutation blocks stale PR head after a positive preflight', async () =
   client.request = async () => ({
     number: 10, state: 'open', body: `Task identity: ${REPOSITORY}#7`,
     head: { sha: 'b'.repeat(40), repo: { full_name: REPOSITORY } },
-    base: { ref: 'dev', repo: { full_name: REPOSITORY } },
+    base: { ref: INTEGRATION, repo: { full_name: REPOSITORY } },
   });
   await assert.rejects(() => reconcileDevelopmentLink(client, {
     repository: REPOSITORY, pullRequestNumber: 10,
@@ -325,7 +328,7 @@ function admittedClient(options = {}) {
   client.request = async () => ({
     number: 10, state: 'open', body: 'Task identity: ' + REPOSITORY + '#7',
     head: { sha: ADMITTED_SHA, repo: { full_name: REPOSITORY } },
-    base: { ref: 'dev', repo: { full_name: REPOSITORY } },
+    base: { ref: INTEGRATION, repo: { full_name: REPOSITORY } },
   });
   return client;
 }
@@ -351,6 +354,23 @@ test('revalidates current exact Issue revision immediately before native Develop
   assert.equal(result.result, 'linked');
   assert.equal(count, 1);
   assert.equal(mutationCalls(client).length, 1);
+});
+
+test('frontend on canonical master (.github#216): a PR into dev or main never gets a Development link', async () => {
+  // In production PR admission rejects such a PR first (Unsupported PR branch transition, issue-admission-pr tests).
+  // This is the link module's own defence in depth: even with an admission stub that accepts, its pre-mutation
+  // re-read requires base = the registry integration branch (master) and blocks with its generic STALE error.
+  assert.equal(INTEGRATION, 'master');
+  for (const base of ['dev', 'main']) {
+    const client = admittedClient();
+    const read = client.request;
+    client.request = async (...args) => ({ ...(await read(...args)), base: { ref: base, repo: { full_name: REPOSITORY } } });
+    await assert.rejects(() => reconcileDevelopmentLink(client, {
+      repository: REPOSITORY, pullRequestNumber: 10, expectedHeadSha: ADMITTED_SHA,
+      admission: allowedAdmission(async () => acceptedRead()),
+    }), /STALE: PR head SHA\/state\/branch changed/, base + ': base is not the registry integration branch');
+    assert.equal(mutationCalls(client).length, 0, base);
+  }
 });
 
 test('stale, cancelled, closed and expired Issues block before native Development mutation', async () => {

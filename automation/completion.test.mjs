@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   AWAITING_RELEASE_STATUS,
   CompletionBlocked,
+  completionSkipNotice,
   RECEIPT_MAX_PAGES,
   RECEIPT_PAGE_SIZE,
   RECEIPT_STATUS_PAGE_SIZE,
@@ -30,6 +31,24 @@ const KB = "ChipIn-one/chipin-knowledge-base";
 const FE = "ChipIn-one/chipin-frontend";
 const HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const MERGE = "1111111111111111111111111111111111111111";
+
+// The live frontend record (.github#216) is canonical master + deployment-receipt with the engine off
+// (capabilities.completion manual) until .github#217. The dev/main record before the cutover stays the rollback
+// target of chipin-frontend#497, so the production-merge path keeps its tests on that record.
+const legacyFrontendRegistry = (registry = loadRegistry()) => ({
+  ...registry,
+  repositories: registry.repositories.map((profile) => {
+    if (profile.repository !== FE) return profile;
+    const { productionEvidence, ...rest } = profile;
+    return {
+      ...rest,
+      branches: { default: "main", integration: "dev", promotion: "main" },
+      completion: "production-merge",
+      release: { strategy: "semver-by-impact", trigger: "promotion-merge", tagPrefix: "v" },
+      capabilities: { ...profile.capabilities, completion: "automatic" },
+    };
+  }),
+});
 
 function linkedPr({
   number = 10,
@@ -375,14 +394,14 @@ test("runCompletion: production-merge delegates to the frontend module and refus
     if (path.endsWith("/dependencies/blocked_by") || path.endsWith("/sub_issues")) return [];
     throw new Error("unexpected list path: " + path);
   };
-  const receipt = await runCompletion(client, { repository: FE, reconcileProjectStatus: false });
+  const receipt = await runCompletion(client, { repository: FE, registry: legacyFrontendRegistry(), reconcileProjectStatus: false });
   assert.equal(receipt.strategy, "production-merge");
   assert.equal(receipt.branch, "main");
   assert.equal(receipt.results[0].decision.code, "awaiting-production");
   assert.ok(!client.log.some((entry) => entry.startsWith("PATCH ")));
   assert.ok(!client.log.some((entry) => entry.includes("/commits/")), "production-merge must not read an integration head");
 
-  const registry = loadRegistry();
+  const registry = legacyFrontendRegistry();
   const forged = {
     ...registry,
     repositories: registry.repositories.map((profile) => (profile.repository === FE
@@ -581,7 +600,7 @@ const FE_PROJECT_CONFIG = { organization: "ChipIn-one", project: { number: 5, st
 test("awaiting release: production-merge sweep moves Todo and In Progress to Awaiting release and reads it back", async () => {
   for (const from of ["Todo", "In Progress"]) {
     const client = projectClient({ statuses: { ITEM_1: from } });
-    const receipt = await runCompletion(client, { repository: FE, awaitingRelease: true });
+    const receipt = await runCompletion(client, { repository: FE, registry: legacyFrontendRegistry(), awaitingRelease: true });
     assert.equal(receipt.results[0].decision.code, "awaiting-production", from);
     assert.equal(client.state.ITEM_1, AWAITING_RELEASE_STATUS, from);
     assert.deepEqual(receipt.awaitingRelease, { enabled: true, updated: [1], skipped: 0, failed: [] });
@@ -596,9 +615,9 @@ test("awaiting release: production-merge sweep moves Todo and In Progress to Awa
 
 test("awaiting release: a rerun on Awaiting release is a no-op without a mutation", async () => {
   const client = projectClient({ statuses: { ITEM_1: "Todo" } });
-  await runCompletion(client, { repository: FE, awaitingRelease: true });
+  await runCompletion(client, { repository: FE, registry: legacyFrontendRegistry(), awaitingRelease: true });
   const before = mutations(client).length;
-  const receipt = await runCompletion(client, { repository: FE, awaitingRelease: true });
+  const receipt = await runCompletion(client, { repository: FE, registry: legacyFrontendRegistry(), awaitingRelease: true });
   assert.equal(mutations(client).length, before);
   assert.deepEqual(receipt.awaitingRelease, { enabled: true, updated: [], skipped: 1, failed: [] });
   assert.match(receipt.results[0].decision.detail, /awaiting-release-current/u);
@@ -622,7 +641,7 @@ test("awaiting release: Done, Backlog, unknown and empty Status are left untouch
 
   // sweep level: Backlog stays Backlog
   const backlog = projectClient({ statuses: { ITEM_1: "Backlog" } });
-  const receipt = await runCompletion(backlog, { repository: FE, awaitingRelease: true });
+  const receipt = await runCompletion(backlog, { repository: FE, registry: legacyFrontendRegistry(), awaitingRelease: true });
   assert.equal(backlog.state.ITEM_1, "Backlog");
   assert.deepEqual(mutations(backlog), []);
   assert.deepEqual(receipt.awaitingRelease, { enabled: true, updated: [], skipped: 1, failed: [] });
@@ -632,7 +651,7 @@ test("awaiting release: an open Issue showing derived Done is first repaired by 
   // the unchanged frontend module repairs open + Done -> In Progress inside its sweep; the writer then reads
   // the fresh item Status (In Progress) and sets Awaiting release
   const client = projectClient({ statuses: { ITEM_1: "Done" } });
-  const receipt = await runCompletion(client, { repository: FE, awaitingRelease: true });
+  const receipt = await runCompletion(client, { repository: FE, registry: legacyFrontendRegistry(), awaitingRelease: true });
   assert.deepEqual(mutations(client), ["mutation SetFrontendCompletionStatus", "mutation SetCompletionAwaitingRelease"]);
   assert.equal(client.state.ITEM_1, AWAITING_RELEASE_STATUS);
   assert.deepEqual(receipt.awaitingRelease.updated, [1]);
@@ -653,7 +672,7 @@ test("awaiting release: missing or ambiguous Project membership is noted without
   assert.deepEqual(client.log, [], "nothing is read or written for a missing or ambiguous membership");
 
   const sweep = projectClient({ items: [] });
-  const receipt = await runCompletion(sweep, { repository: FE, awaitingRelease: true });
+  const receipt = await runCompletion(sweep, { repository: FE, registry: legacyFrontendRegistry(), awaitingRelease: true });
   assert.match(receipt.results[0].decision.detail, /project-membership-missing/u);
   assert.deepEqual(mutations(sweep), []);
 });
@@ -844,7 +863,7 @@ test("awaiting release: a failed write on one Issue is recorded and the run cont
 
 test("awaiting release: off by default and with Project reconciliation off; no Project reads beyond the existing ones", async () => {
   const off = projectClient();
-  const receipt = await runCompletion(off, { repository: FE });
+  const receipt = await runCompletion(off, { repository: FE, registry: legacyFrontendRegistry() });
   assert.deepEqual(receipt.awaitingRelease, { enabled: false, updated: [], skipped: 0, failed: [] });
   assert.equal(off.log.filter((entry) => entry === "query MetadataProject").length, 1, "only the frontend sweep's own snapshot");
   assert.ok(!off.log.includes("query CompletionProjectItemStatus"));
@@ -852,12 +871,12 @@ test("awaiting release: off by default and with Project reconciliation off; no P
   assert.match(formatCompletionSummary(receipt), /Awaiting release: off/u);
 
   const on = projectClient();
-  await runCompletion(on, { repository: FE, awaitingRelease: true });
+  await runCompletion(on, { repository: FE, registry: legacyFrontendRegistry(), awaitingRelease: true });
   assert.equal(on.log.filter((entry) => entry === "query MetadataProject").length, 2, "one extra snapshot for the writer");
 
   // a repository-local run (no Project access) must not silently drop the flag: fail closed before any read
   const local = projectClient();
-  await assert.rejects(() => runCompletion(local, { repository: FE, awaitingRelease: true, reconcileProjectStatus: false }),
+  await assert.rejects(() => runCompletion(local, { repository: FE, registry: legacyFrontendRegistry(), awaitingRelease: true, reconcileProjectStatus: false }),
     (error) => error instanceof CompletionBlocked && error.code === "AWAITING_RELEASE_NEEDS_PROJECT");
   assert.ok(!local.log.some((entry) => entry.includes("Project") || entry.startsWith("mutation")));
 });
@@ -890,6 +909,8 @@ test("org workflow for the frontend runs the shared engine with Awaiting release
   assert.doesNotMatch(workflow, /github\.token/u);
   assert.match(workflow, /CHIPIN_COMPLETION_WRITE: "1"/u);
   assert.match(workflow, /CHIPIN_COMPLETION_AWAITING_RELEASE: "1"/u);
+  // engine off for the frontend (.github#216 until #217): the sweep is a green no-op, not a red run
+  assert.match(workflow, /CHIPIN_COMPLETION_SKIP_MANUAL: "1"/u);
   assert.doesNotMatch(workflow, /CHIPIN_COMPLETION_PROJECT_RECONCILE/u, "Project reconciliation stays on");
   assert.match(workflow, /run: node automation\/completion\.mjs --repository ChipIn-one\/chipin-frontend$/mu);
   assert.doesNotMatch(workflow, /frontend-production-completion\.mjs/u);
@@ -898,6 +919,8 @@ test("org workflow for the frontend runs the shared engine with Awaiting release
   // the .github workflow never turns the writer on
   const integration = await readFile(new URL("../.github/workflows/integration-completion.yml", import.meta.url), "utf8");
   assert.doesNotMatch(integration, /CHIPIN_COMPLETION_AWAITING_RELEASE/u);
+  // .github itself must never be skipped silently: its record is automatic and a manual one stays a red run
+  assert.doesNotMatch(integration, /CHIPIN_COMPLETION_SKIP_MANUAL/u);
   // the composite action turns the writer on only behind its explicit `awaiting-release: "true"` input (.github#212)
   const action = await readFile(new URL("./completion-action/action.yml", import.meta.url), "utf8");
   assert.doesNotMatch(action, /^\s+CHIPIN_COMPLETION_AWAITING_RELEASE:/mu, "never in the step env");
@@ -933,15 +956,12 @@ const RECEIPT_SHA = "cccccccccccccccccccccccccccccccccccccccc";
 const OLD_RECEIPT_SHA = "dddddddddddddddddddddddddddddddddddddddd";
 const MERGE_2 = "3333333333333333333333333333333333333333";
 
-// the frontend record as the cutover registry PR will write it (the real FE record is not switched here)
+// the frontend record as .github#217 will write it: the live record (.github#216) with the engine switched on
 async function receiptRegistry() {
-  const text = (await readFile(new URL("../workflow-registry.yaml", import.meta.url), "utf8"))
-    .replace("branches: { default: main, integration: dev, promotion: main }", "branches: { default: master, integration: master }")
-    .replace(/completion: production-merge[^\n]*\n/u,
-      "completion: deployment-receipt\n    productionEvidence: { environment: Production, creator: \"vercel[bot]\" }\n")
-    .replace(/release: \{ strategy: semver-by-impact, trigger: promotion-merge, tagPrefix: v \}[^\n]*\n/u,
-      "release: { strategy: deploy-tag, trigger: production-deploy, tagPrefix: v }\n");
-  return loadRegistry({ text });
+  const live = await readFile(new URL("../workflow-registry.yaml", import.meta.url), "utf8");
+  const engineOff = /^      completion: manual {8}# automatic \| manual; the engine stays off for chipin-frontend until #217$/mu;
+  assert.match(live, engineOff, "the live frontend record keeps the engine off");
+  return loadRegistry({ text: live.replace(engineOff, "      completion: automatic") });
 }
 
 function deployment({ id = 900, sha = RECEIPT_SHA, environment = "Production", creator = "vercel[bot]", createdAt = "2026-10-08T10:00:00Z" } = {}) {
@@ -1027,8 +1047,47 @@ test("deployment-receipt: the cutover registry record validates and runs the new
   assert.equal(profile.completion, "deployment-receipt");
   assert.equal(profile.capabilities.completion, "automatic");
   assert.deepEqual(profile.productionEvidence, { environment: "Production", creator: "vercel[bot]" });
-  // the live registry keeps the frontend on production-merge until the cutover window
-  assert.equal(loadRegistry().repositories.find((candidate) => candidate.repository === FE).completion, "production-merge");
+  // the live record (.github#216): same strategy and evidence on master, engine off until .github#217
+  const live = loadRegistry().repositories.find((candidate) => candidate.repository === FE);
+  assert.equal(live.completion, "deployment-receipt");
+  assert.deepEqual(live.branches, { default: "master", integration: "master", promotion: null });
+  assert.deepEqual(live.productionEvidence, profile.productionEvidence);
+  assert.equal(live.capabilities.completion, "manual");
+});
+
+test("frontend engine off (.github#216): a direct run refuses, the org sweep skips as a green no-op before any read", async () => {
+  const client = receiptClient();
+  await assert.rejects(() => runCompletion(client, { repository: FE, awaitingRelease: true }),
+    (error) => error instanceof CompletionBlocked && error.code === "COMPLETION_NOT_AUTOMATIC");
+  assert.deepEqual(client.log, []);
+
+  // the org workflow's options (CHIPIN_COMPLETION_SKIP_MANUAL=1, Awaiting release on, Project reconciliation on)
+  const receipt = await runCompletion(client, { repository: FE, awaitingRelease: true, skipWhenManual: true });
+  assert.deepEqual(client.log, [], "no Issue, Project, Deployment or branch read");
+  assert.deepEqual(mutations(client), []);
+  assert.equal(receipt.skipped.code, "COMPLETION_NOT_AUTOMATIC");
+  assert.equal(receipt.strategy, "deployment-receipt");
+  assert.equal(receipt.branch, "master");
+  assert.deepEqual(receipt.results, []);
+  assert.deepEqual(receipt.awaitingRelease, { enabled: false, updated: [], skipped: 0, failed: [] });
+  assert.match(formatCompletionSummary(receipt),
+    /^# Completion ChipIn-one\/chipin-frontend \(deployment-receipt\)\n\n- Skipped: COMPLETION_NOT_AUTOMATIC .*capabilities\.completion "manual"/u);
+
+  assert.equal(completionSkipNotice(receipt),
+    "::notice title=Completion skipped::completion skipped for ChipIn-one/chipin-frontend: capabilities.completion is manual"
+    + " in workflow-registry.yaml (no Issue closed, no Project #5 Status written)");
+
+  // skipWhenManual never skips an automatic record: with the engine on (.github#217) the same run sweeps
+  const on = receiptClient();
+  const swept = await runCompletion(on, { repository: FE, registry: await receiptRegistry(), reconcileProjectStatus: false, skipWhenManual: true });
+  assert.equal(swept.skipped, undefined);
+  assert.equal(completionSkipNotice(swept), null, "no notice for a run that swept");
+  assert.equal(swept.results[0].decision.code, "closed-completed");
+  // nor does it turn another refusal into a skip
+  const forged = { ...loadRegistry(), repositories: loadRegistry().repositories.map((profile) => (profile.repository === ORG
+    ? { ...profile, completion: "manual" } : profile)) };
+  await assert.rejects(() => runCompletion(fakeClient(), { repository: ORG, registry: forged, reconcileProjectStatus: false, skipWhenManual: true }),
+    (error) => error.code === "STRATEGY_NOT_IMPLEMENTED");
 });
 
 test("deployment-receipt: a merge commit contained in a valid production receipt closes the Issue with explicit evidence", async () => {
