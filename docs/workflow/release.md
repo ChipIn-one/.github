@@ -11,13 +11,13 @@ Native tags and GitHub Releases for ChipIn repositories. Owner decisions of 2026
 4. **Only a human merges.** Tags and Releases are created automatically *after* a human merge (or a successful production deploy), never before, and never by merging.
 5. **Release notes are generated:** native GitHub generated notes from the merged PRs plus an "Included Issues" block built from the inventory (`Task identity` of the included PRs). Nothing is written by hand.
 6. **Sentry** gets a release only for a tag build (frontend `main`); dev and preview builds get no separate Sentry release.
-7. **Unchanged:** production completion still closes FE Issues after the merge to `main`; `Version impact` stays in every task PR; Milestones stay product goals and are not versions.
+7. **Unchanged:** production completion still closes FE Issues after the merge to `main` (after the frontend cutover to `master` it closes them on a production Deployment receipt instead, [completion.md](completion.md#deployment-receipt)); `Version impact` stays in every task PR; Milestones stay product goals and are not versions.
 
 ## Per repository (registry `release` block)
 
 | Repository | Strategy | Trigger | What happens |
 | --- | --- | --- | --- |
-| `chipin-frontend` | `semver-by-impact` | `promotion-merge` | A bot keeps one open `dev -> main` release PR (inventory, computed version, notes). After a human merges it, the tag and Release are created on the merge commit. |
+| `chipin-frontend` | `semver-by-impact` | `promotion-merge` | A bot keeps one open `dev -> main` release PR (inventory, computed version, notes). After a human merges it, the tag and Release are created on the merge commit. Target after the `master` cutover: `deploy-tag` / `production-deploy` ([Frontend specifics](#frontend-specifics)). |
 | `chipin-backend` | `deploy-tag` | `production-deploy` | After every successful `Deploy Production` the deployed SHA gets the tag and Release; a rollback to an older SHA creates none. The deploy workflow change is reviewed and merged by olegbal (relates to [#156](https://github.com/ChipIn-one/.github/issues/156)). |
 | `.github` | `semver-by-impact` | `integration-merge` | A merge to `master` that changes `automation/`, reusable workflows or the registry produces the tag and Release; documentation-only merges (`none`) create nothing. |
 | `chipin-knowledge-base`, `chipin-notifications` | `none` | — | Documents: no versions, no releases. `chipin-notifications` is registered for this policy only; every other capability is off until the owner opts in. |
@@ -27,6 +27,7 @@ Registry rules: `none` has no trigger; `semver-by-impact` uses `promotion-merge`
 
 ## Frontend specifics
 
+- **Target after the cutover to canonical `master`** ([chipin-frontend#497](https://github.com/ChipIn-one/chipin-frontend/issues/497), approved plan): there is no `dev -> main` release PR any more; the owner releases by promoting an exact `master` deployment in Vercel. The registry record then becomes `release: { strategy: deploy-tag, trigger: production-deploy, tagPrefix: v }`, so the tag belongs to the promoted (deployed) SHA, like the backend. That registry switch happens in the cutover window together with `completion: deployment-receipt`; the tags themselves (backfill and tag-based versions) come with [#171](https://github.com/ChipIn-one/.github/issues/171) and [#172](https://github.com/ChipIn-one/.github/issues/172), not with the completion strategy ([#212](https://github.com/ChipIn-one/.github/issues/212)). Until then the rows above describe the current `dev -> main` flow.
 - The release PR body is generated in the existing inventory format (`Included implementation PRs:` / `Included Issues:`), so `release-source-policy`, admission, `pr-metadata` and production completion keep working unchanged.
 - A bot-created PR does not trigger `pull_request` workflows when it uses the default `GITHUB_TOKEN`; the rolling release PR therefore needs a repository secret supplied by the owner (human action, tracked in [#170](https://github.com/ChipIn-one/.github/issues/170)).
 - Builds: `main` resolves the tag of its commit; other builds are `<last tag>-dev-<sha>`. How a Vercel build learns its tag is verified in [#172](https://github.com/ChipIn-one/.github/issues/172) (deferred by the owner).

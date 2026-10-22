@@ -71,6 +71,7 @@ The file is read by a strict built-in YAML subset reader, so the repository need
 | `branches` | `default`, `integration`, optional `promotion` |
 | `deploymentProfile` | `none`, `staging`, `production` |
 | `completion` | `production-merge`, `integration-merge`, `deployment-receipt`, `manual` |
+| `productionEvidence` | only with `completion: deployment-receipt`, required there: `{ environment, creator }`, the GitHub Deployments that count as production receipts (e.g. `{ environment: Production, creator: "vercel[bot]" }`); needs `deploymentProfile: production`; see [completion.md](completion.md#deployment-receipt) |
 | `protection` | `ruleset`, `protection`, `unavailable` (Free plan + private) |
 | `requiredChecks` | names of checks the integration branch must require |
 | `release` | `strategy` (`semver-by-impact`, `deploy-tag`, `none`), `trigger` (`promotion-merge`, `integration-merge`, `production-deploy`; none for `none`), `tagPrefix` (default `v`); see [release.md](release.md) |

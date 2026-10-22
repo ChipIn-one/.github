@@ -1,0 +1,44 @@
+# Caller template for repositories with completion: deployment-receipt
+# (registry: `completion: deployment-receipt` + `productionEvidence: { environment, creator }`; planned for
+# ChipIn-one/chipin-frontend after its master cutover, chipin-frontend#497). Copy to
+# .github/workflows/completion.yml in the repository, set the integration branch, the production environment and the pin.
+# Triggers (docs/workflow/completion.md, deployment-receipt):
+# - deployment_status: a production receipt arrived (the platform, e.g. Vercel, writes the Deployment status). The job
+#   runs only for state success in the registry environment; previews, pending and failed statuses start nothing.
+#   The engine re-validates every receipt itself (environment, creator, newest status, SHA on the branch).
+# - push to the integration branch: a linked PR merged; the Issue moves Todo / In Progress -> Awaiting release.
+# - workflow_dispatch: manual rerun; the engine takes no input and reads the registry pinned in the action.
+# - The org sweep in ChipIn-one/.github (schedule) stays the fallback for missed events. A deployment_status run uses
+#   the workflow file at the deployment's SHA, so receipts for commits made before this caller existed start no run;
+#   the org sweep covers them.
+# awaiting-release "true" needs an organization token (here the org secret CHIPIN_ISSUE_WRITE_TOKEN, made available
+# to the repository by the owner) with Deployments read, Issues write and Project #5 read/write. Without it use
+# `github.token` and awaiting-release "false", and widen `permissions` below to deployments: read, issues: write,
+# pull-requests: read: the close still works, Awaiting release then comes from the org sweep.
+name: Completion
+on:
+  deployment_status:
+  push:
+    branches: [master]          # branches.integration from workflow-registry.yaml
+  workflow_dispatch:
+permissions:
+  contents: read                # GITHUB_TOKEN is not used: the PAT carries the Deployments, Issues and Project #5 access
+concurrency:
+  # one run at a time, a running sweep is never cancelled; GitHub keeps one pending run per group and cancels an
+  # older pending one, which is harmless because every run sweeps all open Issues
+  group: completion-${{ github.repository }}
+  cancel-in-progress: false
+jobs:
+  completion:
+    # productionEvidence.environment from workflow-registry.yaml
+    if: >-
+      github.repository_owner == 'ChipIn-one' &&
+      (github.event_name != 'deployment_status' ||
+       (github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'Production'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: ChipIn-one/.github/automation/completion-action@<sha>   # vX.Y.Z — pin the org tag SHA
+        with:
+          token: ${{ secrets.CHIPIN_ISSUE_WRITE_TOKEN }}
+          awaiting-release: "true"

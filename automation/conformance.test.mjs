@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  GitHubConformanceSource, GitHubConformanceStore, audit, checkCallers, checkDependabot, checkIntake, checkMergedPastRed,
+  GitHubConformanceSource, GitHubConformanceStore, audit, checkCallers, checkCompletionCaller, checkDependabot, checkIntake, checkMergedPastRed,
   checkPins, checkProjectPullRequests, checkProtection, checkRouting, extractPins, main, parseMarker, renderIssue,
-  renderSummary, sortTags, touchesCapability, upsertIssues,
+  renderSummary, sortTags, touchesCapability, upsertIssues, workflowTriggers,
 } from './conformance.mjs';
-import { getRepositoryProfile, loadRegistry } from './registry.mjs';
+import { getRepositoryProfile, loadRegistry, validateRegistry } from './registry.mjs';
 
 const FE = 'ChipIn-one/chipin-frontend';
 const BE = 'ChipIn-one/chipin-backend';
@@ -49,6 +49,61 @@ test('caller presence follows the registry capabilities', () => {
   assert.match(feWrong[0].message, /frontend-production-completion-action/);
   const gate = extractPins([{ path: 'p', text: `    uses: ChipIn-one/.github/.github/workflows/pr-gate.yml@${V1} # v1.0.0` }]);
   assert.deepEqual(checks(checkCallers(profile(BE), gate)), ['CALLER_MISSING'], 'pr-gate covers admission, link and metadata; BE milestones still needed');
+});
+
+// the frontend record as the cutover registry PR will write it (.github#212); the live record stays production-merge
+const receiptProfile = () => validateRegistry({
+  schemaVersion: 1, standardVersion: 'v1', project: { number: 5, statuses: ['Backlog', 'Done'] },
+  repositories: [{
+    repository: FE, kind: 'code', visibility: 'public', owner: 'syllik', branches: { default: 'master', integration: 'master' },
+    deploymentProfile: 'production', completion: 'deployment-receipt', productionEvidence: { environment: 'Production', creator: 'vercel[bot]' },
+    protection: 'ruleset', requiredChecks: ['frontend-ci'], release: { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v' },
+  }],
+}).repositories[0];
+const receiptCaller = (on, path = '.github/workflows/completion.yml') => ({
+  path, text: ['name: Completion', ...on, 'jobs:', '  completion:', '    steps:', uses('completion-action', V1, 'v1.0.0')].join('\n'),
+});
+const RECEIPT_ON = ['on:', '  deployment_status:', '  push:', '    branches: [master]', '  workflow_dispatch:'];
+
+test('deployment-receipt: the shared completion-action is the caller, the frontend action does not satisfy it', () => {
+  const receipt = receiptProfile();
+  const base = [uses('issue-admission-action', V1), uses('development-link-action', V1), uses('pr-metadata-action', V1), uses('create-milestone-action', V1)];
+  assert.deepEqual(checkCallers(receipt, extractPins([workflow(...base, uses('completion-action', V1))])), []);
+  const wrong = checkCallers(receipt, extractPins([workflow(...base, uses('frontend-production-completion-action', V1))]));
+  assert.deepEqual(checks(wrong), ['CALLER_MISSING']);
+  assert.match(wrong[0].message, /completion is automatic but no workflow uses completion-action/);
+});
+
+test('deployment-receipt: the completion caller needs the deployment_status and push triggers', () => {
+  const receipt = receiptProfile();
+  const inspect = files => checkCompletionCaller(receipt, files, extractPins(files));
+  assert.deepEqual(inspect([receiptCaller(RECEIPT_ON)]), []);
+  assert.deepEqual(inspect([receiptCaller(['on: [push, deployment_status]'])]), [], 'flow form');
+  const pushOnly = inspect([receiptCaller(['on:', '  push:', '    branches: [master]'])]);
+  assert.deepEqual(pushOnly.map(f => [f.check, f.severity]), [['COMPLETION_TRIGGER_MISSING', 'drift']]);
+  assert.match(pushOnly[0].message, /has no deployment_status trigger/);
+  assert.match(pushOnly[0].remediation, /caller-completion-deployment-receipt\.yml/);
+  const receiptOnly = inspect([receiptCaller(['on:', '  deployment_status:'])]);
+  assert.match(receiptOnly[0].message, /has no push trigger/);
+  assert.match(inspect([receiptCaller(['on: workflow_dispatch'])])[0].message, /no deployment_status or push trigger/);
+  // a trigger in another workflow that does not run the completion action does not count
+  const split = [receiptCaller(['on:', '  push:']), { path: '.github/workflows/other.yml', text: 'on:\n  deployment_status:\njobs: {}' }];
+  assert.match(inspect(split)[0].message, /no deployment_status trigger/);
+  // no caller at all is CALLER_MISSING's finding, not this one
+  assert.deepEqual(inspect([]), []);
+  // other strategies and the live frontend record are not checked for these triggers
+  for (const name of [FE, KB, BE, META]) {
+    assert.deepEqual(checkCompletionCaller(profile(name), [receiptCaller(['on: push'])], extractPins([receiptCaller(['on: push'])])), [], name);
+  }
+});
+
+test('workflow triggers are read from the top-level on block only', () => {
+  assert.deepEqual(workflowTriggers(['on:', '  # receipts', '  deployment_status:', '  push:', '    branches:', '      - master', 'jobs:', '  push:'].join('\n')),
+    ['deployment_status', 'push']);
+  assert.deepEqual(workflowTriggers('on: push\njobs: {}'), ['push']);
+  assert.deepEqual(workflowTriggers('on: [push, deployment_status]  # both\n'), ['push', 'deployment_status']);
+  assert.deepEqual(workflowTriggers('"on":\n    deployment_status: {}\n    push: {}\n'), ['deployment_status', 'push']);
+  assert.deepEqual(workflowTriggers('name: x\njobs: {}'), []);
 });
 
 test('capability-aware change filter ignores tests and docs', () => {

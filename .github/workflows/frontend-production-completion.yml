@@ -6,6 +6,9 @@
 # released from Todo / In Progress to `Awaiting release`. The repository GITHUB_TOKEN of chipin-frontend
 # cannot write the org Project, so this writer lives here, not in the repository-local action; the Status
 # appears within one schedule interval (about 15 minutes) of the merge into `dev`.
+# The strategy comes from the registry record: after the frontend cutover to `master` (chipin-frontend#497) the
+# record says `completion: deployment-receipt` and this same run becomes the org sweep fallback of that strategy
+# (close on a valid production receipt, Awaiting release for merged but not yet received work); no change here.
 # Runs only from trusted master pushes and the schedule; no branch-selectable dispatch.
 name: Frontend production completion
 

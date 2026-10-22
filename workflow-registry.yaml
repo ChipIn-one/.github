@@ -6,6 +6,9 @@
 # block mappings, block sequences, one-line [flow] sequences, one-line {flow} mappings,
 # plain/quoted scalars, null, booleans and integers. Anchors, tags, multi-line scalars
 # and duplicate keys are rejected. Unknown keys fail validation.
+#
+# `completion: deployment-receipt` also needs `productionEvidence: { environment: <name>, creator: "<login>" }`
+# (quote a `[bot]` login inside a flow mapping) and `deploymentProfile: production`; no other strategy may carry it.
 schemaVersion: 1
 standardVersion: v1            # tag line of the standard this registry agrees with
 project:

@@ -173,14 +173,59 @@ test('schema rejects invalid values', () => {
   // `automatic` needs a strategy the completion engine implements (automation/completion.mjs)
   rejects(() => validateRegistry(document([record({ completion: 'manual', capabilities: { completion: 'automatic' } })])),
     'REGISTRY_VALUE');
-  rejects(() => validateRegistry(document([record({ completion: 'deployment-receipt', capabilities: { completion: 'automatic' } })])),
-    'REGISTRY_VALUE');
   for (const completion of ['production-merge', 'integration-merge']) {
     const ok = validateRegistry(document([record({ completion, capabilities: { completion: 'automatic' } })]));
     assert.equal(ok.repositories[0].capabilities.completion, 'automatic');
   }
-  assert.equal(validateRegistry(document([record({ completion: 'deployment-receipt', capabilities: { completion: 'manual' } })]))
+  assert.equal(validateRegistry(document([record({ ...RECEIPT, capabilities: { completion: 'manual' } })]))
     .repositories[0].completion, 'deployment-receipt');
+});
+
+// a deployment-receipt record (.github#212): production Deployments of one environment, written by one creator
+const RECEIPT = {
+  completion: 'deployment-receipt', deploymentProfile: 'production',
+  productionEvidence: { environment: 'Production', creator: 'vercel[bot]' },
+};
+
+test('deployment-receipt is automatic and declares its production evidence', () => {
+  const [profile] = validateRegistry(document([record({ ...RECEIPT, capabilities: { completion: 'automatic' } })])).repositories;
+  assert.equal(profile.completion, 'deployment-receipt');
+  assert.equal(profile.capabilities.completion, 'automatic');
+  assert.deepEqual(profile.productionEvidence, { environment: 'Production', creator: 'vercel[bot]' });
+  assert.throws(() => { profile.productionEvidence.creator = 'someone'; }, TypeError);
+  // other strategies keep their exact profile shape (no productionEvidence key)
+  const [other] = validateRegistry(document([record()])).repositories;
+  assert.equal(Object.hasOwn(other, 'productionEvidence'), false);
+  // a plain login is a valid creator as well
+  assert.equal(validateRegistry(document([record({ ...RECEIPT, productionEvidence: { environment: 'prod', creator: 'syllik' } })]))
+    .repositories[0].productionEvidence.creator, 'syllik');
+  // the YAML subset reads the creator quoted in a flow mapping
+  const parsed = parseYamlSubset('productionEvidence: { environment: Production, creator: "vercel[bot]" }');
+  assert.deepEqual(parsed, { productionEvidence: { environment: 'Production', creator: 'vercel[bot]' } });
+});
+
+test('deployment-receipt without valid production evidence is rejected; other strategies must not declare it', () => {
+  const { productionEvidence, ...withoutEvidence } = RECEIPT;
+  rejects(() => validateRegistry(document([record({ ...withoutEvidence, capabilities: { completion: 'automatic' } })])), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record(withoutEvidence)])), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ ...RECEIPT, productionEvidence: null })])), 'REGISTRY_SCHEMA');
+  rejects(() => validateRegistry(document([record({ ...RECEIPT, productionEvidence: { environment: 'Production' } })])), 'REGISTRY_SCHEMA');
+  rejects(() => validateRegistry(document([record({ ...RECEIPT, productionEvidence: { ...productionEvidence, branch: 'master' } })])), 'REGISTRY_SCHEMA');
+  for (const bad of [
+    { environment: '', creator: 'vercel[bot]' },
+    { environment: ' Production', creator: 'vercel[bot]' },
+    { environment: 7, creator: 'vercel[bot]' },
+    { environment: 'Production', creator: '' },
+    { environment: 'Production', creator: null },
+    { environment: 'Production', creator: 'vercel [bot]' },
+    { environment: 'Production', creator: 'vercel[app]' },
+  ]) {
+    rejects(() => validateRegistry(document([record({ ...RECEIPT, productionEvidence: bad })])), 'REGISTRY_VALUE');
+  }
+  rejects(() => validateRegistry(document([record({ ...RECEIPT, deploymentProfile: 'staging' })])), 'REGISTRY_VALUE');
+  for (const completion of ['production-merge', 'integration-merge', 'manual']) {
+    rejects(() => validateRegistry(document([record({ completion, productionEvidence })])), 'REGISTRY_VALUE');
+  }
 });
 
 test('owner may be null only for docs repositories', () => {

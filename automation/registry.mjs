@@ -206,7 +206,10 @@ const VISIBILITY = ['public', 'private'];
 const DEPLOYMENT_PROFILES = ['none', 'staging', 'production'];
 const COMPLETION = ['production-merge', 'integration-merge', 'deployment-receipt', 'manual'];
 // Strategies automation/completion.mjs implements; `capabilities.completion: automatic` needs one of them.
-export const AUTOMATIC_COMPLETION_STRATEGIES = Object.freeze(['production-merge', 'integration-merge']);
+export const AUTOMATIC_COMPLETION_STRATEGIES = Object.freeze(['production-merge', 'integration-merge', 'deployment-receipt']);
+// deployment-receipt reads its production evidence from GitHub Deployments; the record names which ones count.
+const PRODUCTION_EVIDENCE_STRATEGY = 'deployment-receipt';
+const DEPLOYMENT_CREATOR = /^[a-z\d](?:[a-z\d-]{0,38})(?:\[bot\])?$/i;
 const PROTECTION = ['ruleset', 'protection', 'unavailable'];
 const RELEASE_STRATEGIES = ['semver-by-impact', 'deploy-tag', 'none'];
 const RELEASE_TRIGGERS = ['promotion-merge', 'integration-merge', 'production-deploy'];
@@ -262,7 +265,7 @@ function normalizeRepository(record, index) {
   const where = `repositories[${index}]`;
   assertKeys(where, record,
     ['repository', 'kind', 'visibility', 'owner', 'branches', 'deploymentProfile', 'completion', 'protection', 'requiredChecks', 'release'],
-    ['capabilities']);
+    ['capabilities', 'productionEvidence']);
   assertString(`${where}.repository`, record.repository, REPOSITORY);
   assertEnum(`${where}.kind`, record.kind, KINDS);
   assertEnum(`${where}.visibility`, record.visibility, VISIBILITY);
@@ -275,6 +278,25 @@ function normalizeRepository(record, index) {
   for (const [name, branch] of Object.entries(record.branches)) assertString(`${where}.branches.${name}`, branch, BRANCH);
   assertEnum(`${where}.deploymentProfile`, record.deploymentProfile, DEPLOYMENT_PROFILES);
   assertEnum(`${where}.completion`, record.completion, COMPLETION);
+  let productionEvidence = null;
+  if (record.completion === PRODUCTION_EVIDENCE_STRATEGY) {
+    if (!Object.hasOwn(record, 'productionEvidence')) {
+      fail('REGISTRY_VALUE', `${where}: completion ${PRODUCTION_EVIDENCE_STRATEGY} needs productionEvidence { environment, creator }`);
+    }
+    assertKeys(`${where}.productionEvidence`, record.productionEvidence, ['environment', 'creator']);
+    const { environment, creator } = record.productionEvidence;
+    if (typeof environment !== 'string' || environment.trim() !== environment) {
+      fail('REGISTRY_VALUE', `${where}.productionEvidence.environment: invalid value ${JSON.stringify(environment)}`);
+    }
+    assertString(`${where}.productionEvidence.environment`, environment);
+    assertString(`${where}.productionEvidence.creator`, creator, DEPLOYMENT_CREATOR);
+    if (record.deploymentProfile !== 'production') {
+      fail('REGISTRY_VALUE', `${where}: completion ${PRODUCTION_EVIDENCE_STRATEGY} needs deploymentProfile production`);
+    }
+    productionEvidence = { environment, creator };
+  } else if (Object.hasOwn(record, 'productionEvidence')) {
+    fail('REGISTRY_VALUE', `${where}.productionEvidence: only completion ${PRODUCTION_EVIDENCE_STRATEGY} reads production evidence`);
+  }
   assertEnum(`${where}.protection`, record.protection, PROTECTION);
   if (!Array.isArray(record.requiredChecks)) fail('REGISTRY_SCHEMA', `${where}.requiredChecks must be a sequence`);
   record.requiredChecks.forEach((check, i) => assertString(`${where}.requiredChecks[${i}]`, check));
@@ -322,6 +344,8 @@ function normalizeRepository(record, index) {
     }),
     deploymentProfile: record.deploymentProfile,
     completion: record.completion,
+    // present only for deployment-receipt, so the other profiles keep their exact shape
+    ...(productionEvidence ? { productionEvidence: deepFreeze(productionEvidence) } : {}),
     protection: record.protection,
     requiredChecks: deepFreeze([...record.requiredChecks]),
     release: deepFreeze({ strategy: record.release.strategy, trigger, tagPrefix }),
