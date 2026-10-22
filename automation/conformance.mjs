@@ -73,7 +73,8 @@ const REQUIRED_USES = [
   ['developmentLink', ['development-link-action', 'pr-gate'], p => p.capabilities.developmentLink !== 'off'],
   ['prMetadata', ['pr-metadata-action', 'pr-gate'], p => p.capabilities.prMetadata === 'required'],
   ['milestones', ['create-milestone-action'], p => p.capabilities.milestones === 'enabled'],
-  // the accepted caller follows the registry strategy (docs/workflow/completion.md)
+  // the accepted caller follows the registry strategy (docs/workflow/completion.md); integration-merge and
+  // deployment-receipt both use the shared completion-action (deployment-receipt triggers: checkCompletionCaller)
   ['completion', p => (p.completion === 'production-merge' ? ['frontend-production-completion-action'] : ['completion-action']),
     p => p.capabilities.completion === 'automatic'],
 ];
@@ -88,6 +89,40 @@ export function checkCallers(profile, pins) {
     .map(([capability, accepted]) => finding('CALLER_MISSING', 'drift',
       `Capability ${capability} is ${profile.capabilities[capability]} but no workflow uses ${accepted.join(' or ')} from ChipIn-one/.github.`,
       `Add the caller workflow (docs/workflow/onboarding.md step 2) and pin it to a tagged SHA.`));
+}
+
+// Triggers a deployment-receipt completion caller needs (docs/workflow/completion.md, .github#212): the receipt
+// event closes the Issue, the push writes Awaiting release. Read from the top-level `on:` block of the workflow
+// file that uses completion-action (block or one-line flow form).
+const RECEIPT_CALLER_TRIGGERS = ['deployment_status', 'push'];
+
+export function workflowTriggers(text) {
+  const lines = String(text).split(/\r?\n/);
+  const start = lines.findIndex(line => /^(?:on|"on"|'on'):(?:\s|$)/.test(line));
+  if (start === -1) return [];
+  const block = [lines[start].replace(/^[^:]*:/, '')];
+  for (const line of lines.slice(start + 1)) {
+    if (/^\S/.test(line) && !/^#/.test(line)) break;
+    block.push(line);
+  }
+  const body = block.map(line => line.replace(/(^|\s)#.*$/, '')).join('\n');
+  const inline = /^\s*\[([^\]]*)\]\s*$/.exec(block[0].replace(/(^|\s)#.*$/, ''));
+  if (inline) return inline[1].split(',').map(name => name.trim()).filter(Boolean);
+  if (block[0].trim() !== '') return [block[0].trim()];
+  const indent = Math.min(...block.slice(1).filter(line => line.trim() && !/^\s*#/.test(line)).map(line => line.length - line.trimStart().length));
+  return [...body.matchAll(new RegExp(`^ {${indent}}([A-Za-z_]+)\\s*:`, 'gm'))].map(match => match[1]);
+}
+
+export function checkCompletionCaller(profile, workflows, pins) {
+  if (profile.kind === 'meta' || profile.capabilities.completion !== 'automatic' || profile.completion !== 'deployment-receipt') return [];
+  const paths = new Set(pins.filter(pin => pin.name === 'completion-action').map(pin => pin.path));
+  if (!paths.size) return []; // CALLER_MISSING already reports the missing caller
+  const triggers = new Set(workflows.filter(file => paths.has(file.path)).flatMap(file => workflowTriggers(file.text)));
+  const missing = RECEIPT_CALLER_TRIGGERS.filter(trigger => !triggers.has(trigger));
+  if (!missing.length) return [];
+  return [finding('COMPLETION_TRIGGER_MISSING', 'drift',
+    `completion is deployment-receipt but the completion-action caller (${[...paths].join(', ')}) has no ${missing.join(' or ')} trigger.`,
+    `Use templates/caller-completion-deployment-receipt.yml: deployment_status (success only) closes on the production receipt, push to ${profile.branches.integration} writes Awaiting release.`)];
 }
 
 export async function checkPins(profile, pins, source, tags) {
@@ -217,6 +252,7 @@ export async function auditRepository(profile, source, shared) {
     const pins = extractPins(workflows);
     const findings = [
       ...checkCallers(profile, pins),
+      ...checkCompletionCaller(profile, workflows, pins),
       ...await checkPins(profile, pins, source, shared.tags),
       ...checkDependabot(profile, profile.capabilities.dependabot === 'required' ? await source.repoFile(profile.repository, '.github/dependabot.yml', ref) ?? await source.repoFile(profile.repository, '.github/dependabot.yaml', ref) : null),
       ...checkRouting(profile, profile.capabilities.agentRouting === 'required' ? await source.repoFile(profile.repository, 'AGENTS.md', ref) : null, profile.capabilities.agentRouting === 'required' ? await source.repoFile(profile.repository, '.ai/context.md', ref) : null),

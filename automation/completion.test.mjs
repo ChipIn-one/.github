@@ -5,15 +5,23 @@ import test from "node:test";
 import {
   AWAITING_RELEASE_STATUS,
   CompletionBlocked,
+  RECEIPT_MAX_PAGES,
+  RECEIPT_PAGE_SIZE,
+  RECEIPT_STATUS_PAGE_SIZE,
+  createReceiptResolver,
+  deploymentReceiptAwaitingVerifier,
   evaluateAwaitingReleaseCandidate,
+  evaluateIssueForDeploymentReceiptCompletion,
   evaluateIssueForIntegrationCompletion,
   formatCompletionSummary,
   projectStatusCoordinates,
   readBranchHead,
+  readProductionDeployments,
   reconcileAwaitingRelease,
   runCompletion,
   runIntegrationCompletionSweep,
   setAwaitingReleaseStatus,
+  validateProductionReceipt,
 } from "./completion.mjs";
 import { AUTOMATIC_COMPLETION_STRATEGIES, loadRegistry, validateRegistry } from "./registry.mjs";
 
@@ -339,12 +347,12 @@ test("runCompletion picks the strategy from the registry and refuses manual or u
   const forged = {
     ...registry,
     repositories: registry.repositories.map((profile) => (profile.repository === ORG
-      ? { ...profile, completion: "deployment-receipt" }
+      ? { ...profile, completion: "manual" }
       : profile)),
   };
   await assert.rejects(() => runCompletion(fakeClient(), { repository: ORG, registry: forged, reconcileProjectStatus: false }),
     (error) => error.code === "STRATEGY_NOT_IMPLEMENTED");
-  assert.deepEqual([...AUTOMATIC_COMPLETION_STRATEGIES], ["production-merge", "integration-merge"]);
+  assert.deepEqual([...AUTOMATIC_COMPLETION_STRATEGIES], ["production-merge", "integration-merge", "deployment-receipt"]);
 });
 
 test("runCompletion: production-merge delegates to the frontend module and refuses another branch layout", async () => {
@@ -413,9 +421,9 @@ test("registry: .github and the knowledge base are automatic integration-merge, 
   assert.throws(() => validateRegistry({
     ...registry,
     repositories: registry.repositories.map((profile) => (profile.repository === ORG
-      ? { ...profile, completion: "deployment-receipt", release: { strategy: "none" }, branches: { default: "master", integration: "master" }, requiredChecks: [] }
+      ? { ...profile, completion: "manual", release: { strategy: "none" }, branches: { default: "master", integration: "master" }, requiredChecks: [] }
       : { ...profile, release: profile.release.strategy === "none" ? { strategy: "none" } : profile.release, branches: Object.fromEntries(Object.entries(profile.branches).filter(([, v]) => v !== null)) })),
-  }), /contradicts completion "deployment-receipt"/u);
+  }), /contradicts completion "manual"/u);
 });
 
 test("org workflow for .github runs only from trusted master pushes and the schedule, with the org write token", async () => {
@@ -890,6 +898,447 @@ test("org workflow for the frontend runs the shared engine with Awaiting release
   // the .github workflow never turns the writer on
   const integration = await readFile(new URL("../.github/workflows/integration-completion.yml", import.meta.url), "utf8");
   assert.doesNotMatch(integration, /CHIPIN_COMPLETION_AWAITING_RELEASE/u);
+  // the composite action turns the writer on only behind its explicit `awaiting-release: "true"` input (.github#212)
   const action = await readFile(new URL("./completion-action/action.yml", import.meta.url), "utf8");
-  assert.doesNotMatch(action, /CHIPIN_COMPLETION_AWAITING_RELEASE/u);
+  assert.doesNotMatch(action, /^\s+CHIPIN_COMPLETION_AWAITING_RELEASE:/mu, "never in the step env");
+  assert.match(action, /^ {2}awaiting-release:\n(?: {4}.*\n)*? {4}default: "false"$/mu);
+});
+
+test("composite action: awaiting-release defaults to false and only true/false are accepted", async () => {
+  const action = await readFile(new URL("./completion-action/action.yml", import.meta.url), "utf8");
+  assert.match(action, /COMPLETION_AWAITING_RELEASE: \$\{\{ inputs\.awaiting-release \}\}/u);
+  assert.match(action, /^ {10}false\) ;;$/mu);
+  assert.match(action, / {12}export CHIPIN_COMPLETION_PROJECT_RECONCILE=1\n {12}export CHIPIN_COMPLETION_AWAITING_RELEASE=1\n/u);
+  assert.match(action, /awaiting-release must be/u);
+  assert.match(action, /exit 1/u);
+});
+
+test("deployment-receipt caller template: deployment_status (success, Production), push to the integration branch, dispatch", async () => {
+  const template = await readFile(new URL("../templates/caller-completion-deployment-receipt.yml", import.meta.url), "utf8");
+  assert.match(template, /^on:\n  deployment_status:\n  push:\n    branches: \[master\][^\n]*\n  workflow_dispatch:\n/mu);
+  assert.match(template, /github\.event\.deployment_status\.state == 'success'/u);
+  assert.match(template, /github\.event\.deployment\.environment == 'Production'/u);
+  assert.match(template, /github\.event_name != 'deployment_status' \|\|/u);
+  assert.match(template, /^permissions:\n {2}contents: read {16}# GITHUB_TOKEN is not used/mu);
+  assert.doesNotMatch(template, /^ {2}(issues|deployments|pull-requests): /mu, "the PAT carries the access");
+  assert.match(template, /ChipIn-one\/\.github\/automation\/completion-action@<sha>/u);
+  assert.match(template, /awaiting-release: "true"/u);
+  assert.match(template, /cancel-in-progress: false/u);
+  assert.doesNotMatch(template, /\bjob\./u, "job context is never used in the template");
+});
+
+// ---- deployment-receipt (.github#212) ----
+
+const RECEIPT_SHA = "cccccccccccccccccccccccccccccccccccccccc";
+const OLD_RECEIPT_SHA = "dddddddddddddddddddddddddddddddddddddddd";
+const MERGE_2 = "3333333333333333333333333333333333333333";
+
+// the frontend record as the cutover registry PR will write it (the real FE record is not switched here)
+async function receiptRegistry() {
+  const text = (await readFile(new URL("../workflow-registry.yaml", import.meta.url), "utf8"))
+    .replace("branches: { default: main, integration: dev, promotion: main }", "branches: { default: master, integration: master }")
+    .replace(/completion: production-merge[^\n]*\n/u,
+      "completion: deployment-receipt\n    productionEvidence: { environment: Production, creator: \"vercel[bot]\" }\n")
+    .replace(/release: \{ strategy: semver-by-impact, trigger: promotion-merge, tagPrefix: v \}[^\n]*\n/u,
+      "release: { strategy: deploy-tag, trigger: production-deploy, tagPrefix: v }\n");
+  return loadRegistry({ text });
+}
+
+function deployment({ id = 900, sha = RECEIPT_SHA, environment = "Production", creator = "vercel[bot]", createdAt = "2026-10-08T10:00:00Z" } = {}) {
+  return { id, sha, ref: sha, environment, creator: { login: creator }, created_at: createdAt };
+}
+function deploymentStatus({ id = 9000, state = "success", creator = "vercel[bot]", createdAt = "2026-10-08T10:01:00Z", environment = "Production" } = {}) {
+  return { id, state, creator: { login: creator }, created_at: createdAt, environment };
+}
+
+function receiptPrNode(number, mergeCommit = MERGE, overrides = {}) {
+  return {
+    number, url: "https://github.com/ChipIn-one/chipin-frontend/pull/" + number, state: "MERGED",
+    mergedAt: "2026-10-01T10:00:00Z", baseRefName: "master", headRefName: "feat/x-" + number,
+    headRefOid: "2222222222222222222222222222222222222222",
+    repository: { nameWithOwner: FE }, headRepository: { nameWithOwner: FE }, mergeCommit: { oid: mergeCommit },
+    ...overrides,
+  };
+}
+function receiptNode({ number = 1, pullRequests = [receiptPrNode(101)], updatedAt = "2026-10-07T10:00:00Z" } = {}) {
+  return candidateNode({
+    number, updatedAt,
+    url: "https://github.com/ChipIn-one/chipin-frontend/issues/" + number,
+    closedByPullRequestsReferences: { totalCount: pullRequests.length, nodes: pullRequests },
+  });
+}
+
+/**
+ * Fake frontend with Deployments on top of projectClient. `ancestry` lists "base...head" pairs where base is an
+ * ancestor of head (compare answers `ahead`); everything else is `diverged`. `deploymentStatuses` maps deployment id ->
+ * statuses list (or an Error to throw); `deploymentPages` overrides the list answers per page.
+ */
+function receiptClient({
+  nodes = [receiptNode()],
+  deployments = [deployment()],
+  deploymentStatuses = { 900: [deploymentStatus()] },
+  ancestry = [MERGE + "..." + HEAD, RECEIPT_SHA + "..." + HEAD, MERGE + "..." + RECEIPT_SHA],
+  deploymentsError = null,
+  deploymentPages = null,
+  compareErrors = {},
+  ...projectOptions
+} = {}) {
+  const client = projectClient({ nodes, ...projectOptions });
+  const base = client.request;
+  client.request = async (path, options = {}) => {
+    const deploymentsMatch = /\/repos\/ChipIn-one\/chipin-frontend\/deployments\?environment=([^&]+)&per_page=(\d+)&page=(\d+)$/u.exec(path);
+    if (deploymentsMatch) {
+      client.log.push("GET " + path);
+      assert.equal(decodeURIComponent(deploymentsMatch[1]), "Production");
+      if (deploymentsError) throw new Error(deploymentsError);
+      const [perPage, page] = [Number(deploymentsMatch[2]), Number(deploymentsMatch[3])];
+      if (deploymentPages) return deploymentPages[page - 1] ?? [];
+      return deployments.slice((page - 1) * perPage, page * perPage);
+    }
+    const statusMatch = /\/deployments\/(\d+)\/statuses\?per_page=100$/u.exec(path);
+    if (statusMatch) {
+      client.log.push("GET " + path);
+      const answer = deploymentStatuses[statusMatch[1]];
+      if (answer instanceof Error) throw answer;
+      if (answer === undefined) throw new Error("GET " + path + " -> 404: Not Found");
+      return answer;
+    }
+    const compareMatch = /\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/u.exec(path);
+    if (compareMatch) {
+      client.log.push("GET " + path);
+      const key = compareMatch[1] + "..." + compareMatch[2];
+      if (compareErrors[key]) throw new Error(compareErrors[key]);
+      return ancestry.includes(key)
+        ? { status: "ahead", merge_base_commit: { sha: compareMatch[1] } }
+        : { status: "diverged", merge_base_commit: { sha: "ffffffffffffffffffffffffffffffffffffffff" } };
+    }
+    return base(path, options);
+  };
+  return client;
+}
+
+const receiptRun = async (client, options = {}) => runCompletion(client, {
+  repository: FE, registry: await receiptRegistry(), reconcileProjectStatus: false, ...options,
+});
+
+test("deployment-receipt: the cutover registry record validates and runs the new strategy on master", async () => {
+  const registry = await receiptRegistry();
+  const profile = registry.repositories.find((candidate) => candidate.repository === FE);
+  assert.equal(profile.completion, "deployment-receipt");
+  assert.equal(profile.capabilities.completion, "automatic");
+  assert.deepEqual(profile.productionEvidence, { environment: "Production", creator: "vercel[bot]" });
+  // the live registry keeps the frontend on production-merge until the cutover window
+  assert.equal(loadRegistry().repositories.find((candidate) => candidate.repository === FE).completion, "production-merge");
+});
+
+test("deployment-receipt: a merge commit contained in a valid production receipt closes the Issue with explicit evidence", async () => {
+  const client = receiptClient();
+  const receipt = await receiptRun(client);
+  assert.equal(receipt.strategy, "deployment-receipt");
+  assert.equal(receipt.branch, "master");
+  const [result] = receipt.results;
+  assert.equal(result.decision.action, "closed");
+  assert.equal(result.decision.code, "closed-completed");
+  assert.match(result.decision.detail,
+    /PR #101 \(1111111\) is in production receipt deployment 900 \(Production, vercel\[bot\], sha ccccccc, status 9000 success at 2026-10-08T10:01:00Z\)\. Closed as completed\./u);
+  assert.deepEqual(result.decision.evidence, {
+    pullRequests: [{
+      number: 101, mergeCommitSha: MERGE,
+      receipt: {
+        deploymentId: 900, sha: RECEIPT_SHA, environment: "Production", creator: "vercel[bot]", createdAt: "2026-10-08T10:00:00Z",
+        statusId: 9000, statusState: "success", statusCreatedAt: "2026-10-08T10:01:00Z",
+      },
+    }],
+  });
+  assert.equal(mutations(client).filter((entry) => entry.startsWith("PATCH ")).length, 1);
+  assert.equal(receipt.productionEvidence.environment, "Production");
+  assert.equal(receipt.productionEvidence.deploymentsRead, 1);
+  assert.equal(receipt.productionEvidence.truncated, false);
+  assert.deepEqual(receipt.productionEvidence.checked.map((row) => [row.deploymentId, row.valid, row.reason]), [[900, true, null]]);
+  assert.match(formatCompletionSummary(receipt), /- Production evidence: Production by vercel\[bot\]; 1 deployment\(s\) read, 1 checked, valid receipts: 900 \(ccccccc, status 9000\)/u);
+  // compare direction: receipt on the branch is RECEIPT...HEAD, merge in the receipt is MERGE...RECEIPT
+  assert.ok(client.log.includes("GET /repos/ChipIn-one/chipin-frontend/compare/" + RECEIPT_SHA + "..." + HEAD));
+  assert.ok(client.log.includes("GET /repos/ChipIn-one/chipin-frontend/compare/" + MERGE + "..." + RECEIPT_SHA));
+});
+
+test("deployment-receipt: the merge commit equal to the receipt SHA needs no compare", async () => {
+  const client = receiptClient({ deployments: [deployment({ sha: MERGE })], ancestry: [MERGE + "..." + HEAD] });
+  const [result] = (await receiptRun(client)).results;
+  assert.equal(result.decision.code, "closed-completed");
+  assert.ok(!client.log.some((entry) => entry.includes("/compare/" + MERGE + "..." + MERGE)));
+});
+
+test("deployment-receipt: merged but not in any valid receipt is awaiting-production, never a close", async () => {
+  for (const [label, options] of [
+    ["no deployments", { deployments: [] }],
+    ["receipt older than the merge", { ancestry: [MERGE + "..." + HEAD, RECEIPT_SHA + "..." + HEAD] }],
+    ["only invalid receipts", { deployments: [deployment({ creator: "someone" }), deployment({ id: 901, environment: "Preview" })] }],
+  ]) {
+    const client = receiptClient(options);
+    const receipt = await receiptRun(client);
+    const [result] = receipt.results;
+    assert.equal(result.decision.action, "leave-open", label);
+    assert.equal(result.decision.code, "awaiting-production", label);
+    assert.match(result.decision.detail, /Merged into master but not yet in a valid production receipt: PR #101 \(1111111\)\./u);
+    assert.deepEqual(result.decision.evidence, { pullRequests: [{ number: 101, mergeCommitSha: MERGE, receipt: null }] });
+    assert.deepEqual(mutations(client), [], label);
+  }
+});
+
+test("deployment-receipt: every linked PR needs a receipt; receipts are checked newest first and cached", async () => {
+  const twoPrs = receiptNode({ pullRequests: [receiptPrNode(101, MERGE), receiptPrNode(102, MERGE_2)] });
+  // MERGE is in the newest receipt, MERGE_2 nowhere -> awaiting
+  const partial = receiptClient({
+    nodes: [twoPrs],
+    ancestry: [MERGE + "..." + HEAD, MERGE_2 + "..." + HEAD, RECEIPT_SHA + "..." + HEAD, MERGE + "..." + RECEIPT_SHA],
+  });
+  const [awaiting] = (await receiptRun(partial)).results;
+  assert.equal(awaiting.decision.code, "awaiting-production");
+  assert.match(awaiting.decision.detail, /PR #102 \(3333333\)\.$/u);
+  assert.equal(awaiting.decision.evidence.pullRequests[0].receipt.deploymentId, 900);
+  assert.equal(awaiting.decision.evidence.pullRequests[1].receipt, null);
+
+  // MERGE in the newest receipt, MERGE_2 only in an older one (both on master) -> close; three Issues share the cache
+  const older = deployment({ id: 800, sha: OLD_RECEIPT_SHA, createdAt: "2026-10-05T10:00:00Z" });
+  const client = receiptClient({
+    nodes: [twoPrs, receiptNode({ number: 2, pullRequests: [receiptPrNode(103, MERGE)] }), receiptNode({ number: 3, pullRequests: [receiptPrNode(104, MERGE)] })],
+    deployments: [older, deployment()], // listed out of order: the engine sorts newest first
+    deploymentStatuses: { 900: [deploymentStatus()], 800: [deploymentStatus({ id: 8000, createdAt: "2026-10-05T10:01:00Z" })] },
+    ancestry: [MERGE + "..." + HEAD, MERGE_2 + "..." + HEAD, RECEIPT_SHA + "..." + HEAD, OLD_RECEIPT_SHA + "..." + HEAD,
+      MERGE + "..." + RECEIPT_SHA, MERGE_2 + "..." + OLD_RECEIPT_SHA],
+  });
+  const receipt = await receiptRun(client);
+  assert.deepEqual(receipt.results.map((result) => result.decision.code), ["closed-completed", "closed-completed", "closed-completed"]);
+  assert.deepEqual(receipt.results[0].decision.evidence.pullRequests.map((entry) => entry.receipt.deploymentId), [900, 800]);
+  for (const id of [900, 800]) {
+    assert.equal(client.log.filter((entry) => entry.includes("/deployments/" + id + "/statuses")).length, 1, "statuses of " + id + " read once");
+  }
+  assert.equal(client.log.filter((entry) => entry.endsWith("/compare/" + MERGE + "..." + RECEIPT_SHA)).length, 1, "compare cached");
+  assert.deepEqual(receipt.productionEvidence.checked.map((row) => row.deploymentId), [900, 800]);
+
+  // when the newest receipt contains everything, older receipts are never read
+  const newestOnly = receiptClient({
+    deployments: [deployment(), older],
+    deploymentStatuses: { 900: [deploymentStatus()], 800: [deploymentStatus({ id: 8000 })] },
+  });
+  await receiptRun(newestOnly);
+  assert.ok(!newestOnly.log.some((entry) => entry.includes("/deployments/800/statuses")));
+});
+
+test("deployment-receipt: receipt validity (environment, creator, newest status success, status creator, SHA on the branch)", async () => {
+  const head = HEAD;
+  const onBranch = async (base, target) => base === RECEIPT_SHA && target === head;
+  const check = (deploymentRecord, statuses, containsCommit = onBranch) => validateProductionReceipt(deploymentRecord, {
+    environment: "Production", creator: "vercel[bot]", integrationHeadSha: head,
+    readStatuses: async () => { if (statuses instanceof Error) throw statuses; return statuses; },
+    containsCommit,
+  });
+  const cases = [
+    [deployment({ environment: "Preview" }), [deploymentStatus()], "environment-mismatch"],
+    [deployment({ environment: "production" }), [deploymentStatus()], "environment-mismatch"],
+    [deployment({ creator: "github-actions[bot]" }), [deploymentStatus()], "creator-mismatch"],
+    [deployment({ sha: "abc" }), [deploymentStatus()], "sha-unreadable"],
+    [{ ...deployment(), id: "900" }, [deploymentStatus()], "deployment-id-unreadable"],
+    [deployment(), [], "no-status"],
+    [deployment(), [deploymentStatus({ id: 1, state: "success", createdAt: "2026-10-08T10:00:00Z" }),
+      deploymentStatus({ id: 2, state: "inactive", createdAt: "2026-10-09T10:00:00Z" })], "newest-status-inactive"],
+    [deployment(), [deploymentStatus({ state: "in_progress" })], "newest-status-in_progress"],
+    [deployment(), [deploymentStatus({ state: "failure" })], "newest-status-failure"],
+    [deployment(), [deploymentStatus({ creator: "syllik" })], "status-creator-mismatch"],
+    [deployment(), [deploymentStatus({ environment: "Preview" })], "status-environment-mismatch"],
+    [deployment(), new Error("GET /repos/x/deployments/900/statuses -> 404: Not Found"), "deployment-not-found"],
+    [deployment({ sha: OLD_RECEIPT_SHA }), [deploymentStatus()], "not-on-integration-branch"],
+  ];
+  for (const [record, statuses, reason] of cases) {
+    const verdict = await check(record, statuses);
+    assert.equal(verdict.valid, false, reason);
+    assert.equal(verdict.reason, reason);
+  }
+  const notFound = await check(deployment(), [deploymentStatus()], async () => { throw new Error("GET /compare -> 404: No commit found"); });
+  assert.equal(notFound.reason, "sha-not-found");
+  // the newest status wins even when an older success is listed first; equal timestamps fall back to the id
+  const newest = await check(deployment(), [
+    deploymentStatus({ id: 5, state: "failure", createdAt: "2026-10-08T09:00:00Z" }),
+    deploymentStatus({ id: 7, state: "success", createdAt: "2026-10-08T10:00:00Z" }),
+    deploymentStatus({ id: 6, state: "pending", createdAt: "2026-10-08T10:00:00Z" }),
+  ]);
+  assert.equal(newest.valid, true);
+  assert.equal(newest.receipt.statusId, 7);
+  // a full statuses page cannot prove the newest status: invalid, never read further or assumed
+  const fullPage = Array.from({ length: RECEIPT_STATUS_PAGE_SIZE }, (_, index) => deploymentStatus({ id: index + 1 }));
+  assert.equal((await check(deployment(), fullPage)).reason, "statuses-truncated");
+  assert.equal((await check(deployment(), fullPage.slice(1))).valid, true, "one below the page size is complete");
+  // other read errors are not a verdict: they propagate so the Issue fails closed
+  await assert.rejects(() => check(deployment(), new Error("GET statuses -> 502: Bad Gateway")), /502/u);
+  await assert.rejects(() => check(deployment(), [deploymentStatus()], async () => { throw new Error("compare -> 500"); }), /500/u);
+  await assert.rejects(() => check(deployment(), { not: "a list" }), /not a list/u);
+});
+
+test("deployment-receipt: read errors fail closed (run blocked before any write, or the one Issue left open)", async () => {
+  const listError = receiptClient({ deploymentsError: "GET deployments -> 500: boom" });
+  await assert.rejects(() => receiptRun(listError),
+    (error) => error instanceof CompletionBlocked && error.code === "PRODUCTION_EVIDENCE_UNREADABLE");
+  assert.deepEqual(mutations(listError), []);
+  assert.ok(!listError.log.some((entry) => entry.startsWith("query FrontendCompletionCandidates")), "nothing evaluated");
+
+  const notList = receiptClient({ deploymentPages: [{ message: "weird" }] });
+  await assert.rejects(() => receiptRun(notList), (error) => error.code === "PRODUCTION_EVIDENCE_UNREADABLE");
+
+  const statusError = receiptClient({ deploymentStatuses: { 900: new Error("GET statuses -> 502: Bad Gateway") } });
+  const receipt = await receiptRun(statusError);
+  assert.equal(receipt.results[0].decision.code, "production-evidence-unreadable");
+  assert.match(receipt.results[0].decision.detail, /502/u);
+  assert.deepEqual(mutations(statusError), []);
+  assert.match(receipt.productionEvidence.checked[0].reason, /^unreadable: .*502/u);
+
+  const compareError = receiptClient({ compareErrors: { [MERGE + "..." + RECEIPT_SHA]: "compare -> 500: boom" } });
+  const [compareResult] = (await receiptRun(compareError)).results;
+  assert.equal(compareResult.decision.code, "production-evidence-unreadable");
+  assert.deepEqual(mutations(compareError), []);
+
+  // an unreadable error is not awaiting-production: the writer never runs for it
+  const project = receiptClient({ deploymentStatuses: { 900: new Error("GET statuses -> 502") } });
+  const withWriter = await runCompletion(project, { repository: FE, registry: await receiptRegistry(), awaitingRelease: true });
+  assert.equal(withWriter.results[0].decision.code, "production-evidence-unreadable");
+  assert.deepEqual(withWriter.awaitingRelease, { enabled: true, updated: [], skipped: 0, failed: [] });
+  assert.equal(project.state.ITEM_1, "Todo");
+});
+
+test("deployment-receipt: Deployments are read with bounded pagination, newest first", async () => {
+  const page = (ids) => ids.map((id) => deployment({ id, createdAt: new Date(Date.UTC(2026, 9, 1, 0, id)).toISOString() }));
+  const client = { log: [], request: async (path) => {
+    client.log.push(path);
+    const pageNumber = Number(/page=(\d+)$/u.exec(path)[1]);
+    return [page([1, 2]), page([3, 4]), page([5, 6])][pageNumber - 1];
+  } };
+  const full = await readProductionDeployments(client, FE, { environment: "Production", pageSize: 2, maxPages: 2 });
+  assert.equal(full.read, 4);
+  assert.equal(full.truncated, true, "the window is full, older records exist");
+  assert.deepEqual(full.deployments.map((entry) => entry.id), [4, 3, 2, 1]);
+  assert.equal(client.log.length, 2, "never more than maxPages requests");
+  assert.match(client.log[0], /\/repos\/ChipIn-one\/chipin-frontend\/deployments\?environment=Production&per_page=2&page=1$/u);
+
+  const short = await readProductionDeployments({ request: async (path) => (path.endsWith("page=1") ? page([1]) : assert.fail("no page 2")) },
+    FE, { environment: "Production", pageSize: 2, maxPages: 3 });
+  assert.deepEqual([short.read, short.truncated], [1, false]);
+  assert.equal(RECEIPT_PAGE_SIZE * RECEIPT_MAX_PAGES, 100);
+  await assert.rejects(() => readProductionDeployments(client, FE, {}), /environment is required/u);
+});
+
+test("deployment-receipt: the shared integration-merge gates run first and are unchanged", async () => {
+  let receiptReads = 0;
+  const findReceipt = async () => { receiptReads += 1; return null; };
+  const receiptContext = (overrides = {}) => context({ repository: FE, findReceipt, ...overrides });
+  const pr = (overrides = {}) => linkedPr({ repository: FE, headRepository: FE, ...overrides });
+  const cases = [
+    [issue({ state: "CLOSED", linkedPullRequests: [pr()] }), "already-closed"],
+    [issue({ linkedPullRequests: [pr()], blockedBy: [{ repository: FE, number: 9, state: "open" }] }), "blocked-by-open-issue"],
+    [issue({ linkedPullRequests: [pr()], subIssues: [{ repository: FE, number: 9, state: "open", stateReason: null }] }), "required-sub-issue-incomplete"],
+    [issue({ linkedPullRequests: [pr()], linkedBranchCount: 1 }), "development-branch-pending"],
+    [issue({ linkedPullRequests: [], linkedPullRequestTotalCount: 0 }), "missing-development"],
+    [issue({ linkedPullRequests: [pr()], linkedPullRequestTotalCount: 2 }), "ambiguous-development"],
+    [issue({ linkedPullRequests: [pr({ headRepository: "evil/fork" })] }), "ambiguous-development"],
+    [issue({ linkedPullRequests: [pr({ baseRefName: "dev" })] }), "ambiguous-development"],
+    [issue({ linkedPullRequests: [pr({ mergedAt: null, mergeCommitSha: null })] }), "implementation-not-merged"],
+    [issue({ linkedPullRequests: [pr()], scopeHistory: { readable: true, closedAt: ["2026-10-01T10:00:02Z"], reopenedAt: ["2026-10-04T10:00:00Z"], renamedAt: [], bodyRevisions: [] } }),
+      "scope-changed-after-implementation"],
+  ];
+  for (const [candidate, code] of cases) {
+    const decision = await evaluateIssueForDeploymentReceiptCompletion(candidate, receiptContext());
+    assert.equal(decision.code, code);
+    assert.equal(decision.evidence, undefined, code);
+  }
+  const diverged = await evaluateIssueForDeploymentReceiptCompletion(issue({ linkedPullRequests: [pr()] }), receiptContext({ containsCommit: contains(false) }));
+  assert.equal(diverged.code, "integration-history-diverged");
+  assert.equal(receiptReads, 0, "no receipt is consulted before every shared gate passed");
+  await assert.rejects(() => evaluateIssueForDeploymentReceiptCompletion(issue(), context({ repository: FE })), /findReceipt/u);
+});
+
+test("deployment-receipt: stale snapshot and Status are never inputs of the close", async () => {
+  const stale = receiptClient({ issueUpdatedAt: "2026-10-07T10:00:01Z" });
+  const [staleResult] = (await receiptRun(stale)).results;
+  assert.equal(staleResult.decision.code, "stale-snapshot");
+  assert.deepEqual(mutations(stale), []);
+
+  // Backlog (or any Status) does not block the close; the open + Done repair stays the only Status write besides the writer
+  const backlog = receiptClient({ deploymentStatuses: { 900: [deploymentStatus()] } });
+  backlog.state.ITEM_1 = "Backlog";
+  const receipt = await runCompletion(backlog, { repository: FE, registry: await receiptRegistry(), awaitingRelease: true });
+  assert.equal(receipt.results[0].decision.code, "closed-completed");
+  assert.equal(backlog.state.ITEM_1, "Backlog");
+  assert.ok(!backlog.log.includes("mutation SetCompletionAwaitingRelease"));
+
+  const closed = receiptClient({ issueState: "closed" });
+  const [closedResult] = (await receiptRun(closed)).results;
+  assert.equal(closedResult.decision.code, "already-closed");
+  assert.deepEqual(mutations(closed), [], "never reopens, never patches a closed Issue");
+});
+
+test("deployment-receipt: awaiting-production feeds the Awaiting release writer (Todo / In Progress only)", async () => {
+  for (const from of ["Todo", "In Progress"]) {
+    const client = receiptClient({ deployments: [], statuses: { ITEM_1: from } });
+    const receipt = await runCompletion(client, { repository: FE, registry: await receiptRegistry(), awaitingRelease: true });
+    assert.equal(receipt.results[0].decision.code, "awaiting-production");
+    assert.equal(client.state.ITEM_1, AWAITING_RELEASE_STATUS, from);
+    assert.deepEqual(receipt.awaitingRelease, { enabled: true, updated: [1], skipped: 0, failed: [] });
+    assert.match(receipt.results[0].decision.detail, new RegExp("Awaiting release: awaiting-release-set\\. Project Status " + from + " -> Awaiting release\\.", "u"));
+    assert.deepEqual(mutations(client), ["mutation SetCompletionAwaitingRelease"]);
+    assert.deepEqual(receipt.results[0].decision.evidence.pullRequests[0].receipt, null, "evidence survives the writer");
+  }
+  for (const status of ["Backlog", "Awaiting release"]) {
+    const client = receiptClient({ deployments: [], statuses: { ITEM_1: status } });
+    const receipt = await runCompletion(client, { repository: FE, registry: await receiptRegistry(), awaitingRelease: true });
+    assert.deepEqual(mutations(client), [], status);
+    assert.equal(client.state.ITEM_1, status);
+    assert.equal(receipt.awaitingRelease.updated.length, 0, status);
+  }
+  // an open Issue still showing derived Done: the existing repair (Done -> In Progress) runs first, then the writer
+  const done = receiptClient({ deployments: [], statuses: { ITEM_1: "Done" } });
+  await runCompletion(done, { repository: FE, registry: await receiptRegistry(), awaitingRelease: true });
+  assert.deepEqual(mutations(done), ["mutation SetFrontendCompletionStatus", "mutation SetCompletionAwaitingRelease"]);
+  assert.equal(done.state.ITEM_1, AWAITING_RELEASE_STATUS);
+  // writer off by default; a repository-local run cannot turn it on
+  const off = receiptClient({ deployments: [], statuses: { ITEM_1: "Todo" } });
+  const offReceipt = await runCompletion(off, { repository: FE, registry: await receiptRegistry() });
+  assert.equal(offReceipt.awaitingRelease.enabled, false);
+  assert.equal(off.state.ITEM_1, "Todo");
+  await assert.rejects(() => receiptRun(receiptClient({ deployments: [] }), { awaitingRelease: true }),
+    (error) => error.code === "AWAITING_RELEASE_NEEDS_PROJECT");
+});
+
+test("deployment-receipt: the Awaiting release verifier re-asserts the master layout", async () => {
+  const verify = deploymentReceiptAwaitingVerifier("master");
+  const pr = (overrides = {}) => linkedPr({ repository: FE, headRepository: FE, ...overrides });
+  assert.deepEqual(await verify(issue({ linkedPullRequests: [pr()] }), { repository: FE }), { eligible: true });
+  for (const [candidate, code] of [
+    [issue({ state: "CLOSED", linkedPullRequests: [pr()] }), "already-closed"],
+    [issue({ linkedPullRequests: [pr()], linkedPullRequestTotalCount: 2 }), "ambiguous-development"],
+    [issue({ linkedPullRequests: [], linkedPullRequestTotalCount: 0 }), "ambiguous-development"],
+    [issue({ linkedPullRequests: [pr()], linkedBranchCount: 1 }), "development-branch-pending"],
+    [issue({ linkedPullRequests: [pr({ headRepository: "evil/fork" })] }), "ambiguous-development"],
+    [issue({ linkedPullRequests: [pr({ mergedAt: null })] }), "implementation-not-merged"],
+    [issue({ linkedPullRequests: [pr({ baseRefName: "dev" })] }), "ambiguous-development"],
+  ]) {
+    const verdict = await verify(candidate, { repository: FE });
+    assert.equal(verdict.eligible, false, code);
+    assert.equal(verdict.code, code);
+  }
+});
+
+test("deployment-receipt: a record without productionEvidence is refused before any read", async () => {
+  const registry = await receiptRegistry();
+  const forged = {
+    ...registry,
+    repositories: registry.repositories.map((profile) => {
+      if (profile.repository !== FE) return profile;
+      const { productionEvidence, ...rest } = profile;
+      return rest;
+    }),
+  };
+  const client = receiptClient();
+  await assert.rejects(() => runCompletion(client, { repository: FE, registry: forged, reconcileProjectStatus: false }),
+    (error) => error instanceof CompletionBlocked && error.code === "PRODUCTION_EVIDENCE_UNDECLARED");
+  assert.deepEqual(client.log, []);
+  assert.equal(createReceiptResolver.length, 1);
+  assert.throws(() => createReceiptResolver({ deployments: [], readStatuses: null, containsCommit: null }), /callbacks are required/u);
 });

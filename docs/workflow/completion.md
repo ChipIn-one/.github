@@ -8,9 +8,9 @@ When automation closes a ChipIn Issue as completed. Owner decisions of the compl
 2. **One engine, one strategy per repository.** [`automation/completion.mjs`](../../automation/completion.mjs) reads the registry record and runs only when `capabilities.completion: automatic`; the record's `completion` picks the strategy.
 3. **Evidence is the native Development link plus merged PRs.** The engine reads GitHub's native `closedByPullRequestsReferences` (Development links), which GitHub also creates from closing keywords in a PR body; the engine never parses text itself, and plain references, branch names and Milestones are never evidence. Every linked PR must be a same-repository PR (`headRepository` and base repository are the Issue's repository) with readable merge evidence. Project convention: PRs carry a `Task identity:` line and no closing keywords, so the link is created by the development-link reconciler, not by keyword inference.
 4. **Fail closed.** Open blockers, incomplete or invisible sub-issues, ambiguous links, unmerged PRs, a scope change after the last merge or unreadable history leave the Issue open with a diagnostic code. Nothing is guessed.
-5. **One mutation.** The engine only sets `state=closed`, `state_reason=completed`, after re-reading the Issue (`stale-snapshot` if it changed). It never reopens an Issue and never writes Project Status, except the existing repair of an open Issue still showing derived `Done` → `In Progress` and, for `production-merge`, `Todo`/`In Progress` → `Awaiting release` ([below](#awaiting-release-frontend)), both only when Project reconciliation is on.
-6. **Registry rule.** `capabilities.completion: automatic` is valid only with `completion: production-merge` or `integration-merge` (`AUTOMATIC_COMPLETION_STRATEGIES` in [`registry.mjs`](../../automation/registry.mjs)); anything else fails validation with `REGISTRY_VALUE`.
-7. **Status is not an input.** The engine never reads Project Status for its close decision; `Todo`, `In Progress`, `Awaiting release` and `Done` neither allow nor block a close. For `production-merge` it writes `Awaiting release` after the decision ([#180](https://github.com/ChipIn-one/.github/issues/180), [below](#awaiting-release-frontend)); `integration-merge` never writes it, because the merge itself is terminal.
+5. **One mutation.** The engine only sets `state=closed`, `state_reason=completed`, after re-reading the Issue (`stale-snapshot` if it changed). It never reopens an Issue and never writes Project Status, except the existing repair of an open Issue still showing derived `Done` → `In Progress` and, for `production-merge` and `deployment-receipt`, `Todo`/`In Progress` → `Awaiting release` ([below](#awaiting-release-frontend)), both only when Project reconciliation is on.
+6. **Registry rule.** `capabilities.completion: automatic` is valid only with `completion: production-merge`, `integration-merge` or `deployment-receipt` (`AUTOMATIC_COMPLETION_STRATEGIES` in [`registry.mjs`](../../automation/registry.mjs)); anything else fails validation with `REGISTRY_VALUE`. A `deployment-receipt` record must declare `productionEvidence: { environment, creator }` and `deploymentProfile: production`; no other strategy may carry `productionEvidence`.
+7. **Status is not an input.** The engine never reads Project Status for its close decision; `Todo`, `In Progress`, `Awaiting release` and `Done` neither allow nor block a close. For `production-merge` and `deployment-receipt` it writes `Awaiting release` after the decision ([#180](https://github.com/ChipIn-one/.github/issues/180), [below](#awaiting-release-frontend)); `integration-merge` never writes it, because the merge itself is terminal.
 8. **Schema wording.** [`github-issue-schema.md`](../../github-issue-schema.md) says "Completion triggers per repository are defined by the registry `completion` strategy" and points here (owner-approved in #180).
 
 ## Native auto-close and the engine
@@ -27,7 +27,7 @@ In `.github` and `chipin-knowledge-base` the integration branch is the default b
 
 | Repository | Strategy | Where it runs | What closes the Issue |
 | --- | --- | --- | --- |
-| `chipin-frontend` | `production-merge` | Repository-local `frontend-production-completion-action` caller (push to `main`, repository token, Project repair off) and the privileged org fallback `.github/workflows/frontend-production-completion.yml` (`completion.mjs --repository ChipIn-one/chipin-frontend`, push to `master` and schedule every 15 min, org write PAT, Project repair and `Awaiting release` on) | Every linked PR has production evidence: merged into `dev` and contained in a merged `dev -> main` release PR, or the canonical `dev -> main` PR itself. |
+| `chipin-frontend` | `production-merge` | Repository-local `frontend-production-completion-action` caller (push to `main`, repository token, Project repair off) and the privileged org fallback `.github/workflows/frontend-production-completion.yml` (`completion.mjs --repository ChipIn-one/chipin-frontend`, push to `master` and schedule every 15 min, org write PAT, Project repair and `Awaiting release` on) | Every linked PR has production evidence: merged into `dev` and contained in a merged `dev -> main` release PR, or the canonical `dev -> main` PR itself. Switches to `deployment-receipt` on `master` in the cutover window of [chipin-frontend#497](https://github.com/ChipIn-one/chipin-frontend/issues/497) ([below](#deployment-receipt)). |
 | `.github` | `integration-merge` | `.github/workflows/integration-completion.yml` (push to `master`, schedule every 30 min, org write PAT, Project repair on); PRs get their Development link from `.github/workflows/native-development-link.yml` (`Task identity:` line; pinned to the current org tag SHA) | Every linked PR merged into `master` and its merge commit is still in the `master` head. Today GitHub's native auto-close closes first (see above). |
 | `chipin-knowledge-base` | `integration-merge` | Caller from `templates/caller-completion-integration.yml` (push to `master`, repository token), once adopted | Same as `.github`. Today GitHub's native auto-close closes KB Issues on merge; the engine takes over once the setting is disabled and the caller is adopted. |
 | `chipin-backend` | `manual` | Nothing until [#156](https://github.com/ChipIn-one/.github/issues/156) | A human closes the Issue. |
@@ -62,7 +62,42 @@ Scope freshness is stricter than #178. There is no later release: a merge into t
 
 ### `deployment-receipt`
 
-Declared in the registry vocabulary, not implemented. The registry rejects `capabilities.completion: automatic` with it; the engine stops with `STRATEGY_NOT_IMPLEMENTED`.
+Production evidence is a record the delivery platform writes itself, not a release PR ([#212](https://github.com/ChipIn-one/.github/issues/212); planned for the frontend after its cutover to canonical `master`, [chipin-frontend#497](https://github.com/ChipIn-one/chipin-frontend/issues/497)). The frontend registry record is **not** switched yet; the switch is a separate registry PR in the cutover window.
+
+**Evidence.** A *valid production receipt* is a GitHub Deployment of the repository with:
+
+- `environment` equal to `productionEvidence.environment` and `creator.login` equal to `productionEvidence.creator` (registry, e.g. `Production` / `vercel[bot]`; nothing is hard-coded);
+- a full 40-character `sha`;
+- a newest status (by `created_at`, then id) with `state: success`, written by the same creator and, when the status names an environment, for the same environment. A later `inactive`, `failure`, `error`, `pending` or `in_progress` status makes the receipt invalid;
+- a `sha` on the integration branch: an ancestor of or equal to the current `branches.integration` head. The engine asks `GET /compare/{receiptSha}...{head}` and requires `status: ahead` with `merge_base_commit` = the receipt SHA (equal SHAs need no call). In GitHub's `base...head` compare, `ahead` means the head has commits the base lacks and none the other way round, i.e. the base is an ancestor of the head; `behind` would mean the opposite.
+
+**Close.** Every `integration-merge` gate runs first, unchanged (the same evaluator: native Development link, complete linkage, same-repository PRs, no linked branches, no open blockers, no incomplete or invisible sub-issues, merged into `branches.integration` and still on its head, scope freshness with every reopen after the last merge counted, stale-snapshot check before the close, never reopen). Then **every** linked PR's merge commit must be contained in **some** valid receipt: `GET /compare/{mergeCommit}...{receiptSha}` is `ahead` (or the SHAs are equal). The decision code is `production-receipt-complete`; the summary shows `closed-completed`.
+
+**Awaiting release.** All gates pass but at least one merge commit is in no valid receipt (or there is no valid receipt at all) → `awaiting-production`, never a close. With the writer on, the same writer as for the frontend moves `Todo`/`In Progress` → `Awaiting release` (same membership, stale and read-back rules; `Done`, `Backlog`, other values untouched; an open Issue showing derived `Done` is first repaired to `In Progress`). The re-check before the write (`deploymentReceiptAwaitingVerifier`) re-asserts the layout: open, complete same-repository linkage, every PR merged into `branches.integration`, no linked branches; the evaluator itself already checked every linked PR and the scope rule.
+
+**Evidence in the output.** Each close and `awaiting-production` decision carries `decision.evidence.pullRequests[]`: `number`, `mergeCommitSha`, and `receipt` (`deploymentId`, `sha`, `environment`, `creator`, `createdAt`, `statusId`, `statusState`, `statusCreatedAt`) or `null`; the close diagnostic names the deployment id, SHA and status id/time. The run receipt adds `productionEvidence`: `environment`, `creator`, `deploymentsRead`, `matchingDeployments`, `truncated`, and `checked[]` (every Deployment validated in this run with `valid` and `reason`, e.g. `creator-mismatch`, `newest-status-inactive`, `not-on-integration-branch`); the summary shows one `Production evidence:` line.
+
+**Reads, bounds and failure.**
+
+- Deployments: `GET /deployments?environment=<environment>` newest first, at most 2 pages of 50 (the newest 100). A full window is reported as `truncated`; older Deployments are not evidence (fewer receipts can only keep an Issue open). An unreadable list or a page that is not a list stops the run before any evaluation or write (`PRODUCTION_EVIDENCE_UNREADABLE`, exit 1).
+- Receipts are validated lazily, newest first, each at most once per run (one status read per Deployment, one page of 100 statuses; a full page is `statuses-truncated`, invalid, because the newest status cannot be proven); compare results are cached across Issues. When the newest receipt contains everything, older ones are never read.
+- A 404 (Deployment or commit gone) makes that receipt invalid. Any other status or compare error while evaluating an Issue leaves that Issue open with `production-evidence-unreadable` (no close, no `Awaiting release`); the sweep continues.
+- A record without `productionEvidence` (a registry that bypassed validation) stops the run with `PRODUCTION_EVIDENCE_UNDECLARED` before any read.
+
+**Native auto-close.** After the cutover the integration branch is the default branch, so GitHub's "Auto-close issues with merged linked pull requests" would close Issues at merge, before production, without any gate. It must be disabled in the repository before the registry switch (same owner action as for `integration-merge`, [above](#native-auto-close-and-the-engine)). Because a reopen after the last merge counts as a scope change, an Issue closed early by GitHub and reopened by a human stays open until a fresh linked PR merges or a human closes it.
+
+**Triggers.** The repository caller ([`templates/caller-completion-deployment-receipt.yml`](../../templates/caller-completion-deployment-receipt.yml)) runs the composite action on:
+
+- `deployment_status`, only when `github.event.deployment_status.state == 'success'` and `github.event.deployment.environment` is the registry environment (filtered in the job `if:`; the engine validates the receipt again);
+- `push` to the integration branch, so `Awaiting release` appears right after the merge;
+- `workflow_dispatch`, a manual rerun (the engine takes no input);
+- the org sweep as the fallback for missed events: [`.github/workflows/frontend-production-completion.yml`](../../.github/workflows/frontend-production-completion.yml) runs `completion.mjs --repository ChipIn-one/chipin-frontend` every 15 minutes with the org write PAT and `CHIPIN_COMPLETION_AWAITING_RELEASE=1`; it follows the registry strategy and needs no change at the switch.
+
+With `awaiting-release: "true"` the caller's `token` is the org PAT `CHIPIN_ISSUE_WRITE_TOKEN` (made available to the repository by the owner); for that repository it needs Deployments read, Issues write and Project #5 read/write, and the workflow's own `permissions` stay `contents: read`. The `GITHUB_TOKEN` scopes (`deployments: read`, `issues: write`, `pull-requests: read`) matter only for the variant with `token: github.token` and `awaiting-release: "false"`: the close still works, `Awaiting release` then comes from the org sweep. A `deployment_status` run uses the workflow file at the deployment's SHA, so receipts for commits made before the caller existed start no run; the org sweep covers them. Conformance checks that the `completion-action` caller has the `deployment_status` and `push` triggers (`COMPLETION_TRIGGER_MISSING`, [conformance.md](conformance.md)).
+
+**Token precondition for the frontend switch.** The PAT used by the org sweep (`.github/workflows/frontend-production-completion.yml`) and by the frontend caller must have Deployments: read on `chipin-frontend`; otherwise every run stops with `PRODUCTION_EVIDENCE_UNREADABLE` (nothing is closed, no `Awaiting release`). Verify it before the registry PR is merged.
+
+**Open verification before the frontend switch** (cutover plan step 7, [chipin-frontend#497](https://github.com/ChipIn-one/chipin-frontend/issues/497#issuecomment-6339879917)). With production-domain auto-assignment off, Vercel must write the `Production` / `success` Deployment status at **Promote** of a chosen deployment, not already at the build of an unassigned deployment. Only the first is valid evidence. The owner checks this on the first promotion; until it is confirmed the frontend profile is not switched (if Vercel writes it at build time, the engine stays off for the frontend, `Awaiting release` only, until a corrected evidence source is agreed).
 
 ### `manual`
 
@@ -70,7 +105,7 @@ No automation. With `capabilities.completion: manual` the engine refuses to run 
 
 ## When the engine leaves an Issue open
 
-`integration-complete` is the internal decision code; the summary and receipt show `closed-completed` once the close succeeds.
+`integration-complete` and `production-receipt-complete` are the internal decision codes; the summary and receipt show `closed-completed` once the close succeeds.
 
 | Code | Meaning | What a human does |
 | --- | --- | --- |
@@ -83,7 +118,8 @@ No automation. With `capabilities.completion: manual` the engine refuses to run 
 | `missing-development` | No native Development-linked PR. | Link the PR in Development (`Task identity:` line + development-link caller, or by hand in the PR sidebar). |
 | `ambiguous-development` | Incomplete pagination, duplicate, cross-repository or fork PR, unsupported base. | Fix the links; cross-repository work is closed by hand. |
 | `implementation-not-merged` | A linked PR is not merged or its merge commit is unreadable. | Merge or unlink the PR. |
-| `awaiting-production` | FE only: merged to `dev`, not yet in a merged release PR. With the writer on, Project Status moves to `Awaiting release` (outcome appended to the diagnostic). | Merge the `dev -> main` release PR. |
+| `awaiting-production` | `production-merge`: merged to `dev`, not yet in a merged release PR. `deployment-receipt`: merged into the integration branch, not yet in a valid production receipt (or none exists). With the writer on, Project Status moves to `Awaiting release` (outcome appended to the diagnostic). | Merge the `dev -> main` release PR / promote a deployment that contains the merge. |
+| `production-evidence-unreadable` | `deployment-receipt` only: a Deployment status or compare read failed for this Issue (not a 404); the Issue is skipped, the sweep continues, no `Awaiting release`. | Nothing; the next run retries. |
 | `ambiguous-production` | FE only: release evidence cannot be resolved unambiguously. | Inspect the release PR; close by hand if justified. |
 | `integration-history-diverged` | `integration-merge` only: merge commit not in the branch head. | Decide by hand whether the work still ships. |
 | `integration-evidence-unreadable` | `integration-merge` only: the compare or a read failed for this Issue; the Issue is skipped, the sweep continues. | Nothing; the next run retries. |
@@ -100,9 +136,9 @@ CHIPIN_COMPLETION_WRITE=1 CHIPIN_CANONICAL_WRITE_TOKEN=<token> [CHIPIN_COMPLETIO
 
 - `CHIPIN_COMPLETION_WRITE=1` and a token are mandatory; `--repository` falls back to `GITHUB_REPOSITORY`.
 - `CHIPIN_COMPLETION_PROJECT_RECONCILE=0` disables Project #5 reads and writes. Repository-local runs always set it, because a repository `GITHUB_TOKEN` cannot read org Projects; the org-PAT runs (frontend fallback and `.github`) keep the `open + Done` repair.
-- `CHIPIN_COMPLETION_AWAITING_RELEASE=1` turns on the `Awaiting release` writer; it has an effect only for `production-merge` with Project reconciliation on (the frontend org fallback sets it; `.github` and the composite action do not).
-- Receipt (`--output`): `contract: chipin-completion/v1`, `repository`, `strategy`, `branch`, `projectNumber`, `projectReconciliation`, `awaitingRelease` (`enabled`, `updated`, `skipped`), `results[]` (`issue`, `decision.action` / `code` / `detail`). The Markdown summary goes to stdout and to the step summary.
-- A blocked run (`COMPLETION_NOT_AUTOMATIC`, `STRATEGY_NOT_IMPLEMENTED`, `STRATEGY_BRANCH_MISMATCH`, unreadable branch head, API failure) exits 1. Issues left open are a normal result.
+- `CHIPIN_COMPLETION_AWAITING_RELEASE=1` turns on the `Awaiting release` writer; it has an effect only for `production-merge` and `deployment-receipt` with Project reconciliation on (the frontend org fallback sets it; `.github` does not; the composite action only with its input `awaiting-release: "true"`).
+- Receipt (`--output`): `contract: chipin-completion/v1`, `repository`, `strategy`, `branch`, `projectNumber`, `projectReconciliation`, `awaitingRelease` (`enabled`, `updated`, `skipped`), `deployment-receipt` only: `productionEvidence` ([above](#deployment-receipt)), `results[]` (`issue`, `decision.action` / `code` / `detail`, `deployment-receipt` also `decision.evidence`). The Markdown summary goes to stdout and to the step summary.
+- A blocked run (`COMPLETION_NOT_AUTOMATIC`, `STRATEGY_NOT_IMPLEMENTED`, `STRATEGY_BRANCH_MISMATCH`, `PRODUCTION_EVIDENCE_UNDECLARED`, `PRODUCTION_EVIDENCE_UNREADABLE`, unreadable branch head, API failure) exits 1. Issues left open are a normal result.
 
 ### Token and visibility
 
@@ -110,10 +146,11 @@ The engine sees only what its token sees. Hidden sub-issues are caught by the `s
 
 Paths:
 
-- Composite action [`automation/completion-action`](../../automation/completion-action/action.yml): input `token` (repository token with `issues: write`), Project repair off.
+- Composite action [`automation/completion-action`](../../automation/completion-action/action.yml): input `token` (repository token with `issues: write`), Project repair off. Optional input `awaiting-release` (`"false"` by default; `"true"` turns on Project reconciliation and the `Awaiting release` writer and then needs an organization token that reads and writes Project #5; any other value fails the step).
 - Org workflow [`.github/workflows/integration-completion.yml`](../../.github/workflows/integration-completion.yml): `.github` itself, push to `master` and schedule, no `workflow_dispatch`. It passes the org write PAT `CHIPIN_ISSUE_WRITE_TOKEN` as `CHIPIN_CANONICAL_WRITE_TOKEN`, like the frontend fallback, so it sees private BE/KB blockers and sub-issues and keeps Project #5 reconciliation on; the workflow's own `permissions` are `contents: read` only.
 - Org workflow [`.github/workflows/frontend-production-completion.yml`](../../.github/workflows/frontend-production-completion.yml): the frontend fallback, push to `master` and schedule every 15 minutes, no `workflow_dispatch`, org write PAT as `CHIPIN_CANONICAL_WRITE_TOKEN`; runs `completion.mjs --repository ChipIn-one/chipin-frontend` with `CHIPIN_COMPLETION_AWAITING_RELEASE=1` and Project #5 reconciliation on.
 - Template [`templates/caller-completion-integration.yml`](../../templates/caller-completion-integration.yml): KB-like callers, the action pinned to an org tag SHA, repository token (`github.token`, limitation above). KB already has its development-link caller.
+- Template [`templates/caller-completion-deployment-receipt.yml`](../../templates/caller-completion-deployment-receipt.yml): `deployment-receipt` callers (`deployment_status` success in the registry environment, push to the integration branch, `workflow_dispatch`), org PAT and `awaiting-release: "true"`, workflow `permissions: contents: read` ([above](#deployment-receipt)).
 - [`development-link.mjs`](../../automation/development-link.mjs) accepts `meta` repositories since `v1.3.0`, so `Task identity: ChipIn-one/.github#N` parses; [`.github/workflows/native-development-link.yml`](../../.github/workflows/native-development-link.yml) is the `.github` caller (same shape as the frontend and knowledge-base callers, `workflow_dispatch` with the exact head SHA for a PR opened before the caller existed).
 
 ## Rollout
@@ -128,3 +165,5 @@ Paths:
 | Org pin bump to `v1.3.0` + `.github` development-link caller | [#179](https://github.com/ChipIn-one/.github/issues/179) follow-up PR |
 | Knowledge base adopts the completion caller | follow-up after a tag with #179 |
 | Backend completion decision | [#156](https://github.com/ChipIn-one/.github/issues/156) |
+| `deployment-receipt` strategy, registry `productionEvidence`, caller template, conformance trigger check | [#212](https://github.com/ChipIn-one/.github/issues/212) |
+| Frontend switch to `deployment-receipt` on `master` (registry PR in the cutover window, after the Promote check) | [chipin-frontend#497](https://github.com/ChipIn-one/chipin-frontend/issues/497) |

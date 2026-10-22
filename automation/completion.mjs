@@ -7,14 +7,19 @@
 //                        integration -> promotion whose head contains the merge commit is);
 //   integration-merge  — `.github` and the knowledge base: an Issue closes once every Development-linked
 //                        PR is merged into the integration branch and that merge commit is still reachable
-//                        from the branch head.
-// Both strategies share the fail-closed gates: native Development link as identity, complete pagination,
+//                        from the branch head;
+//   deployment-receipt — every integration-merge gate, plus (.github#212) every linked PR's merge commit is
+//                        contained in a valid production receipt: a GitHub Deployment of the registry
+//                        `productionEvidence` environment and creator whose newest status is `success` and whose
+//                        SHA is on the integration branch. Merged but not yet received -> `awaiting-production`.
+// All strategies share the fail-closed gates: native Development link as identity, complete pagination,
 // same-repository PRs only, no linked branches, no open blockers, no incomplete sub-issues, no scope change
 // after the last merge (timeline + body-revision history, .github#178), stale-snapshot check before the
 // only mutation (`state=closed`, `state_reason=completed`), never reopen, never set Project Status except
-// the existing repair of an open Issue that still shows derived `Done`, and, for production-merge with
-// `awaitingRelease` on (.github#180), `Todo`/`In Progress` -> `Awaiting release` for Issues whose decision is
-// `awaiting-production` and that pass evaluateAwaitingReleaseCandidate (setAwaitingReleaseStatus). Status is
+// the existing repair of an open Issue that still shows derived `Done`, and, for production-merge and
+// deployment-receipt with `awaitingRelease` on (.github#180, #212), `Todo`/`In Progress` -> `Awaiting release`
+// for Issues whose decision is `awaiting-production` and that pass the strategy's re-check
+// (evaluateAwaitingReleaseCandidate / deploymentReceiptAwaitingVerifier; setAwaitingReleaseStatus). Status is
 // never an input of the close decision.
 import fs from "node:fs";
 import process from "node:process";
@@ -305,8 +310,8 @@ export async function readProjectItemStatus(client, itemId) {
 }
 
 /**
- * Awaiting release writer (.github#180) for one open Issue whose production-merge decision is
- * `awaiting-production`: every linked PR merged into the integration branch, none yet in a merged release.
+ * Awaiting release writer (.github#180) for one open Issue whose production-merge or deployment-receipt decision
+ * is `awaiting-production`: every linked PR merged into the integration branch, not all of them released yet.
  * Moves Project #5 Status `Todo` / `In Progress` -> `Awaiting release` and reads it back. `Awaiting release`
  * is a no-op; `Done`, `Backlog`, any other value or no Status is left untouched. The Issue is re-read right
  * before the write and the write is abandoned when it is no longer open or changed since the snapshot.
@@ -472,12 +477,14 @@ export async function evaluateAwaitingReleaseCandidate(issue, { repository, read
  * candidate is eligible, and the Status coordinates are resolved before any write (a missing field or
  * option stops the run). A failure of one Issue's write is recorded (`awaiting-release-failed`) and the run
  * continues. Returns the results with the outcome appended to `decision.detail` and the receipt block
- * `{ enabled, updated, skipped, failed }`.
+ * `{ enabled, updated, skipped, failed }`. `verifyCandidate` defaults to the production-merge re-check
+ * (evaluateAwaitingReleaseCandidate); deployment-receipt passes deploymentReceiptAwaitingVerifier(integrationBranch).
  */
 export async function reconcileAwaitingRelease(client, results, {
   repository,
   projectConfig,
   readScopeHistory: readHistory = (issue) => readScopeHistory(client, repository, issue),
+  verifyCandidate = evaluateAwaitingReleaseCandidate,
 }) {
   if (!projectConfig) throw new Error("projectConfig is required for the Awaiting release writer");
   const summary = { enabled: true, updated: [], skipped: 0, failed: [] };
@@ -488,7 +495,7 @@ export async function reconcileAwaitingRelease(client, results, {
   const verdicts = new Map();
   for (const result of results) {
     if (result.decision?.code !== "awaiting-production") continue;
-    verdicts.set(result, await evaluateAwaitingReleaseCandidate(result.issue, { repository, readScopeHistory: readHistory }));
+    verdicts.set(result, await verifyCandidate(result.issue, { repository, readScopeHistory: readHistory }));
   }
 
   let project = null;
@@ -531,13 +538,18 @@ export async function reconcileAwaitingRelease(client, results, {
 }
 
 /**
- * integration-merge sweep over every open Issue of `profile.repository`.
+ * Shared sweep over every open Issue of `profile.repository` (integration-merge and deployment-receipt).
  * Mirrors runCompletionSweep of the frontend module: relationships are read before the decision and again
- * right before the close; the close is abandoned when the Issue changed since the snapshot.
+ * right before the close; the close is abandoned when the Issue changed since the snapshot. `evaluate`
+ * decides one candidate with `{ integrationHeadSha, containsCommit }`; an exception it throws leaves only that
+ * Issue open with `unreadableCode`.
  */
-export async function runIntegrationCompletionSweep(client, profile, {
+async function runOpenIssueSweep(client, profile, {
   reconcileProjectStatus = true,
   projectConfig,
+  evaluate,
+  unreadableCode,
+  unreadableDetail,
 } = {}) {
   const repository = profile.repository;
   const integrationBranch = profile.branches.integration;
@@ -591,20 +603,13 @@ export async function runIntegrationCompletionSweep(client, profile, {
 
     let decision;
     try {
-      decision = await evaluateIssueForIntegrationCompletion({ ...issue, ...relationships }, {
-        repository,
-        integrationBranch,
-        integrationHeadSha,
-        containsCommit,
-        readScopeHistory: (candidate) => readScopeHistory(client, repository, candidate),
-      });
+      decision = await evaluate({ ...issue, ...relationships }, { integrationHeadSha, containsCommit });
     } catch (error) {
       // one unreadable compare (a merge commit gone after a force-push) must not abort the sweep
       const detail = error instanceof Error ? error.message : String(error);
       results.push({
         issue,
-        decision: leaveOpen("integration-evidence-unreadable",
-          "Implementation evidence could not be read for this Issue; skipped until the next run: " + detail),
+        decision: leaveOpen(unreadableCode, unreadableDetail + detail),
       });
       continue;
     }
@@ -639,7 +644,15 @@ export async function runIntegrationCompletionSweep(client, profile, {
 
     const mutation = await closeIssueAsCompleted(client, issue, repository);
     if (mutation.mutated) {
-      results.push({ issue, decision: { action: "closed", code: mutation.code, detail: decision.detail + " " + mutation.detail } });
+      results.push({
+        issue,
+        decision: {
+          action: "closed",
+          code: mutation.code,
+          detail: decision.detail + " " + mutation.detail,
+          ...(decision.evidence ? { evidence: decision.evidence } : {}),
+        },
+      });
       continue;
     }
     if (mutation.code === "already-closed") {
@@ -654,6 +667,336 @@ export async function runIntegrationCompletionSweep(client, profile, {
     });
   }
   return results;
+}
+
+/**
+ * integration-merge sweep over every open Issue of `profile.repository` (runOpenIssueSweep with the
+ * integration-merge evaluator).
+ */
+export async function runIntegrationCompletionSweep(client, profile, {
+  reconcileProjectStatus = true,
+  projectConfig,
+} = {}) {
+  const repository = profile.repository;
+  const integrationBranch = profile.branches.integration;
+  return runOpenIssueSweep(client, profile, {
+    reconcileProjectStatus,
+    projectConfig,
+    unreadableCode: "integration-evidence-unreadable",
+    unreadableDetail: "Implementation evidence could not be read for this Issue; skipped until the next run: ",
+    evaluate: (candidate, { integrationHeadSha, containsCommit }) => evaluateIssueForIntegrationCompletion(candidate, {
+      repository,
+      integrationBranch,
+      integrationHeadSha,
+      containsCommit,
+      readScopeHistory: (scopeCandidate) => readScopeHistory(client, repository, scopeCandidate),
+    }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// deployment-receipt (.github#212)
+// ---------------------------------------------------------------------------
+
+// Bounded read of the newest production Deployments: at most RECEIPT_PAGE_SIZE * RECEIPT_MAX_PAGES records.
+// Older receipts beyond the window are not evidence (fewer receipts can only keep an Issue open).
+export const RECEIPT_PAGE_SIZE = 50;
+export const RECEIPT_MAX_PAGES = 2;
+// One page of statuses per Deployment; a full page may hide newer statuses, so such a receipt is invalid.
+export const RECEIPT_STATUS_PAGE_SIZE = 100;
+
+// GitHubClient errors read "<METHOD> <path> -> <status>: <body>"
+const isNotFound = (error) => /-> 404\b/u.test(error instanceof Error ? error.message : String(error));
+const newestFirst = (left, right) => (Date.parse(right.created_at ?? "") || 0) - (Date.parse(left.created_at ?? "") || 0)
+  || (Number(right.id) || 0) - (Number(left.id) || 0);
+
+/**
+ * Read the newest Deployments of `environment` (newest first, bounded pagination). Any read error or a page that
+ * is not a list stops the run (PRODUCTION_EVIDENCE_UNREADABLE) before anything is evaluated or written.
+ * Returns `{ deployments, read, truncated }`; `truncated` means the window was full, so older records may exist.
+ */
+export async function readProductionDeployments(client, repository, {
+  environment,
+  pageSize = RECEIPT_PAGE_SIZE,
+  maxPages = RECEIPT_MAX_PAGES,
+} = {}) {
+  if (typeof environment !== "string" || !environment) throw new Error("environment is required");
+  const { owner, repo } = splitRepository(repository);
+  const deployments = [];
+  let truncated = true;
+  for (let page = 1; page <= maxPages; page += 1) {
+    let batch;
+    try {
+      batch = await client.request("/repos/" + owner + "/" + repo + "/deployments?environment="
+        + encodeURIComponent(environment) + "&per_page=" + pageSize + "&page=" + page);
+    } catch (error) {
+      throw blocked("PRODUCTION_EVIDENCE_UNREADABLE", "Deployments of " + repository + " are unreadable: "
+        + (error instanceof Error ? error.message : String(error)));
+    }
+    if (!Array.isArray(batch)) {
+      throw blocked("PRODUCTION_EVIDENCE_UNREADABLE", "Deployments page " + page + " of " + repository + " is not a list");
+    }
+    deployments.push(...batch);
+    if (batch.length < pageSize) {
+      truncated = false;
+      break;
+    }
+  }
+  return { deployments: [...deployments].sort(newestFirst), read: deployments.length, truncated };
+}
+
+/**
+ * Validate one Deployment as a production receipt. Valid: `environment` and `creator.login` equal the registry
+ * `productionEvidence`, a full SHA, the newest status is `success` written by the same creator (and, when the
+ * status names an environment, the same one), and the SHA is an ancestor of or equal to the integration head
+ * (compare `sha...head` is `ahead`, or the SHAs are equal; containsCommit). A full page of statuses
+ * (`statusPageSize`) is `statuses-truncated`: the newest status cannot be proven. A 404 (deployment or commit gone)
+ * makes the receipt invalid; any other read error is thrown, so the Issue under evaluation fails closed.
+ */
+export async function validateProductionReceipt(deployment, {
+  environment,
+  creator,
+  integrationHeadSha,
+  readStatuses,
+  containsCommit,
+  statusPageSize = RECEIPT_STATUS_PAGE_SIZE,
+}) {
+  const record = {
+    deploymentId: deployment?.id ?? null,
+    sha: deployment?.sha ?? null,
+    environment: deployment?.environment ?? null,
+    creator: deployment?.creator?.login ?? null,
+    createdAt: deployment?.created_at ?? null,
+    statusId: null,
+    statusState: null,
+    statusCreatedAt: null,
+  };
+  const invalid = (reason) => ({ valid: false, reason, receipt: record });
+  if (!Number.isInteger(record.deploymentId)) return invalid("deployment-id-unreadable");
+  if (record.environment !== environment) return invalid("environment-mismatch");
+  if (record.creator !== creator) return invalid("creator-mismatch");
+  if (!SHA_PATTERN.test(String(record.sha ?? ""))) return invalid("sha-unreadable");
+
+  let statuses;
+  try {
+    statuses = await readStatuses(record.deploymentId);
+  } catch (error) {
+    if (isNotFound(error)) return invalid("deployment-not-found");
+    throw error;
+  }
+  if (!Array.isArray(statuses)) throw new Error("Statuses of deployment " + record.deploymentId + " are not a list");
+  // a full page means the newest status may be beyond what was read: never assume it, fail closed
+  if (statuses.length >= statusPageSize) return invalid("statuses-truncated");
+  const [newest] = [...statuses].sort(newestFirst);
+  if (!newest) return invalid("no-status");
+  record.statusId = newest.id ?? null;
+  record.statusState = newest.state ?? null;
+  record.statusCreatedAt = newest.created_at ?? null;
+  if (newest.state !== "success") return invalid("newest-status-" + (newest.state ?? "unknown"));
+  if (newest.creator?.login !== creator) return invalid("status-creator-mismatch");
+  if (newest.environment != null && newest.environment !== environment) return invalid("status-environment-mismatch");
+
+  let onBranch;
+  try {
+    onBranch = await containsCommit(record.sha, integrationHeadSha);
+  } catch (error) {
+    if (isNotFound(error)) return invalid("sha-not-found");
+    throw error;
+  }
+  if (!onBranch) return invalid("not-on-integration-branch");
+  return { valid: true, reason: null, receipt: record };
+}
+
+/**
+ * Lazily validates the Deployments (newest first, each at most once per run) and answers which valid receipt
+ * contains a merge commit (compare `merge...receiptSha` is `ahead`, or the SHAs are equal). `checked()` lists
+ * every Deployment validated so far with its verdict, for the run receipt.
+ */
+export function createReceiptResolver({ deployments, environment, creator, integrationHeadSha, readStatuses, containsCommit }) {
+  if (!Array.isArray(deployments)) throw new Error("deployments are required");
+  if (typeof readStatuses !== "function" || typeof containsCommit !== "function") {
+    throw new Error("readStatuses and containsCommit callbacks are required");
+  }
+  const verdicts = new Map();
+  const verdictOf = (deployment) => {
+    if (!verdicts.has(deployment)) {
+      verdicts.set(deployment, validateProductionReceipt(deployment, {
+        environment, creator, integrationHeadSha, readStatuses, containsCommit,
+      }));
+    }
+    return verdicts.get(deployment);
+  };
+  return {
+    async findReceipt(mergeCommitSha) {
+      for (const deployment of deployments) {
+        const verdict = await verdictOf(deployment);
+        if (!verdict.valid) continue;
+        if (await containsCommit(mergeCommitSha, verdict.receipt.sha)) return verdict.receipt;
+      }
+      return null;
+    },
+    async checked() {
+      const rows = [];
+      for (const [, pending] of verdicts) {
+        try {
+          const verdict = await pending;
+          rows.push({ ...verdict.receipt, valid: verdict.valid, reason: verdict.reason });
+        } catch (error) {
+          rows.push({ valid: false, reason: "unreadable: " + (error instanceof Error ? error.message : String(error)) });
+        }
+      }
+      return rows;
+    },
+  };
+}
+
+const describeReceipt = (receipt) => "deployment " + receipt.deploymentId + " (" + receipt.environment + ", "
+  + receipt.creator + ", sha " + receipt.sha.slice(0, 7) + ", status " + receipt.statusId + " success at "
+  + receipt.statusCreatedAt + ")";
+
+/**
+ * deployment-receipt: decide one open Issue.
+ *
+ * Every gate of integration-merge runs first, unchanged (evaluateIssueForIntegrationCompletion: Development
+ * link identity, complete linkage, same-repository PRs, no linked branches, blockers and sub-issues, merged
+ * into the integration branch and still on its head, scope freshness). Then every linked PR's merge commit must
+ * be contained in some valid production receipt (findReceipt). All contained -> `close-completed`
+ * (`production-receipt-complete`); otherwise `awaiting-production`. Both carry `evidence.pullRequests`.
+ */
+export async function evaluateIssueForDeploymentReceiptCompletion(issue, {
+  repository,
+  integrationBranch,
+  integrationHeadSha,
+  containsCommit,
+  readScopeHistory: readHistory,
+  findReceipt,
+} = {}) {
+  if (typeof findReceipt !== "function") throw new Error("findReceipt callback is required");
+  const integration = await evaluateIssueForIntegrationCompletion(issue, {
+    repository, integrationBranch, integrationHeadSha, containsCommit, readScopeHistory: readHistory,
+  });
+  if (integration.action !== "close-completed") return integration;
+
+  const pullRequests = [];
+  for (const pullRequest of issue.linkedPullRequests) {
+    const receipt = await findReceipt(pullRequest.mergeCommitSha);
+    pullRequests.push({ number: pullRequest.number, mergeCommitSha: pullRequest.mergeCommitSha, receipt: receipt ?? null });
+  }
+  const evidence = { pullRequests };
+  const pending = pullRequests.filter((entry) => entry.receipt === null);
+  if (pending.length === 0) {
+    return {
+      action: "close-completed",
+      code: "production-receipt-complete",
+      detail: pullRequests.map((entry) => "PR #" + entry.number + " (" + entry.mergeCommitSha.slice(0, 7)
+        + ") is in production receipt " + describeReceipt(entry.receipt) + ".").join(" "),
+      evidence,
+    };
+  }
+  return {
+    ...leaveOpen(
+      "awaiting-production",
+      "Merged into " + integrationBranch + " but not yet in a valid production receipt: "
+        + pending.map((entry) => "PR #" + entry.number + " (" + entry.mergeCommitSha.slice(0, 7) + ")").join(", ") + ".",
+    ),
+    evidence,
+  };
+}
+
+/**
+ * Awaiting release re-check for a deployment-receipt `awaiting-production` result. The evaluator already ran
+ * every gate over every linked PR (unlike the frontend evaluator, it never stops at the first PR), so this only
+ * re-asserts the structure the writer relies on: open, complete same-repository linkage, every PR merged into
+ * the integration branch with a readable merge commit, no linked branches.
+ */
+export function deploymentReceiptAwaitingVerifier(integrationBranch) {
+  return async (issue, { repository } = {}) => {
+    if (issue?.state !== "OPEN") return notEligible("already-closed", "Issue is not open.");
+    const pullRequests = Array.isArray(issue.linkedPullRequests) ? issue.linkedPullRequests : [];
+    if (!Number.isInteger(issue.linkedPullRequestTotalCount) || issue.linkedPullRequestTotalCount <= 0
+      || pullRequests.length !== issue.linkedPullRequestTotalCount) {
+      return notEligible("ambiguous-development", "Native Development linkage is missing or incomplete.");
+    }
+    if (issue.linkedBranchCount !== 0) {
+      return notEligible("development-branch-pending", "Development still contains linked branch(es).");
+    }
+    for (const pullRequest of pullRequests) {
+      if (pullRequest.repository !== repository || pullRequest.headRepository !== repository) {
+        return notEligible("ambiguous-development", "Linked PR #" + pullRequest.number + " is not a same-repository PR.");
+      }
+      if (!pullRequest.mergedAt || !SHA_PATTERN.test(String(pullRequest.mergeCommitSha ?? ""))) {
+        return notEligible("implementation-not-merged", "Linked PR #" + pullRequest.number + " is not merged with readable merge evidence.");
+      }
+      if (pullRequest.baseRefName !== integrationBranch) {
+        return notEligible("ambiguous-development", "Linked PR #" + pullRequest.number + " targets "
+          + (pullRequest.baseRefName ?? "unknown") + ", not " + integrationBranch + ".");
+      }
+    }
+    return { eligible: true };
+  };
+}
+
+/**
+ * deployment-receipt sweep over every open Issue of `profile.repository`. The newest production Deployments
+ * are read once (bounded; an unreadable list stops the run before any write); receipts are validated lazily and
+ * cached; compare results are cached across Issues. A read error while evaluating one Issue leaves only that
+ * Issue open (`production-evidence-unreadable`, never Awaiting release). Returns `{ results, productionEvidence }`.
+ */
+export async function runDeploymentReceiptCompletionSweep(client, profile, {
+  reconcileProjectStatus = true,
+  projectConfig,
+  pageSize = RECEIPT_PAGE_SIZE,
+  maxPages = RECEIPT_MAX_PAGES,
+} = {}) {
+  const repository = profile.repository;
+  const integrationBranch = profile.branches.integration;
+  const { environment, creator } = profile.productionEvidence ?? {};
+  if (typeof environment !== "string" || !environment || typeof creator !== "string" || !creator) {
+    throw blocked("PRODUCTION_EVIDENCE_UNDECLARED", profile.repository
+      + " has completion deployment-receipt without productionEvidence { environment, creator } in workflow-registry.yaml.");
+  }
+  if (reconcileProjectStatus && !projectConfig) {
+    throw new Error("projectConfig is required when Project reconciliation is enabled");
+  }
+  const { owner, repo } = splitRepository(repository);
+  const deploymentWindow = await readProductionDeployments(client, repository, { environment, pageSize, maxPages });
+  const candidates = deploymentWindow.deployments.filter((deployment) => (
+    deployment?.environment === environment && deployment?.creator?.login === creator
+  ));
+  const readStatuses = (deploymentId) => client.request("/repos/" + owner + "/" + repo + "/deployments/"
+    + deploymentId + "/statuses?per_page=" + RECEIPT_STATUS_PAGE_SIZE);
+
+  let resolver = null;
+  const results = await runOpenIssueSweep(client, profile, {
+    reconcileProjectStatus,
+    projectConfig,
+    unreadableCode: "production-evidence-unreadable",
+    unreadableDetail: "Implementation or production evidence could not be read for this Issue; skipped until the next run: ",
+    evaluate: (candidate, { integrationHeadSha, containsCommit }) => {
+      resolver ??= createReceiptResolver({
+        deployments: candidates, environment, creator, integrationHeadSha, readStatuses, containsCommit,
+      });
+      return evaluateIssueForDeploymentReceiptCompletion(candidate, {
+        repository,
+        integrationBranch,
+        integrationHeadSha,
+        containsCommit,
+        readScopeHistory: (scopeCandidate) => readScopeHistory(client, repository, scopeCandidate),
+        findReceipt: resolver.findReceipt,
+      });
+    },
+  });
+  return {
+    results,
+    productionEvidence: {
+      environment,
+      creator,
+      deploymentsRead: deploymentWindow.read,
+      matchingDeployments: candidates.length,
+      truncated: deploymentWindow.truncated,
+      checked: resolver ? await resolver.checked() : [],
+    },
+  };
 }
 
 /**
@@ -679,16 +1022,18 @@ export async function runCompletion(client, {
 
   const [organization] = profile.repository.split("/");
   const projectConfig = { organization, project: { number: registry.project.number, statusField: "Status" } };
-  // Awaiting release is written only for production-merge (a later release step exists) and only with
-  // Project reconciliation on; for integration-merge the merge is terminal and the writer never runs.
+  // Awaiting release is written only for production-merge and deployment-receipt (a later release step exists)
+  // and only with Project reconciliation on; for integration-merge the merge is terminal and the writer never runs.
   if (awaitingRelease === true && !reconcileProjectStatus) {
     throw blocked("AWAITING_RELEASE_NEEDS_PROJECT", "awaitingRelease requires Project reconciliation (an org token that reads and writes Project #"
       + registry.project.number + "); a repository-local run cannot write Awaiting release.");
   }
-  const awaitingReleaseEnabled = awaitingRelease === true && strategy === "production-merge";
+  const awaitingReleaseEnabled = awaitingRelease === true
+    && (strategy === "production-merge" || strategy === "deployment-receipt");
   let awaitingReleaseReceipt = { enabled: false, updated: [], skipped: 0, failed: [] };
 
   let results;
+  let productionEvidence = null;
   if (strategy === "production-merge") {
     // The frontend module is bound to dev/main; refuse any other layout instead of guessing.
     if (profile.branches.integration !== FRONTEND_INTEGRATION_BRANCH || profile.branches.promotion !== FRONTEND_PRODUCTION_BRANCH) {
@@ -699,6 +1044,19 @@ export async function runCompletion(client, {
     results = await runProductionMergeSweep(client, profile.repository, { reconcileProjectStatus });
     if (awaitingReleaseEnabled) {
       const reconciled = await reconcileAwaitingRelease(client, results, { repository: profile.repository, projectConfig });
+      results = reconciled.results;
+      awaitingReleaseReceipt = reconciled.awaitingRelease;
+    }
+  } else if (strategy === "deployment-receipt") {
+    const sweep = await runDeploymentReceiptCompletionSweep(client, profile, { reconcileProjectStatus, projectConfig });
+    results = sweep.results;
+    productionEvidence = sweep.productionEvidence;
+    if (awaitingReleaseEnabled) {
+      const reconciled = await reconcileAwaitingRelease(client, results, {
+        repository: profile.repository,
+        projectConfig,
+        verifyCandidate: deploymentReceiptAwaitingVerifier(profile.branches.integration),
+      });
       results = reconciled.results;
       awaitingReleaseReceipt = reconciled.awaitingRelease;
     }
@@ -714,8 +1072,20 @@ export async function runCompletion(client, {
     projectNumber: registry.project.number,
     projectReconciliation: reconcileProjectStatus,
     awaitingRelease: awaitingReleaseReceipt,
+    // deployment-receipt only: which Deployments were read and validated (audit trail of the run)
+    ...(productionEvidence ? { productionEvidence } : {}),
     results,
   };
+}
+
+function formatProductionEvidence(evidence) {
+  const valid = (evidence.checked ?? []).filter((row) => row.valid);
+  return "- Production evidence: " + evidence.environment + " by " + evidence.creator + "; "
+    + evidence.deploymentsRead + " deployment(s) read" + (evidence.truncated ? " (window full, older ones ignored)" : "")
+    + ", " + (evidence.checked ?? []).length + " checked, valid receipts: "
+    + (valid.length > 0
+      ? valid.map((row) => row.deploymentId + " (" + String(row.sha).slice(0, 7) + ", status " + row.statusId + ")").join(", ")
+      : "none");
 }
 
 export function formatCompletionSummary(receipt) {
@@ -732,6 +1102,7 @@ export function formatCompletionSummary(receipt) {
       ? "on (set " + receipt.awaitingRelease.updated.length + ", unchanged " + receipt.awaitingRelease.skipped
         + ", failed " + (receipt.awaitingRelease.failed ?? []).length + ")"
       : "off"),
+    ...(receipt.productionEvidence ? [formatProductionEvidence(receipt.productionEvidence)] : []),
     "",
     "| Issue | Result | Diagnostic |",
     "| --- | --- | --- |",
