@@ -76,22 +76,22 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
   assert.deepEqual(registry.repositories.map(profile => profile.repository), [FE, BE, KB, META, NOTIF]);
 
   // .github#216: canonical master, deployment-receipt with Vercel production evidence, deploy tags;
-  // the completion engine stays off (capabilities.completion manual) until .github#217
+  // .github#217: engine on, run only by the org sweep (no FE completion caller, owner decision 2026-10-22)
   assert.deepEqual(getRepositoryProfile(FE), {
     repository: FE, kind: 'code', visibility: 'public', owner: 'syllik',
     branches: { default: 'master', integration: 'master', promotion: null },
-    deploymentProfile: 'production', completion: 'deployment-receipt',
+    deploymentProfile: 'production', completion: 'deployment-receipt', completionRunner: 'org-sweep',
     productionEvidence: { environment: 'Production', creator: 'vercel[bot]' }, protection: 'ruleset',
     requiredChecks: ['frontend-ci'],
     release: { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v' },
     capabilities: { admission: 'required', developmentLink: 'required', prMetadata: 'required',
-      relationships: 'required', completion: 'manual', milestones: 'enabled',
+      relationships: 'required', completion: 'automatic', milestones: 'enabled',
       dependabot: 'required', agentRouting: 'required' },
   });
   assert.deepEqual(getRepositoryProfile(BE), {
     repository: BE, kind: 'code', visibility: 'private', owner: 'olegbal',
     branches: { default: 'develop', integration: 'develop', promotion: null },
-    deploymentProfile: 'production', completion: 'manual', protection: 'unavailable',
+    deploymentProfile: 'production', completion: 'manual', completionRunner: 'repository', protection: 'unavailable',
     requiredChecks: ['Unit and integration tests'],
     release: { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v' },
     capabilities: { admission: 'advisory', developmentLink: 'required', prMetadata: 'required',
@@ -101,7 +101,7 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
   assert.deepEqual(getRepositoryProfile(KB), {
     repository: KB, kind: 'docs', visibility: 'private', owner: null,
     branches: { default: 'master', integration: 'master', promotion: null },
-    deploymentProfile: 'none', completion: 'integration-merge', protection: 'unavailable', requiredChecks: [],
+    deploymentProfile: 'none', completion: 'integration-merge', completionRunner: 'repository', protection: 'unavailable', requiredChecks: [],
     release: { strategy: 'none', trigger: null, tagPrefix: 'v' },
     capabilities: { admission: 'advisory', developmentLink: 'required', prMetadata: 'off',
       relationships: 'required', completion: 'automatic', milestones: 'off',
@@ -110,7 +110,7 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
   assert.deepEqual(getRepositoryProfile(META), {
     repository: META, kind: 'meta', visibility: 'public', owner: 'syllik',
     branches: { default: 'master', integration: 'master', promotion: null },
-    deploymentProfile: 'none', completion: 'integration-merge', protection: 'ruleset',
+    deploymentProfile: 'none', completion: 'integration-merge', completionRunner: 'repository', protection: 'ruleset',
     requiredChecks: ['evaluate-fixtures'],
     release: { strategy: 'semver-by-impact', trigger: 'integration-merge', tagPrefix: 'v' },
     capabilities: { admission: 'advisory', developmentLink: 'required', prMetadata: 'off',
@@ -120,7 +120,7 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
   assert.deepEqual(getRepositoryProfile(NOTIF), {
     repository: NOTIF, kind: 'docs', visibility: 'private', owner: null,
     branches: { default: 'master', integration: 'master', promotion: null },
-    deploymentProfile: 'none', completion: 'manual', protection: 'unavailable', requiredChecks: [],
+    deploymentProfile: 'none', completion: 'manual', completionRunner: 'repository', protection: 'unavailable', requiredChecks: [],
     release: { strategy: 'none', trigger: null, tagPrefix: 'v' },
     capabilities: { admission: 'off', developmentLink: 'off', prMetadata: 'off',
       relationships: 'off', completion: 'manual', milestones: 'off',
@@ -205,6 +205,18 @@ test('deployment-receipt is automatic and declares its production evidence', () 
   // the YAML subset reads the creator quoted in a flow mapping
   const parsed = parseYamlSubset('productionEvidence: { environment: Production, creator: "vercel[bot]" }');
   assert.deepEqual(parsed, { productionEvidence: { environment: 'Production', creator: 'vercel[bot]' } });
+});
+
+test('completionRunner: repository by default, org-sweep only for an automatic code or docs record (.github#217)', () => {
+  const automatic = { ...RECEIPT, capabilities: { completion: 'automatic' } };
+  assert.equal(validateRegistry(document([record(automatic)])).repositories[0].completionRunner, 'repository');
+  assert.equal(validateRegistry(document([record({ ...automatic, completionRunner: 'repository' })])).repositories[0].completionRunner, 'repository');
+  assert.equal(validateRegistry(document([record({ ...automatic, completionRunner: 'org-sweep' })])).repositories[0].completionRunner, 'org-sweep');
+  assert.equal(validateRegistry(document([record({ kind: 'docs', owner: null, completion: 'integration-merge', completionRunner: 'org-sweep' })]))
+    .repositories[0].completionRunner, 'org-sweep', 'docs default to automatic');
+  rejects(() => validateRegistry(document([record({ ...automatic, completionRunner: 'sweep' })])), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ ...RECEIPT, completionRunner: 'org-sweep', capabilities: { completion: 'manual' } })])), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ kind: 'meta', completion: 'integration-merge', completionRunner: 'org-sweep' })])), 'REGISTRY_VALUE');
 });
 
 test('deployment-receipt without valid production evidence is rejected; other strategies must not declare it', () => {
@@ -358,19 +370,26 @@ test('release decisions of 2026-10-21 are recorded for every registered reposito
   assert.deepEqual(listRepositories({ kinds: ['docs'] }), [KB, NOTIF]);
 });
 
-test('frontend cutover record (.github#216): engine off is valid, the dev/main rollback record still validates', async () => {
+test('frontend record (.github#217): engine on via the org sweep; engine off and the dev/main rollback record still validate', async () => {
   const live = await readFile(REGISTRY_PATH, 'utf8');
-  // deployment-receipt with capabilities.completion manual is the live record; engine on (.github#217) validates too
-  const engineOff = /^      completion: manual {8}# automatic \| manual; the engine stays off for chipin-frontend until #217$/m;
-  assert.match(live, engineOff);
-  assert.equal(getRepositoryProfile(FE, loadRegistry({ text: live.replace(engineOff, '      completion: automatic') })).capabilities.completion, 'automatic');
-  // rollback window of chipin-frontend#497: reverting only the frontend record gives a valid registry again
-  const rollback = live
+  const engineOn = /^      completion: automatic {5}# automatic \| manual; engine on since #217 \(Promote evidence checked in cutover step 7\)$/m;
+  const runner = /^    completionRunner: org-sweep {8}# repository \| org-sweep; [^\n]*\n/m;
+  assert.match(live, engineOn);
+  assert.match(live, runner);
+  // reverting #217 (engine off, runner back to the default) gives the valid .github#216 record
+  const reverted = live.replace(engineOn, '      completion: manual').replace(runner, '');
+  const off = getRepositoryProfile(FE, loadRegistry({ text: reverted }));
+  assert.equal(off.capabilities.completion, 'manual');
+  assert.equal(off.completionRunner, 'repository');
+  // switching the engine off without dropping org-sweep is refused (org-sweep needs automatic)
+  assert.throws(() => loadRegistry({ text: live.replace(engineOn, '      completion: manual') }), /completionRunner org-sweep needs capabilities\.completion "automatic"/);
+  // rollback window of chipin-frontend#497: reverting #217 and then the frontend record gives a valid registry again
+  const rollback = reverted
     .replace(/branches: \{ default: master, integration: master \}[^\n]*\n/, 'branches: { default: main, integration: dev, promotion: main }\n')
     .replace(/completion: deployment-receipt[^\n]*\n    productionEvidence:[^\n]*\n/, 'completion: production-merge\n')
     .replace(/    # tag \+ GitHub Release after every successful Vercel Production deploy[^\n]*\n    release: \{[^\n]*\n/,
       '    release: { strategy: semver-by-impact, trigger: promotion-merge, tagPrefix: v }\n')
-    .replace(engineOff, '      completion: automatic');
+    .replace(/^      completion: manual$/m, '      completion: automatic');
   const legacy = getRepositoryProfile(FE, loadRegistry({ text: rollback }));
   assert.deepEqual(legacy.branches, { default: 'main', integration: 'dev', promotion: 'main' });
   assert.equal(legacy.completion, 'production-merge');

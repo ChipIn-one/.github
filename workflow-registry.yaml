@@ -9,6 +9,8 @@
 #
 # `completion: deployment-receipt` also needs `productionEvidence: { environment: <name>, creator: "<login>" }`
 # (quote a `[bot]` login inside a flow mapping) and `deploymentProfile: production`; no other strategy may carry it.
+# `completionRunner` (optional, default `repository`): `org-sweep` means the engine runs only from an org sweep workflow
+# in this repository (no completion caller in the target repository); it needs `capabilities.completion: automatic`.
 schemaVersion: 1
 standardVersion: v1            # tag line of the standard this registry agrees with
 project:
@@ -23,6 +25,7 @@ repositories:
     deploymentProfile: production      # none | staging | production
     completion: deployment-receipt     # production-merge | integration-merge | deployment-receipt | manual
     productionEvidence: { environment: Production, creator: "vercel[bot]" }
+    completionRunner: org-sweep        # repository | org-sweep; no FE caller: only .github/workflows/frontend-production-completion.yml (#217)
     protection: ruleset                # ruleset | protection | unavailable (Free + private)
     requiredChecks: [frontend-ci]
     # tag + GitHub Release after every successful Vercel Production deploy; the tags arrive with #171/#172
@@ -32,7 +35,7 @@ repositories:
       developmentLink: required
       prMetadata: required
       relationships: required   # blocked-by gate in admission
-      completion: manual        # automatic | manual; the engine stays off for chipin-frontend until #217
+      completion: automatic     # automatic | manual; engine on since #217 (Promote evidence checked in cutover step 7)
       milestones: enabled
       dependabot: required
       agentRouting: required    # AGENTS.md routing block + .ai/context.md

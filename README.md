@@ -63,7 +63,7 @@ Native GitHub Issue state is the terminal source of truth:
 
 Development-linked PRs and their merge state remain implementation evidence and are not copied into Project Status, except `Awaiting release`, which only the completion engine writes ([docs/workflow/completion.md](docs/workflow/completion.md)).
 
-For frontend code work, merge to the integration branch (`master` since .github#216) is integration only. Close the Issue only after the required implementation is in production (a Vercel `Production` deployment of `master`); until .github#217 turns the completion engine on for the frontend, a human closes it.
+For frontend code work, merge to the integration branch (`master` since .github#216) is integration only. The Issue closes only after the required implementation is in production (a Vercel `Production` deployment of `master`, written at Promote to Production); since .github#217 the completion engine closes it through the org sweep (`.github/workflows/frontend-production-completion.yml`, up to 15 minutes after the Promote).
 
 Repository-specific completion triggers outside frontend are out of scope for this change and remain owned by their repositories.
 
