@@ -429,6 +429,9 @@ test("plan: a dependabot[bot] PR without a Version impact section counts as none
   assert.equal(alone.outcome, "NO_RELEASE");
   assert.equal(alone.impact, "none");
   assert.equal(alone.tag, null);
+  assert.match(alone.detail, /all have Version impact none \(1 by dependabot default\)/u);
+  assert.equal(parseVersionImpact("no section at all").missingSection, true);
+  assert.equal(parseVersionImpact("## Version impact\n\n").missingSection, undefined);
   const [entry] = alone.includedPullRequests;
   assert.equal(entry.number, 30);
   assert.equal(entry.author, "dependabot[bot]");

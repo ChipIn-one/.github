@@ -91,7 +91,7 @@ export function maxImpact(impacts) {
 export function parseVersionImpact(body) {
   const lines = String(body ?? "").replace(/\r\n/gu, "\n").split("\n");
   const headingIndex = lines.findIndex((line) => /^##\s+Version impact\s*$/iu.test(line.trim()));
-  if (headingIndex === -1) return { impact: null, raw: null, reason: "missing `## Version impact` section" };
+  if (headingIndex === -1) return { impact: null, raw: null, missingSection: true, reason: "missing `## Version impact` section" };
   let raw = null;
   for (let index = headingIndex + 1; index < lines.length; index += 1) {
     const line = lines[index];
@@ -120,11 +120,15 @@ export const DEPENDABOT_LOGIN = "dependabot[bot]";
  */
 export function resolvePullImpact(pull) {
   const parsed = parseVersionImpact(pull.body);
-  const missingSection = parsed.impact === null && parsed.raw === null && /^missing /u.test(parsed.reason ?? "");
-  if (missingSection && pull.author === DEPENDABOT_LOGIN) {
+  if (parsed.missingSection === true && pull.author === DEPENDABOT_LOGIN) {
     return { impact: "none", raw: "dependabot-default", reason: DEPENDABOT_LOGIN + " without a Version impact section → none" };
   }
   return parsed;
+}
+
+function dependabotDefaults(pulls) {
+  const count = pulls.filter((pull) => pull.impactRaw === "dependabot-default").length;
+  return count > 0 ? " (" + count + " by dependabot default)" : "";
 }
 
 export function readTaskIdentity(body) {
@@ -494,7 +498,7 @@ async function planReleaseInner(store, { repository, profile, ref, initialVersio
         tag: null,
         outcome: "NO_RELEASE",
         detail: includedPullRequests.length + " included pull request(s) since " + previous.tag.name
-          + " all declare Version impact none; no tag and no Release are created.",
+          + " all have Version impact none" + dependabotDefaults(includedPullRequests) + "; no tag and no Release are created.",
       };
     }
     version = bumpVersion(previous.tag.version, impact);
