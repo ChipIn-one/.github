@@ -21,13 +21,14 @@ function prIdentity(pr) {
 }
 
 export async function reconcileProjectPR({reader,writer,config,number,expectedSha,
-  admit=preflightPr,reread=readAdmission,verifyNative=assertSingleNativeIssue,verifyIncluded=verifyRelease}) {
+  admit=preflightPr,reread=readAdmission,verifyNative=assertSingleNativeIssue,verifyIncluded=verifyRelease,branches=undefined}) {
   if (!Number.isInteger(number)||number<=0 || !/^[a-f0-9]{40}$/.test(expectedSha||""))
     throw new Error("PROJECT_REQUEST: exact PR identity and SHA required");
   const pr=await reader.request(ROOT+"/pulls/"+number);
   if (pr?.number!==number||pr.state!=="open"||pr.head?.sha!==expectedSha||!pr.node_id)
     throw new Error("PROJECT_REQUEST: PR missing, closed or stale");
-  const kind=classifyPR(pr);
+  // routes from the registry (branches: tests of another layout only)
+  const kind=classifyPR(pr,branches);
   const label=VALID.get(kind);
   // Read all REST label pages; category conflicts hidden after page one must block.
   const labels=await reader.listAll(ROOT+"/issues/"+number+"/labels");
@@ -43,7 +44,7 @@ export async function reconcileProjectPR({reader,writer,config,number,expectedSh
     const identity=implementationIdentity(pr.body);
     await verifyNative(reader,number,identity.issueNumber,true);
   } else {
-    await verifyIncluded(reader,releaseReferences(pr.body));
+    await verifyIncluded(reader,releaseReferences(pr.body),branches);
   }
   let latest=await reader.request(ROOT+"/pulls/"+number);
   if(prIdentity(latest)!==prIdentity(pr)) throw new Error("PROJECT_REQUEST: PR drifted during validation");
@@ -80,7 +81,7 @@ export async function reconcileProjectPR({reader,writer,config,number,expectedSh
   if(kind==="implementation") {
     await verifyNative(reader,number,implementationIdentity(pr.body).issueNumber,true);
   } else {
-    await verifyIncluded(reader,releaseReferences(pr.body));
+    await verifyIncluded(reader,releaseReferences(pr.body),branches);
   }
   latest=await reader.request(ROOT+"/pulls/"+number);
   if(prIdentity(latest)!==prIdentity(pr)) throw new Error("PROJECT_REQUEST: PR drifted before Project write");
@@ -113,7 +114,7 @@ export async function reconcileProjectPR({reader,writer,config,number,expectedSh
     if(kind==="implementation")
       await verifyNative(reader,number,implementationIdentity(pr.body).issueNumber,true);
     else
-      await verifyIncluded(reader,releaseReferences(pr.body));
+      await verifyIncluded(reader,releaseReferences(pr.body),branches);
     const latestAfterScan=await reader.request(ROOT+"/pulls/"+number);
     if(prIdentity(latestAfterScan)!==prIdentity(pr))
       throw new Error("PROJECT_REQUEST: PR drifted during Project scan");

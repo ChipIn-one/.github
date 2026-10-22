@@ -19,7 +19,16 @@ import { getRepositoryProfile } from "./registry.mjs";
 
 const FE = "ChipIn-one/chipin-frontend";
 const ORG = "ChipIn-one/.github";
-const feProfile = getRepositoryProfile(FE);
+// The promotion-merge fixtures use the frontend dev/main record from before the canonical-master cutover
+// (.github#216): it is the rollback target of chipin-frontend#497, so the path must keep working. The live
+// frontend record is deploy-tag on master (test "plan: the live frontend record ...").
+const liveFeProfile = getRepositoryProfile(FE);
+const feProfile = Object.freeze({
+  ...liveFeProfile,
+  branches: { default: "main", integration: "dev", promotion: "main" },
+  completion: "production-merge",
+  release: { strategy: "semver-by-impact", trigger: "promotion-merge", tagPrefix: "v" },
+});
 const orgProfile = getRepositoryProfile(ORG);
 
 const sha = (letter) => letter.repeat(40);
@@ -193,6 +202,30 @@ test("plan: frontend promotion merge collects implementation PRs since the previ
   assert.equal(plan.version, "1.0.9");
   assert.equal(plan.tag, "v1.0.9");
   assert.equal(store.writes.length, 0);
+});
+
+test("plan: the live frontend record (.github#216) is deploy-tag on master: no release branch, master PRs only", async () => {
+  assert.deepEqual(liveFeProfile.release, { strategy: "deploy-tag", trigger: "production-deploy", tagPrefix: "v" });
+  assert.deepEqual(liveFeProfile.branches, { default: "master", integration: "master", promotion: null });
+  //   t0 (tag v1.0.8) <- c1 (master merge PR#30, minor) <- c2 (PR#31 merged into a stray dev, not counted)
+  const body = (number, impact) => "Task identity: ChipIn-one/chipin-frontend#" + (number + 100)
+    + "\n\n## Version impact\n\n" + impact + "\n";
+  const store = fakeStore({
+    graph: { [sha("0")]: [], [sha("1")]: [sha("0")], [sha("2")]: [sha("1")] },
+    branches: { master: sha("2") },
+    tags: { "v1.0.8": sha("0") },
+    pulls: [
+      { number: 30, baseRef: "master", commits: [sha("1")], body: body(30, "minor") },
+      { number: 31, baseRef: "dev", commits: [sha("2")], body: body(31, "major") },
+    ],
+  });
+  const plan = await planRelease(store, { repository: FE, profile: liveFeProfile, ref: sha("2") });
+  assert.equal(plan.strategy, "deploy-tag");
+  assert.equal(plan.trigger, "production-deploy");
+  assert.equal(plan.releaseBranch, null, "deploy-tag: the deployed SHA is the authority");
+  assert.deepEqual(plan.includedPullRequests.map((pull) => pull.number), [30]);
+  assert.deepEqual(plan.excludedPullRequests, [], "no promotion branch, nothing reported as a release PR");
+  assert.deepEqual(plan.unattributedCommits, [sha("2")], "a PR into another base never counts and is surfaced");
 });
 
 test("plan: all none means no release; a missing or invalid impact blocks without guessing", async () => {

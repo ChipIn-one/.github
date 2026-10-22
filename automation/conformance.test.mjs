@@ -19,6 +19,9 @@ const profile = name => getRepositoryProfile(name);
 const uses = (name, sha, comment = '') => `        uses: ChipIn-one/.github/automation/${name}@${sha}${comment ? ` # ${comment}` : ''}`;
 const workflow = (...lines) => ({ path: '.github/workflows/x.yml', text: lines.join('\n') });
 const checks = findings => findings.map(f => f.check);
+// the frontend dev/main record from before the canonical-master cutover (.github#216), rollback target of chipin-frontend#497
+const legacyFrontend = () => ({ ...profile(FE), branches: Object.freeze({ default: 'main', integration: 'dev', promotion: 'main' }),
+  completion: 'production-merge', capabilities: Object.freeze({ ...profile(FE).capabilities, completion: 'automatic' }) });
 
 // ---------------------------------------------------------------------------------------------------
 test('pins are extracted with action name, ref and version comment', () => {
@@ -42,16 +45,19 @@ test('caller presence follows the registry capabilities', () => {
   assert.match(kb[0].message, /completion is automatic but no workflow uses completion-action/);
   const kbComplete = extractPins([workflow(uses('development-link-action', V1), uses('completion-action', V1))]);
   assert.deepEqual(checkCallers(profile(KB), kbComplete), [], 'KB with development-link and completion callers conforms');
-  // production-merge keeps the frontend action; the generic action does not satisfy it
-  const feWrong = checkCallers(profile(FE), extractPins([workflow(uses('issue-admission-action', V1), uses('development-link-action', V1),
-    uses('pr-metadata-action', V1), uses('create-milestone-action', V1), uses('completion-action', V1))]));
+  // production-merge (the dev/main rollback record) keeps the frontend action; the generic action does not satisfy it
+  const feBase = [uses('issue-admission-action', V1), uses('development-link-action', V1), uses('pr-metadata-action', V1), uses('create-milestone-action', V1)];
+  const feWrong = checkCallers(legacyFrontend(), extractPins([workflow(...feBase, uses('completion-action', V1))]));
   assert.deepEqual(checks(feWrong), ['CALLER_MISSING']);
   assert.match(feWrong[0].message, /frontend-production-completion-action/);
+  // the live frontend record (.github#216): completion manual until .github#217, so no completion caller is required
+  assert.equal(profile(FE).capabilities.completion, 'manual');
+  assert.deepEqual(checkCallers(profile(FE), extractPins([workflow(...feBase)])), []);
   const gate = extractPins([{ path: 'p', text: `    uses: ChipIn-one/.github/.github/workflows/pr-gate.yml@${V1} # v1.0.0` }]);
   assert.deepEqual(checks(checkCallers(profile(BE), gate)), ['CALLER_MISSING'], 'pr-gate covers admission, link and metadata; BE milestones still needed');
 });
 
-// the frontend record as the cutover registry PR will write it (.github#212); the live record stays production-merge
+// the frontend record with the engine on, as .github#217 will write it; the live record (.github#216) keeps completion manual
 const receiptProfile = () => validateRegistry({
   schemaVersion: 1, standardVersion: 'v1', project: { number: 5, statuses: ['Backlog', 'Done'] },
   repositories: [{
@@ -146,11 +152,15 @@ test('pin freshness: current, stale, not-affecting, unpinned, no comment, mismat
 });
 
 test('dependabot: missing, no github-actions, wrong target, correct', () => {
-  const fe = profile(FE);
+  const fe = legacyFrontend();
   assert.deepEqual(checks(checkDependabot(fe, null)), ['DEPENDABOT_MISSING']);
   assert.deepEqual(checks(checkDependabot(fe, "version: 2\nupdates:\n  - package-ecosystem: 'npm'\n    directory: '/'\n")), ['DEPENDABOT_NO_ACTIONS']);
   assert.deepEqual(checks(checkDependabot(fe, "version: 2\nupdates:\n  - package-ecosystem: 'github-actions'\n    directory: '/'\n")), ['DEPENDABOT_TARGET'], 'default branch main is not the integration branch dev');
   assert.deepEqual(checks(checkDependabot(fe, "version: 2\nupdates:\n  - package-ecosystem: 'npm'\n    target-branch: 'main'\n  - package-ecosystem: 'github-actions'\n    target-branch: 'dev'\n")), []);
+  // the live frontend record (.github#216): master is default and integration; a leftover dev target is drift
+  assert.deepEqual(checkDependabot(profile(FE), "updates:\n  - package-ecosystem: 'github-actions'\n"), []);
+  assert.deepEqual(checkDependabot(profile(FE), "updates:\n  - package-ecosystem: 'github-actions'\n    target-branch: 'master'\n"), []);
+  assert.deepEqual(checks(checkDependabot(profile(FE), "updates:\n  - package-ecosystem: 'github-actions'\n    target-branch: 'dev'\n")), ['DEPENDABOT_TARGET']);
   assert.deepEqual(checkDependabot(profile(BE), "updates:\n  - package-ecosystem: 'github-actions'\n    target-branch: 'develop'\n"), []);
   assert.deepEqual(checkDependabot(profile(BE), "updates:\n  - package-ecosystem: \"github-actions\"\n"), [], 'develop is both default and integration');
 });
@@ -216,7 +226,7 @@ function fakeSource(over = {}) {
   const files = {
     [`${META}:AGENTS.md`]: '<!-- ai-workflow:agents-routing:start -->', [`${META}:.ai/context.md`]: 'c', [`${META}:.github/dependabot.yml`]: "updates:\n  - package-ecosystem: 'github-actions'\n",
     [`${FE}:AGENTS.md`]: '<!-- ai-workflow:agents-routing:start -->', [`${FE}:.ai/context.md`]: 'c',
-    [`${FE}:.github/dependabot.yml`]: "updates:\n  - package-ecosystem: 'github-actions'\n    target-branch: 'dev'\n",
+    [`${FE}:.github/dependabot.yml`]: "updates:\n  - package-ecosystem: 'github-actions'\n    target-branch: 'master'\n",
   };
   const wf = {
     [FE]: [workflow(uses('issue-admission-action', V1, 'v1.0.0'), uses('development-link-action', V1, 'v1.0.0'), uses('pr-metadata-action', V1, 'v1.0.0'), uses('create-milestone-action', V1, 'v1.0.0'), uses('frontend-production-completion-action', V1, 'v1.0.0'))],

@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { reconcileProjectPR } from "./pr-project-writer.mjs";
 
 const repo="ChipIn-one/chipin-frontend", root="/repos/"+repo, SHA="a".repeat(40);
+// Release PRs (dev -> main) exist only on the frontend dev/main layout from before the canonical-master cutover
+// (.github#216), the rollback target of chipin-frontend#497; the release-path tests pass it explicitly.
+const LEGACY_BRANCHES=Object.freeze({default:"main",integration:"dev",promotion:"main"});
 const mkPR=()=>({number:42,node_id:"PR_42",state:"open",
   head:{sha:SHA,ref:"dev",repo:{full_name:repo}},
   base:{sha:"b".repeat(40),ref:"main",repo:{full_name:repo}},
@@ -12,13 +15,26 @@ const receipt={
   contractVersion:"chipin-issue-admission/v1",status:"INTAKE_COMPLETE",
   issue:repo+"#5",revision:"f".repeat(64),checkedAt:new Date().toISOString(),blockers:[]
 };
+test("canonical master (.github#216): a dev -> main release PR has no route and is rejected before any label read",async()=>{
+  let reads=0,writes=0;const p=mkPR();
+  const reader={
+    async request(path){reads++;if(path===root+"/pulls/42")return p;throw Error("unexpected "+path);},
+    async listAll(){throw Error("labels must not be read");}
+  };
+  await assert.rejects(reconcileProjectPR({
+    reader,writer:{graphql:async()=>{writes++;throw Error("unexpected");}},
+    config:{},number:42,expectedSha:SHA,admit:async()=>{throw Error("must not admit");},
+  }),/ROUTE: only implementation→master/u);
+  assert.equal(reads,1);assert.equal(writes,0);
+});
+
 test("org writer rejects unlabelled PR before Project GraphQL mutation",async()=>{
   let writes=0;const p=mkPR();
   const reader={
     async request(path){if(path===root+"/pulls/42")return p;throw Error("unexpected "+path);},
     async listAll(path){assert.equal(path,root+"/issues/42/labels");return [];}
   };
-  await assert.rejects(reconcileProjectPR({
+  await assert.rejects(reconcileProjectPR({branches:LEGACY_BRANCHES,
     reader,writer:{graphql:async()=>{writes++;throw Error("unexpected");}},
     config:{},number:42,expectedSha:SHA,
   }),/category label missing/);
@@ -28,7 +44,7 @@ test("org writer rejects unlabelled PR before Project GraphQL mutation",async()=
 test("org writer requires current SHA and never writes on stale PR",async()=>{
   let writes=0;const p=mkPR();
   const reader={async request(path){if(path===root+"/pulls/42")return p;throw Error("unexpected "+path)}};
-  await assert.rejects(reconcileProjectPR({
+  await assert.rejects(reconcileProjectPR({branches:LEGACY_BRANCHES,
     reader,writer:{graphql:async()=>{writes++;throw Error("unexpected");}},
     config:{},number:42,expectedSha:"c".repeat(40),
   }),/stale/);
@@ -55,8 +71,8 @@ test("org writer adds exactly one Project item after fresh Issue/native checks; 
     reread:async()=>{events.push("revision");return{receipt,blockers:[]}},
     verifyIncluded:async(_,refs)=>{events.push("native");assert.deepEqual(refs,{prs:[37],issues:[5]})},
   };
-  const first=await reconcileProjectPR({reader,writer,config:{},number:42,expectedSha:SHA,...dependencies});
-  const second=await reconcileProjectPR({reader,writer,config:{},number:42,expectedSha:SHA,...dependencies});
+  const first=await reconcileProjectPR({branches:LEGACY_BRANCHES,reader,writer,config:{},number:42,expectedSha:SHA,...dependencies});
+  const second=await reconcileProjectPR({branches:LEGACY_BRANCHES,reader,writer,config:{},number:42,expectedSha:SHA,...dependencies});
   assert.equal(first.created,true);
   assert.equal(second.created,false);
   assert.equal(first.itemId,"ITEM_42");
@@ -78,7 +94,7 @@ test("org writer detects PR body drift after admission and performs no Project m
     },
     async listAll(path){assert.equal(path,root+"/issues/42/labels");return [{name:"pr:release"}];}
   };
-  await assert.rejects(reconcileProjectPR({
+  await assert.rejects(reconcileProjectPR({branches:LEGACY_BRANCHES,
     reader,writer:{graphql:async()=>{writes++;throw Error("unexpected");}},
     config:{},number:42,expectedSha:SHA,
     admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
@@ -95,7 +111,7 @@ test("Project writer rejects contradictory category beyond first 100 labels",asy
     async request(path){if(path===root+"/pulls/42")return p;throw Error("unexpected "+path);},
     async listAll(path){assert.equal(path,root+"/issues/42/labels");return labels;}
   };
-  await assert.rejects(reconcileProjectPR({
+  await assert.rejects(reconcileProjectPR({branches:LEGACY_BRANCHES,
     reader,writer:{async graphql(){writes++;throw Error("unexpected Project write");}},
     config:{},number:42,expectedSha:SHA,
     admit:async()=>{admissions++;throw Error("should not reach admission");}
@@ -112,7 +128,7 @@ test("Project writer rejects a late label change before writing",async()=>{
       return labelReads===1?[{name:"pr:release"}]:[{name:"pr:release"},{name:"pr:implementation"}];
     }
   };
-  await assert.rejects(reconcileProjectPR({
+  await assert.rejects(reconcileProjectPR({branches:LEGACY_BRANCHES,
     reader,writer:{async graphql(){writes++;throw Error("unexpected Project write");}},
     config:{},number:42,expectedSha:SHA,
     admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
@@ -128,7 +144,7 @@ test("release native linkage changes after admission and blocks Project mutation
     async request(path){if(path===root+"/pulls/42")return p;throw Error("unexpected "+path);},
     async listAll(path){assert.equal(path,root+"/issues/42/labels");return[{name:"pr:release"}];}
   };
-  await assert.rejects(reconcileProjectPR({
+  await assert.rejects(reconcileProjectPR({branches:LEGACY_BRANCHES,
     reader,writer:{async graphql(){writes++;throw Error("Project write must not happen");}},
     config:{},number:42,expectedSha:SHA,
     admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
@@ -146,7 +162,7 @@ test("release native linkage changes after admission and blocks Project mutation
 test("implementation native linkage changes after admission and blocks Project mutation",async()=>{
   const p={...mkPR(),body:"Task identity: "+repo+"#5",
     head:{sha:SHA,ref:"feat/issue-381-identity",repo:{full_name:repo}},
-    base:{sha:"b".repeat(40),ref:"dev",repo:{full_name:repo}}};
+    base:{sha:"b".repeat(40),ref:"master",repo:{full_name:repo}}};
   let writes=0,verifyReads=0;
   const reader={
     async request(path){if(path===root+"/pulls/42")return p;throw Error("unexpected "+path);},
@@ -178,7 +194,7 @@ test("Project write rejects refreshed admission expiring during paginated final 
       return[{name:"pr:release"}];
     }
   };
-  await assert.rejects(reconcileProjectPR({
+  await assert.rejects(reconcileProjectPR({branches:LEGACY_BRANCHES,
     reader,writer:{async graphql(){writes++;throw Error("Project write must not happen");}},
     config:{},number:42,expectedSha:SHA,
     admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
@@ -206,7 +222,7 @@ test("fresh reread replaces aged preflight receipt at Project boundary",async()=
     writes++;items.push({id:"ITEM_42",content:{__typename:"PullRequest",id:"PR_42"}});
     return{addProjectV2ItemById:{item:{id:"ITEM_42"}}};
   }};
-  const result=await reconcileProjectPR({
+  const result=await reconcileProjectPR({branches:LEGACY_BRANCHES,
     reader,writer,config:{},number:42,expectedSha:SHA,
     admit:async()=>({status:"INTAKE_COMPLETE",receipts:[oldReceipt]}),
     reread:async()=>({receipt:freshReceipt,blockers:[]}),
@@ -231,7 +247,7 @@ test("Project scan cannot authorize a write after Issue admission revision chang
     }
     writes++;throw Error("Project mutation must be blocked");
   }};
-  await assert.rejects(reconcileProjectPR({
+  await assert.rejects(reconcileProjectPR({branches:LEGACY_BRANCHES,
     reader,writer,config:{},number:42,expectedSha:SHA,
     admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
     reread:async()=>{
@@ -264,7 +280,7 @@ test("Project scan expiry is caught after re-reading canonical admission",async(
     }
     writes++;throw Error("Project mutation must be blocked");
   }};
-  await assert.rejects(reconcileProjectPR({
+  await assert.rejects(reconcileProjectPR({branches:LEGACY_BRANCHES,
     reader,writer,config:{},number:42,expectedSha:SHA,
     admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
     reread:async()=>{
@@ -292,7 +308,7 @@ test("Project writer rechecks native release evidence after pre-write Project sc
     }
     writes++;throw Error("Project mutation must be blocked");
   }};
-  await assert.rejects(reconcileProjectPR({
+  await assert.rejects(reconcileProjectPR({branches:LEGACY_BRANCHES,
     reader,writer,config:{},number:42,expectedSha:SHA,
     admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
     reread:async()=>({receipt,blockers:[]}),

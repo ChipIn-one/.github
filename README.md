@@ -18,7 +18,7 @@ Supported Issue Forms are owned here and set only native GitHub Issue Type: `Bug
 GitHub uses the organization-profile Issue Forms only when a repository does not provide its own local template file. A repository-local template is therefore an explicit override and must remain compatible with the canonical schema or document why it differs.
 
 Audited 2026-09-27:
-- `chipin-frontend` `dev` and `main`: no local Issue Forms; shared forms apply.
+- `chipin-frontend` `dev` and `main` (canonical branch `master` since .github#216): no local Issue Forms; shared forms apply.
 - `chipin-backend` `develop`: no local Issue Forms; shared forms apply.
 - `chipin-knowledge-base` `master`: no local Issue Forms; shared forms apply.
 
@@ -50,7 +50,7 @@ Project #5 `Status` tracks workflow position plus one derived completion mirror:
 - `Backlog`
 - `Todo`
 - `In Progress`
-- `Awaiting release` — implementation merged into the integration branch, waiting for the release step (frontend `dev -> main`); written only by the completion engine, never closes an Issue
+- `Awaiting release` — implementation merged into the integration branch, waiting for the release step (frontend: a production Deployment receipt on `master`); written only by the completion engine, never closes an Issue
 - `Done` — display mirror for an Issue already `closed/completed`
 
 Do not use or recreate `DEV` or `PROD`. `Done` is not completion authority and must not cause an Issue to be closed.
@@ -63,7 +63,7 @@ Native GitHub Issue state is the terminal source of truth:
 
 Development-linked PRs and their merge state remain implementation evidence and are not copied into Project Status, except `Awaiting release`, which only the completion engine writes ([docs/workflow/completion.md](docs/workflow/completion.md)).
 
-For frontend code work, merge to `dev` is integration only. Close the Issue only after the required implementation is merged to production branch `main`.
+For frontend code work, merge to the integration branch (`master` since .github#216) is integration only. Close the Issue only after the required implementation is in production (a Vercel `Production` deployment of `master`); until .github#217 turns the completion engine on for the frontend, a human closes it.
 
 Repository-specific completion triggers outside frontend are out of scope for this change and remain owned by their repositories.
 

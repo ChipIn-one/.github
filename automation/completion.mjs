@@ -1002,14 +1002,35 @@ export async function runDeploymentReceiptCompletionSweep(client, profile, {
 /**
  * Run the strategy of one registry repository. Returns the receipt; throws CompletionBlocked when the
  * registry says the repository is not automatic or the strategy is not implemented.
+ * `skipWhenManual` (org sweeps only, .github#216): a record with `capabilities.completion: manual` returns a
+ * `skipped` receipt instead of throwing, before any GitHub read or write, so a scheduled sweep for a repository
+ * whose engine is switched off is a green no-op; a repository-local caller keeps the refusal.
  */
 export async function runCompletion(client, {
   repository,
   registry = loadRegistry(),
   reconcileProjectStatus = true,
   awaitingRelease = false,
+  skipWhenManual = false,
 } = {}) {
   const profile = requireRepositoryProfile(repository, registry);
+  if (skipWhenManual === true && profile.capabilities.completion === "manual") {
+    return {
+      contract: COMPLETION_CONTRACT,
+      repository: profile.repository,
+      strategy: profile.completion,
+      branch: profile.branches.integration,
+      projectNumber: registry.project.number,
+      projectReconciliation: false,
+      awaitingRelease: { enabled: false, updated: [], skipped: 0, failed: [] },
+      skipped: {
+        code: "COMPLETION_NOT_AUTOMATIC",
+        detail: profile.repository + " has capabilities.completion \"manual\" in workflow-registry.yaml;"
+          + " the engine did not run (no Issue closed, no Project #5 Status written).",
+      },
+      results: [],
+    };
+  }
   if (profile.capabilities.completion !== "automatic") {
     throw blocked("COMPLETION_NOT_AUTOMATIC", profile.repository + " has capabilities.completion \""
       + profile.capabilities.completion + "\" in workflow-registry.yaml; the completion engine must not run for it.");
@@ -1088,7 +1109,18 @@ function formatProductionEvidence(evidence) {
       : "none");
 }
 
+// GitHub Actions annotation for a skipped run, so the green no-op is visible on the run page (null otherwise)
+export function completionSkipNotice(receipt) {
+  if (!receipt?.skipped) return null;
+  return "::notice title=Completion skipped::completion skipped for " + receipt.repository
+    + ": capabilities.completion is manual in workflow-registry.yaml (no Issue closed, no Project #5 Status written)";
+}
+
 export function formatCompletionSummary(receipt) {
+  if (receipt.skipped) {
+    return "# Completion " + receipt.repository + " (" + receipt.strategy + ")\n\n"
+      + "- Skipped: " + receipt.skipped.code + " — " + receipt.skipped.detail + "\n";
+  }
   const results = receipt.results ?? [];
   const closed = results.filter((result) => result.decision.code === "closed-completed").length;
   const lines = [
@@ -1142,9 +1174,13 @@ async function main() {
   if (!repository) throw new Error("--repository owner/name (or GITHUB_REPOSITORY) is required");
   const reconcileProjectStatus = process.env.CHIPIN_COMPLETION_PROJECT_RECONCILE !== "0";
   const awaitingRelease = process.env.CHIPIN_COMPLETION_AWAITING_RELEASE === "1";
+  // org sweeps set it: a registry record switched to `capabilities.completion: manual` is a green no-op there
+  const skipWhenManual = process.env.CHIPIN_COMPLETION_SKIP_MANUAL === "1";
 
-  const receipt = await runCompletion(new GitHubClient(token), { repository, reconcileProjectStatus, awaitingRelease });
+  const receipt = await runCompletion(new GitHubClient(token), { repository, reconcileProjectStatus, awaitingRelease, skipWhenManual });
   const summary = formatCompletionSummary(receipt);
+  const notice = completionSkipNotice(receipt);
+  if (notice) process.stdout.write(notice + "\n");
   process.stdout.write(summary);
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary, "utf8");
   if (args.get("--output")) fs.writeFileSync(args.get("--output"), JSON.stringify(receipt, null, 2) + "\n", "utf8");

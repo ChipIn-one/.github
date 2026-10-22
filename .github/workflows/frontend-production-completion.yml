@@ -1,14 +1,13 @@
-# Org fallback of the frontend completion (completion: production-merge in workflow-registry.yaml;
-# docs/workflow/completion.md). Runs the shared engine automation/completion.mjs for chipin-frontend with the
-# organization PAT CHIPIN_ISSUE_WRITE_TOKEN: it closes Issues whose linked PRs reached `main` through a merged
-# `dev -> main` release PR, keeps the Project #5 repair of an open Issue still showing derived Done, and
-# (.github#180) moves the Project #5 Status of an Issue whose linked PRs are merged into `dev` but not yet
-# released from Todo / In Progress to `Awaiting release`. The repository GITHUB_TOKEN of chipin-frontend
-# cannot write the org Project, so this writer lives here, not in the repository-local action; the Status
-# appears within one schedule interval (about 15 minutes) of the merge into `dev`.
-# The strategy comes from the registry record: after the frontend cutover to `master` (chipin-frontend#497) the
-# record says `completion: deployment-receipt` and this same run becomes the org sweep fallback of that strategy
-# (close on a valid production receipt, Awaiting release for merged but not yet received work); no change here.
+# Org sweep of the frontend completion (docs/workflow/completion.md). Runs the shared engine
+# automation/completion.mjs for chipin-frontend with the organization PAT CHIPIN_ISSUE_WRITE_TOKEN; the strategy and
+# whether the engine runs at all come from the registry record of the pinned checkout (this repository's master).
+# Since the cutover to canonical `master` (chipin-frontend#497, .github#216) the record says
+# `completion: deployment-receipt` with `capabilities.completion: manual`: with CHIPIN_COMPLETION_SKIP_MANUAL=1 the
+# engine returns a `skipped` receipt before any GitHub read, so every run is a green no-op (no Issue closed, no
+# Project #5 Status written) until .github#217 switches the capability to `automatic`. From then on this same run is
+# the org fallback of deployment-receipt: close on a valid production receipt, and move Todo / In Progress to
+# `Awaiting release` for merged but not yet received work (the repository GITHUB_TOKEN cannot write the org Project,
+# so this writer lives here). Rollback to the dev/main record (production-merge, automatic) needs no change here.
 # Runs only from trusted master pushes and the schedule; no branch-selectable dispatch.
 name: Frontend production completion
 
@@ -45,4 +44,5 @@ jobs:
           CHIPIN_CANONICAL_WRITE_TOKEN: ${{ secrets.CHIPIN_ISSUE_WRITE_TOKEN }}
           CHIPIN_COMPLETION_WRITE: "1"
           CHIPIN_COMPLETION_AWAITING_RELEASE: "1"
+          CHIPIN_COMPLETION_SKIP_MANUAL: "1"
         run: node automation/completion.mjs --repository ChipIn-one/chipin-frontend

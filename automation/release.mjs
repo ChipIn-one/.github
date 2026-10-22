@@ -195,7 +195,7 @@ export function githubStore(client, repository) {
 
   // /commits/{sha}/pulls returns merged PRs only for commits reachable from the DEFAULT branch
   // (otherwise only open PRs). Every registry release branch is the default branch today
-  // (frontend main, backend develop, .github master); a different layout needs another inventory.
+  // (frontend master since .github#216, backend develop, .github master); a different layout needs another inventory.
   async function readCommitPullsPage(sha) {
     return client.listAll(root + "/commits/" + sha + "/pulls");
   }
@@ -360,8 +360,8 @@ async function collectIncludedPullRequests(store, commits, integrationBranch, pr
     const pulls = await store.listCommitPulls(commit.sha);
     const inRange = pulls.filter((pull) => pull.mergedAt && pull.mergeCommitSha && rangeShas.has(pull.mergeCommitSha));
     const merged = inRange.filter((pull) => pull.baseRef === integrationBranch);
-    // PRs merged into the promotion branch (the dev -> main release PR itself, or a hotfix straight
-    // into main) are never counted for the version; they are reported so nothing disappears silently.
+    // PRs merged into the promotion branch (with a promotion record such as the frontend dev -> main one before
+    // .github#216: the release PR itself, or a hotfix straight into main) are never counted for the version; they are reported so nothing disappears silently.
     for (const pull of inRange.filter((pull) => promotionBranch && pull.baseRef === promotionBranch)) {
       excluded.set(pull.number, { number: pull.number, title: pull.title, url: pull.url, baseRef: pull.baseRef, mergedAt: pull.mergedAt, mergeCommitSha: pull.mergeCommitSha });
     }

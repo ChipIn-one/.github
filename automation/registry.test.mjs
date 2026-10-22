@@ -75,14 +75,17 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
   assert.deepEqual(registry.project, { number: 5, statuses: ['Backlog', 'Todo', 'In Progress', 'Awaiting release', 'Done'] });
   assert.deepEqual(registry.repositories.map(profile => profile.repository), [FE, BE, KB, META, NOTIF]);
 
+  // .github#216: canonical master, deployment-receipt with Vercel production evidence, deploy tags;
+  // the completion engine stays off (capabilities.completion manual) until .github#217
   assert.deepEqual(getRepositoryProfile(FE), {
     repository: FE, kind: 'code', visibility: 'public', owner: 'syllik',
-    branches: { default: 'main', integration: 'dev', promotion: 'main' },
-    deploymentProfile: 'production', completion: 'production-merge', protection: 'ruleset',
+    branches: { default: 'master', integration: 'master', promotion: null },
+    deploymentProfile: 'production', completion: 'deployment-receipt',
+    productionEvidence: { environment: 'Production', creator: 'vercel[bot]' }, protection: 'ruleset',
     requiredChecks: ['frontend-ci'],
-    release: { strategy: 'semver-by-impact', trigger: 'promotion-merge', tagPrefix: 'v' },
+    release: { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v' },
     capabilities: { admission: 'required', developmentLink: 'required', prMetadata: 'required',
-      relationships: 'required', completion: 'automatic', milestones: 'enabled',
+      relationships: 'required', completion: 'manual', milestones: 'enabled',
       dependabot: 'required', agentRouting: 'required' },
   });
   assert.deepEqual(getRepositoryProfile(BE), {
@@ -295,7 +298,7 @@ test('admission and intake scope is the registry: every repository with admissio
 
 test('consumers resolve the same behavior from the registry as the old literals', () => {
   assert.deepEqual([...SUPPORTED_REPOSITORIES].sort(), [META, BE, FE, KB]);
-  assert.equal(integrationBranch(FE), 'dev');
+  assert.equal(integrationBranch(FE), 'master');
   assert.equal(integrationBranch(BE), 'develop');
   assert.equal(integrationBranch(KB), 'master');
   for (const repository of [FE, BE, KB, META]) {
@@ -346,10 +349,36 @@ test('release block: strategy and trigger must agree and fit the repository', ()
 
 test('release decisions of 2026-10-21 are recorded for every registered repository', () => {
   const by = Object.fromEntries(loadRegistry().repositories.map(p => [p.repository, p.release]));
-  assert.deepEqual(by[FE], { strategy: 'semver-by-impact', trigger: 'promotion-merge', tagPrefix: 'v' });
+  // FE moved from semver-by-impact / promotion-merge to deploy tags with the master cutover (.github#216)
+  assert.deepEqual(by[FE], { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v' });
   assert.deepEqual(by[BE], { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v' });
   assert.deepEqual(by[META], { strategy: 'semver-by-impact', trigger: 'integration-merge', tagPrefix: 'v' });
   assert.equal(by[KB].strategy, 'none');
   assert.equal(by[NOTIF].strategy, 'none');
   assert.deepEqual(listRepositories({ kinds: ['docs'] }), [KB, NOTIF]);
+});
+
+test('frontend cutover record (.github#216): engine off is valid, the dev/main rollback record still validates', async () => {
+  const live = await readFile(REGISTRY_PATH, 'utf8');
+  // deployment-receipt with capabilities.completion manual is the live record; engine on (.github#217) validates too
+  const engineOff = /^      completion: manual {8}# automatic \| manual; the engine stays off for chipin-frontend until #217$/m;
+  assert.match(live, engineOff);
+  assert.equal(getRepositoryProfile(FE, loadRegistry({ text: live.replace(engineOff, '      completion: automatic') })).capabilities.completion, 'automatic');
+  // rollback window of chipin-frontend#497: reverting only the frontend record gives a valid registry again
+  const rollback = live
+    .replace(/branches: \{ default: master, integration: master \}[^\n]*\n/, 'branches: { default: main, integration: dev, promotion: main }\n')
+    .replace(/completion: deployment-receipt[^\n]*\n    productionEvidence:[^\n]*\n/, 'completion: production-merge\n')
+    .replace(/    # tag \+ GitHub Release after every successful Vercel Production deploy[^\n]*\n    release: \{[^\n]*\n/,
+      '    release: { strategy: semver-by-impact, trigger: promotion-merge, tagPrefix: v }\n')
+    .replace(engineOff, '      completion: automatic');
+  const legacy = getRepositoryProfile(FE, loadRegistry({ text: rollback }));
+  assert.deepEqual(legacy.branches, { default: 'main', integration: 'dev', promotion: 'main' });
+  assert.equal(legacy.completion, 'production-merge');
+  assert.equal(legacy.productionEvidence, undefined);
+  assert.deepEqual(legacy.release, { strategy: 'semver-by-impact', trigger: 'promotion-merge', tagPrefix: 'v' });
+  assert.equal(legacy.capabilities.completion, 'automatic');
+  // every other record is untouched by the rollback
+  for (const repository of [BE, KB, META, NOTIF]) {
+    assert.deepEqual(getRepositoryProfile(repository, loadRegistry({ text: rollback })), getRepositoryProfile(repository), repository);
+  }
 });

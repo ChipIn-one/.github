@@ -86,13 +86,13 @@ Branch names, titles, closing keywords, plain URLs, matching numbers, and Milest
 fallbacks. Canonical implementation evidence exists only after the native Development relationship is
 read back from GitHub.
 
-Project #5 Status tracks active work as `Backlog -> Todo -> In Progress -> Awaiting release`. `Awaiting release` means the last required implementation PR merged into the integration branch of a repository whose completion needs a later step (frontend promotion to `main`); it is set only by the completion engine and is never a closure trigger. `Done` stays the derived mirror of `closed/completed`: a display state only for an Issue already `closed/completed`. Do not use or recreate `DEV` or `PROD`; `Done` must never authorize Issue closure.
+Project #5 Status tracks active work as `Backlog -> Todo -> In Progress -> Awaiting release`. `Awaiting release` means the last required implementation PR merged into the integration branch of a repository whose completion needs a later step (frontend: a production Deployment receipt on `master`); it is set only by the completion engine and is never a closure trigger. `Done` stays the derived mirror of `closed/completed`: a display state only for an Issue already `closed/completed`. Do not use or recreate `DEV` or `PROD`; `Done` must never authorize Issue closure.
 
 Native Issue state is the completion authority. Closing as completed means the task is complete; closing as not planned means it was cancelled or intentionally abandoned. Reopening makes the task unfinished again.
 
 Development-linked PRs are implementation evidence. Their merge state must not be copied into Project Status, except `Awaiting release`, which only the completion engine writes (docs/workflow/completion.md).
 
-For frontend code work, merge to integration branch `dev` is not completion. Close only after the required implementation is merged to production branch `main`.
+For frontend code work, merge to the integration branch (`master` since .github#216) is not completion. Close only after the required implementation is in production (a Vercel `Production` deployment of `master`).
 
 Completion triggers per repository are defined by the registry `completion` strategy (docs/workflow/completion.md).
 

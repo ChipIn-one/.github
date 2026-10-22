@@ -4,9 +4,11 @@ FE-only rollout. Reuses shared GitHubClient from github-metadata.mjs and the exi
 
 ## Contract
 
-Implementation PR: same-repo source → dev, **one** exact "Task identity: ChipIn-one/chipin-frontend#381" body line. Native link is required and read back; free-text mentions, matching numbers, branch names and closing keywords are never substitutes. Single-Issue implementation identity only; multi-Issue implementation PRs are intentionally unsupported and fail closed.
+Routes come from the registry record of `chipin-frontend`. Canonical `master` (.github#216): implementation PRs only, base `master`; any other base, including `dev` and `main`, fails with `ROUTE: only implementation→master`. The release route below exists only for the dev/main rollback record (`branches.promotion: main`).
 
-Release PR: same-repo dev → main, no "Task identity" marker. Body includes one each of:
+Implementation PR: same-repo source → integration branch (`master`; `dev` on the rollback record), **one** exact "Task identity: ChipIn-one/chipin-frontend#381" body line. Native link is required and read back; free-text mentions, matching numbers, branch names and closing keywords are never substitutes. Single-Issue implementation identity only; multi-Issue implementation PRs are intentionally unsupported and fail closed.
+
+Release PR (rollback record only): same-repo dev → main, no "Task identity" marker. Body includes one each of:
 - "Included implementation PRs: ChipIn-one/chipin-frontend#123, ChipIn-one/chipin-frontend#124"
 - "Included Issues: ChipIn-one/chipin-frontend#21, ChipIn-one/chipin-frontend#22"
 

@@ -3,11 +3,20 @@ import test from "node:test";
 import {classifyPR,implementationIdentity,releaseReferences,bodyGaps,chooseOwner,chooseReviewer,uniqueProjectItem,ensureProjectPR,ensureCategory,readProject,reconcilePR,assertSingleNativeIssue,requiredShaCIGreen} from "./pr-metadata.mjs";
 const repo="ChipIn-one/chipin-frontend";
 const pr=(base,head)=>({base:{ref:base,repo:{full_name:repo}},head:{ref:head,repo:{full_name:repo}}});
-test("routes implementation and release exactly",()=>{
-  assert.equal(classifyPR(pr("dev","feat/issue-381-pr-metadata")),"implementation");
-  assert.equal(classifyPR(pr("main","dev")),"release");
-  assert.throws(()=>classifyPR(pr("main","feature")) ,/ROUTE/);
-  assert.throws(()=>classifyPR({...pr("dev","feat/task"),head:{ref:"x",repo:{full_name:"fork/repo"}}}),/SCOPE/);
+// the frontend dev/main layout before the canonical-master cutover (.github#216): rollback target of chipin-frontend#497
+const LEGACY_BRANCHES=Object.freeze({default:"main",integration:"dev",promotion:"main"});
+test("routes from the registry: frontend on canonical master has implementation → master only",()=>{
+  assert.equal(classifyPR(pr("master","feat/issue-381-pr-metadata")),"implementation");
+  for (const [base,head] of [["dev","feat/x"],["main","feat/x"],["main","dev"],["master","master"]])
+    assert.throws(()=>classifyPR(pr(base,head)),/^Error: ROUTE: only implementation→master$/u,base+" <- "+head);
+  assert.throws(()=>classifyPR({...pr("master","feat/task"),head:{ref:"x",repo:{full_name:"fork/repo"}}}),/SCOPE/);
+});
+test("routes implementation and release exactly on the dev/main rollback layout",()=>{
+  assert.equal(classifyPR(pr("dev","feat/issue-381-pr-metadata"),LEGACY_BRANCHES),"implementation");
+  assert.equal(classifyPR(pr("main","dev"),LEGACY_BRANCHES),"release");
+  assert.throws(()=>classifyPR(pr("main","feature"),LEGACY_BRANCHES),/ROUTE: only implementation→dev and dev→main/u);
+  assert.throws(()=>classifyPR(pr("master","feature"),LEGACY_BRANCHES),/ROUTE/);
+  assert.throws(()=>classifyPR({...pr("dev","feat/task"),head:{ref:"x",repo:{full_name:"fork/repo"}}},LEGACY_BRANCHES),/SCOPE/);
 });
 test("identity must be single and explicit; never inferred",()=>{
   assert.equal(implementationIdentity("Task identity: ChipIn-one/chipin-frontend#381").issueNumber,381);
@@ -216,7 +225,10 @@ test("release retries preserve manual values, avoid duplicate Project item and n
   const policy={repository:repo,project:5,ownerPolicy:{allowIssueOwner:true,allowAuthorFallback:false,
     implementationOwner:null,releaseOwner:null},reviewerPolicy:{implementation:[],release:[]}};
   await assert.rejects(reconcilePR(client,policy,20,"b".repeat(40)),/SHA/u);
-  const options={admissionClient:client,admissionConfig:{},
+  await assert.rejects(reconcilePR(client,policy,20,SHA,{admissionClient:client,admissionConfig:{},
+    admit:async()=>({status:"INTAKE_COMPLETE",receipts:[]})}),/ROUTE: only implementation→master/u,
+    "no release route on canonical master");
+  const options={admissionClient:client,admissionConfig:{},branches:LEGACY_BRANCHES,
     admit:async()=>({status:"INTAKE_COMPLETE",receipts:[]})};
   const one=await reconcilePR(client,policy,20,SHA,options);
   const two=await reconcilePR(client,policy,20,SHA,options);
@@ -292,7 +304,7 @@ const feOnlyPolicy={repository:repo,project:5,ownerPolicy:{allowIssueOwner:true,
 function dependencyPR({login="dependabot[bot]",ref="dependabot/npm_and_yarn/dev/vitest-5.0.4",sha="c".repeat(40)}={}){
   return {number:463,node_id:"PR_463",state:"open",body:"Bumps vitest from 4 to 5.",
     user:{login,type:login.endsWith("[bot]")?"Bot":"User"},
-    head:{ref,sha,repo:{full_name:repo}},base:{ref:"dev",sha:"d".repeat(40),repo:{full_name:repo}},
+    head:{ref,sha,repo:{full_name:repo}},base:{ref:"master",sha:"d".repeat(40),repo:{full_name:repo}},
     requested_reviewers:[]};
 }
 function recordingClient(pr){

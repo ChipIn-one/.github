@@ -8,8 +8,11 @@ import { GitHubClient } from './github-metadata.mjs';
 import { admissionProfile, readAdmission, assertFreshReceipt, requiresExplicitOwner } from './issue-admission.mjs';
 import { readTaskIdentityMarker, readKBTaskOwnerMarker } from './development-link.mjs';
 
-export function taskIdentitiesForPr(repository, pr) {
-  const profile = admissionProfile(repository);
+// Routing comes from the registry record of `repository` (`registry` defaults to workflow-registry.yaml):
+// implementation PR = any same-repository head into branches.integration; release PR = integration ->
+// promotion, only when the record has a promotion branch (chipin-frontend on master has none, #216).
+export function taskIdentitiesForPr(repository, pr, registry = undefined) {
+  const profile = admissionProfile(repository, registry);
   if (!profile) throw new Error('Unsupported PR admission repository ' + repository);
   const integration = profile.branches.integration;
   const promotion = profile.branches.promotion;
@@ -30,7 +33,8 @@ export function taskIdentitiesForPr(repository, pr) {
     }
     return ids.map(id => ({ canonical: id, repository, issueNumber: Number(id.split('#')[1]) }));
   }
-  throw new Error('Unsupported PR branch transition; no admission bypass.');
+  throw new Error('Unsupported PR branch transition ' + head + ' -> ' + base + '; no admission bypass (registry: implementation -> '
+    + integration + (promotion ? ', release ' + integration + ' -> ' + promotion : '') + ').');
 }
 
 export function selectedOwnerForPr(repository, body) {
@@ -38,12 +42,12 @@ export function selectedOwnerForPr(repository, body) {
   return readKBTaskOwnerMarker(body);
 }
 
-export async function preflightPr({ client, config, repository, number, expectedHeadSha, read = readAdmission }) {
+export async function preflightPr({ client, config, repository, number, expectedHeadSha, read = readAdmission, registry = undefined }) {
   if (!/^[a-f0-9]{40}$/.test(expectedHeadSha ?? '')) throw new Error('Exact expected current PR head SHA required.');
   const pr = await client.request('/repos/' + repository + '/pulls/' + number);
   if (pr?.number !== number || pr?.state !== 'open') throw new Error('PR identity/state mismatch or unreadable.');
   if (pr.head?.sha !== expectedHeadSha) throw new Error('STALE: PR head SHA changed since the invoking workflow event.');
-  const ids = taskIdentitiesForPr(repository, pr);
+  const ids = taskIdentitiesForPr(repository, pr, registry);
   const owner = selectedOwnerForPr(repository, pr.body);
   const receipts = [];
   for (const id of ids) {
