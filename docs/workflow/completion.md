@@ -28,7 +28,7 @@ In `.github` and `chipin-knowledge-base` the integration branch is the default b
 | Repository | Strategy | Where it runs | What closes the Issue |
 | --- | --- | --- | --- |
 | `chipin-frontend` | `production-merge` | Repository-local `frontend-production-completion-action` caller (push to `main`, repository token, Project repair off) and the privileged org fallback `.github/workflows/frontend-production-completion.yml` (Project repair on); unchanged by #179 | Every linked PR has production evidence: merged into `dev` and contained in a merged `dev -> main` release PR, or the canonical `dev -> main` PR itself. |
-| `.github` | `integration-merge` | `.github/workflows/integration-completion.yml` (push to `master`, schedule every 30 min, org write PAT, Project repair on); PRs are linked in Development by hand until the development-link caller lands (see Rollout) | Every linked PR merged into `master` and its merge commit is still in the `master` head. Today GitHub's native auto-close closes first (see above). |
+| `.github` | `integration-merge` | `.github/workflows/integration-completion.yml` (push to `master`, schedule every 30 min, org write PAT, Project repair on); PRs get their Development link from `.github/workflows/native-development-link.yml` (`Task identity:` line; pinned to the current org tag SHA) | Every linked PR merged into `master` and its merge commit is still in the `master` head. Today GitHub's native auto-close closes first (see above). |
 | `chipin-knowledge-base` | `integration-merge` | Caller from `templates/caller-completion-integration.yml` (push to `master`, repository token), once adopted | Same as `.github`. Today GitHub's native auto-close closes KB Issues on merge; the engine takes over once the setting is disabled and the caller is adopted. |
 | `chipin-backend` | `manual` | Nothing until [#156](https://github.com/ChipIn-one/.github/issues/156) | A human closes the Issue. |
 | `chipin-notifications` | `manual` | Nothing | A human closes the Issue. |
@@ -99,7 +99,7 @@ Paths:
 - Composite action [`automation/completion-action`](../../automation/completion-action/action.yml): input `token` (repository token with `issues: write`), Project repair off.
 - Org workflow [`.github/workflows/integration-completion.yml`](../../.github/workflows/integration-completion.yml): `.github` itself, push to `master` and schedule, no `workflow_dispatch`. It passes the org write PAT `CHIPIN_ISSUE_WRITE_TOKEN` as `CHIPIN_CANONICAL_WRITE_TOKEN`, like the frontend fallback, so it sees private BE/KB blockers and sub-issues and keeps Project #5 reconciliation on; the workflow's own `permissions` are `contents: read` only.
 - Template [`templates/caller-completion-integration.yml`](../../templates/caller-completion-integration.yml): KB-like callers, the action pinned to an org tag SHA, repository token (`github.token`, limitation above). KB already has its development-link caller.
-- [`development-link.mjs`](../../automation/development-link.mjs) accepts `meta` repositories in this PR, so `Task identity: ChipIn-one/.github#N` parses. The `.github` caller workflow is not part of this PR (a caller pinned to v1.2.0 fails: that engine rejects `.github` identities); until it lands, `.github` PRs are linked by hand in the PR sidebar.
+- [`development-link.mjs`](../../automation/development-link.mjs) accepts `meta` repositories since `v1.3.0`, so `Task identity: ChipIn-one/.github#N` parses; [`.github/workflows/native-development-link.yml`](../../.github/workflows/native-development-link.yml) is the `.github` caller (same shape as the frontend and knowledge-base callers, `workflow_dispatch` with the exact head SHA for a PR opened before the caller existed).
 
 ## Rollout
 
@@ -110,6 +110,6 @@ Paths:
 | Disable native auto-close in `.github` and KB (owner) | [#179](https://github.com/ChipIn-one/.github/issues/179) |
 | `Awaiting release` Status | [#180](https://github.com/ChipIn-one/.github/issues/180) |
 | Frontend pin bump of the completion action | [chipin-frontend#479](https://github.com/ChipIn-one/chipin-frontend/issues/479) |
-| Org pin bump + `.github` development-link caller | follow-up after the first tag with #179 |
+| Org pin bump to `v1.3.0` + `.github` development-link caller | [#179](https://github.com/ChipIn-one/.github/issues/179) follow-up PR |
 | Knowledge base adopts the completion caller | follow-up after a tag with #179 |
 | Backend completion decision | [#156](https://github.com/ChipIn-one/.github/issues/156) |
