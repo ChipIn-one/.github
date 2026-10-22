@@ -139,6 +139,23 @@ This is an external current-master validation host, not a cross-repository PR st
 GitHub Actions events cannot attach this repository's job as a required check to a private KB pull
 request without separate cross-repository check-run/dispatch infrastructure.
 
+## Project #5 items reads (#221)
+
+Every Project #5 items reader (`readProjectSnapshot` in `github-metadata.mjs`, used by completion,
+intake, admission and the metadata migration; `readProject` in `pr-metadata.mjs`, used by the PR
+Project writer; the conformance PR scan) goes through `readProjectItemsPage`:
+
+- GitHub intermittently answers a Project items page, first page or cursor page alike, with HTTP
+  200, no `errors`, and a phantom empty connection (`totalCount: 0`, `hasNextPage: false`, no
+  nodes). Such a page is re-read with the delays `PROJECT_PAGE_RETRY_DELAYS_MS`
+  (100, 250, 500, 1000, 2000, 4000 ms).
+- A page still phantom after every retry fails with `PROJECT_ITEMS_PHANTOM`; it never becomes a
+  short read or an empty Project. Only a caller passing `allowEmptyProject: true` accepts an empty
+  first page, and no production caller does.
+- One whole read (all pages, phantom re-reads and growth re-reads) has a budget of
+  `PROJECT_READ_DEADLINE_MS` = 60 s; exceeding it fails with `PROJECT_READ_DEADLINE`.
+- The completeness (`read N of totalCount`), Project identity and growth re-read checks still apply.
+
 ## Tests
 
 ```sh

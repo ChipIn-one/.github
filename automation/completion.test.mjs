@@ -671,7 +671,8 @@ test("awaiting release: missing or ambiguous Project membership is noted without
   assert.equal(ambiguous.code, "project-membership-ambiguous");
   assert.deepEqual(client.log, [], "nothing is read or written for a missing or ambiguous membership");
 
-  const sweep = projectClient({ items: [] });
+  // Project #5 is never empty; an empty zero-count items page is re-read as phantom (#221).
+  const sweep = projectClient({ items: [{ id: "ITEM_X", repository: ORG, number: 1 }] });
   const receipt = await runCompletion(sweep, { repository: FE, registry: legacyFrontendRegistry(), awaitingRelease: true });
   assert.match(receipt.results[0].decision.detail, /project-membership-missing/u);
   assert.deepEqual(mutations(sweep), []);

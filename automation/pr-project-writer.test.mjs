@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { reconcileProjectPR } from "./pr-project-writer.mjs";
+// Fakes model a genuinely empty Project #5; an empty zero-count first page otherwise fails closed as phantom (#221).
+const EMPTY_PROJECT={retryDelaysMs:[],allowEmptyProject:true};
 
 const repo="ChipIn-one/chipin-frontend", root="/repos/"+repo, SHA="a".repeat(40);
 // Release PRs (dev -> main) exist only on the frontend dev/main layout from before the canonical-master cutover
@@ -71,8 +73,8 @@ test("org writer adds exactly one Project item after fresh Issue/native checks; 
     reread:async()=>{events.push("revision");return{receipt,blockers:[]}},
     verifyIncluded:async(_,refs)=>{events.push("native");assert.deepEqual(refs,{prs:[37],issues:[5]})},
   };
-  const first=await reconcileProjectPR({branches:LEGACY_BRANCHES,reader,writer,config:{},number:42,expectedSha:SHA,...dependencies});
-  const second=await reconcileProjectPR({branches:LEGACY_BRANCHES,reader,writer,config:{},number:42,expectedSha:SHA,...dependencies});
+  const first=await reconcileProjectPR({branches:LEGACY_BRANCHES,reader,writer,config:{},number:42,expectedSha:SHA,pageRetry:EMPTY_PROJECT,...dependencies});
+  const second=await reconcileProjectPR({branches:LEGACY_BRANCHES,reader,writer,config:{},number:42,expectedSha:SHA,pageRetry:EMPTY_PROJECT,...dependencies});
   assert.equal(first.created,true);
   assert.equal(second.created,false);
   assert.equal(first.itemId,"ITEM_42");
@@ -223,7 +225,7 @@ test("fresh reread replaces aged preflight receipt at Project boundary",async()=
     return{addProjectV2ItemById:{item:{id:"ITEM_42"}}};
   }};
   const result=await reconcileProjectPR({branches:LEGACY_BRANCHES,
-    reader,writer,config:{},number:42,expectedSha:SHA,
+    reader,writer,config:{},number:42,expectedSha:SHA,pageRetry:EMPTY_PROJECT,
     admit:async()=>({status:"INTAKE_COMPLETE",receipts:[oldReceipt]}),
     reread:async()=>({receipt:freshReceipt,blockers:[]}),
     verifyIncluded:async()=>{verified++;}
@@ -248,7 +250,7 @@ test("Project scan cannot authorize a write after Issue admission revision chang
     writes++;throw Error("Project mutation must be blocked");
   }};
   await assert.rejects(reconcileProjectPR({branches:LEGACY_BRANCHES,
-    reader,writer,config:{},number:42,expectedSha:SHA,
+    reader,writer,config:{},number:42,expectedSha:SHA,pageRetry:EMPTY_PROJECT,
     admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
     reread:async()=>{
       admissionReads++;
@@ -281,7 +283,7 @@ test("Project scan expiry is caught after re-reading canonical admission",async(
     writes++;throw Error("Project mutation must be blocked");
   }};
   await assert.rejects(reconcileProjectPR({branches:LEGACY_BRANCHES,
-    reader,writer,config:{},number:42,expectedSha:SHA,
+    reader,writer,config:{},number:42,expectedSha:SHA,pageRetry:EMPTY_PROJECT,
     admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
     reread:async()=>{
       admissionReads++;
@@ -309,7 +311,7 @@ test("Project writer rechecks native release evidence after pre-write Project sc
     writes++;throw Error("Project mutation must be blocked");
   }};
   await assert.rejects(reconcileProjectPR({branches:LEGACY_BRANCHES,
-    reader,writer,config:{},number:42,expectedSha:SHA,
+    reader,writer,config:{},number:42,expectedSha:SHA,pageRetry:EMPTY_PROJECT,
     admit:async()=>({status:"INTAKE_COMPLETE",receipts:[receipt]}),
     reread:async()=>({receipt,blockers:[]}),
     verifyIncluded:async()=>{

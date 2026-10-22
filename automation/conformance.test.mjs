@@ -523,3 +523,36 @@ test('CLI: audit writes per-repository artifacts; upsert apply needs activation'
 test('the real registry yields a profile for each audited repository', () => {
   assert.equal(loadRegistry().repositories.length, 5);
 });
+
+test('Project #5 PR scan re-reads phantom empty pages and fails closed when one persists (#221)', async () => {
+  const node = (n, type = 'PullRequest') => ({ content: { __typename: type, number: n, repository: { nameWithOwner: 'ChipIn-one/chipin-frontend' } } });
+  const pages = {
+    root: { totalCount: 3, pageInfo: { hasNextPage: true, endCursor: 'c1' }, nodes: [node(1), node(2, 'Issue')] },
+    c1: { totalCount: 3, pageInfo: { hasNextPage: false, endCursor: 'c2' }, nodes: [node(3)] },
+  };
+  const phantom = { totalCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] };
+  let phantoms = 2;
+  const calls = [];
+  const flaky = { graphql: async (_q, { a }) => {
+    const key = a ?? 'root'; calls.push(key);
+    if (key === 'c1' && phantoms-- > 0) return { organization: { projectV2: { items: phantom } } };
+    return { organization: { projectV2: { items: pages[key] } } };
+  } };
+  const pageRetry = { retryDelaysMs: [0, 0], wait: async () => {} };
+  const src = new GitHubConformanceSource(flaky, loadRegistry(), { pageRetry });
+  assert.deepEqual((await src.projectPullRequests()).map(r => r.number), [1, 3]);
+  assert.deepEqual(calls, ['root', 'c1', 'c1', 'c1']);
+  const stuck = { graphql: async (_q, { a }) => ({ organization: { projectV2: { items: a ? phantom : pages.root } } }) };
+  await assert.rejects(new GitHubConformanceSource(stuck, loadRegistry(), { pageRetry }).projectPullRequests(),
+    e => e.code === 'PROJECT_ITEMS_PHANTOM' && /page stayed empty after 2 retries/.test(e.message));
+  let firstCalls = 0;
+  const phantomFirst = { graphql: async (_q, { a }) => {
+    if (!a && firstCalls++ === 0) return { organization: { projectV2: { items: phantom } } };
+    return { organization: { projectV2: { items: pages[a ?? 'root'] } } };
+  } };
+  assert.deepEqual((await new GitHubConformanceSource(phantomFirst, loadRegistry(), { pageRetry }).projectPullRequests()).map(r => r.number), [1, 3]);
+  assert.equal(firstCalls, 2);
+  const empty = { graphql: async () => ({ organization: { projectV2: { items: phantom } } }) };
+  await assert.rejects(new GitHubConformanceSource(empty, loadRegistry(), { pageRetry }).projectPullRequests(),
+    e => e.code === 'PROJECT_ITEMS_PHANTOM' && /first page stayed empty/.test(e.message));
+});

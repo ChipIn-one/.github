@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {classifyPR,implementationIdentity,releaseReferences,bodyGaps,chooseOwner,chooseReviewer,uniqueProjectItem,ensureProjectPR,ensureCategory,readProject,reconcilePR,assertSingleNativeIssue,requiredShaCIGreen} from "./pr-metadata.mjs";
 const repo="ChipIn-one/chipin-frontend";
+// Fakes below model a genuinely empty Project #5; an empty zero-count first page otherwise fails closed as phantom (#221).
+const EMPTY_PROJECT={retryDelaysMs:[],allowEmptyProject:true};
 const pr=(base,head)=>({base:{ref:base,repo:{full_name:repo}},head:{ref:head,repo:{full_name:repo}}});
 // the frontend dev/main layout before the canonical-master cutover (.github#216): rollback target of chipin-frontend#497
 const LEGACY_BRANCHES=Object.freeze({default:"main",integration:"dev",promotion:"main"});
@@ -72,7 +74,7 @@ test("Project write requires actual read-back, not mutation claim",async()=>{
     if(q.startsWith("query"))return{organization:{projectV2:{id:"P5",items:{totalCount:0,pageInfo:{hasNextPage:false,endCursor:null},nodes:[]}}}};
     writes++;return{addProjectV2ItemById:{item:{id:"new"}}};
   }};
-  await assert.rejects(ensureProjectPR(client,"PR_NEW",{beforeWrite:async()=>{},retryWait:async()=>{}}),/missing PR item on read-back after 7 complete reads/);
+  await assert.rejects(ensureProjectPR(client,"PR_NEW",{pageRetry:EMPTY_PROJECT,beforeWrite:async()=>{},retryWait:async()=>{}}),/missing PR item on read-back after 7 complete reads/);
   assert.equal(writes,1);
 });
 
@@ -90,7 +92,7 @@ test("Project membership becomes visible after a successful write without a seco
     writes++;
     return{addProjectV2ItemById:{item:{id:"ITEM_42"}}};
   }};
-  const result=await ensureProjectPR(client,"PR_42",{
+  const result=await ensureProjectPR(client,"PR_42",{pageRetry:EMPTY_PROJECT,
     beforeWrite:async()=>{admissions++;assert.equal(reads,1);},
     retryWait:async(ms)=>{assert.ok(ms>0);waits++;}
   });
@@ -110,7 +112,7 @@ test("Project read-back exhausts bounded reads without making duplicate writes",
     }
     writes++;return{addProjectV2ItemById:{item:{id:"ITEM_42"}}};
   }};
-  await assert.rejects(ensureProjectPR(client,"PR_42",{
+  await assert.rejects(ensureProjectPR(client,"PR_42",{pageRetry:EMPTY_PROJECT,
     beforeWrite:async()=>{admissions++;},
     retryWait:async()=>{waits++;}
   }),/missing PR item on read-back after 7 complete reads/);
@@ -129,7 +131,7 @@ test("Project read-back never accepts a different mutation item ID",async()=>{
     }
     writes++;return{addProjectV2ItemById:{item:{id:"ITEM_42"}}};
   }};
-  await assert.rejects(ensureProjectPR(client,"PR_42",{
+  await assert.rejects(ensureProjectPR(client,"PR_42",{pageRetry:EMPTY_PROJECT,
     beforeWrite:async()=>{},retryWait:async()=>{}
   }),/mutation item ID differs from membership read-back/);
   assert.equal(writes,1);
@@ -145,9 +147,9 @@ test("new Project item requires a successful pre-write admission gate after scan
     }
     mutations++;return{addProjectV2ItemById:{item:{id:"NEW"}}};
   }};
-  await assert.rejects(ensureProjectPR(client,"PR_42"),/pre-write validation callback required/);
+  await assert.rejects(ensureProjectPR(client,"PR_42",{pageRetry:EMPTY_PROJECT}),/pre-write validation callback required/);
   assert.equal(reads,1);assert.equal(mutations,0);
-  await assert.rejects(ensureProjectPR(client,"PR_42",{
+  await assert.rejects(ensureProjectPR(client,"PR_42",{pageRetry:EMPTY_PROJECT,
     beforeWrite:async()=>{
       checks++;assert.equal(reads,2);assert.equal(mutations,0);
       throw new Error("canonical Issue revision changed during Project scan");
@@ -156,6 +158,31 @@ test("new Project item requires a successful pre-write admission gate after scan
   assert.equal(checks,1);assert.equal(mutations,0);
 });
 
+test("Project membership read re-reads a phantom empty cursor page (#221)",async()=>{
+  const node=(n)=>({id:"PVTI_"+n,content:{__typename:"PullRequest",id:"PR_"+n,number:n,repository:{nameWithOwner:repo}}});
+  const pages={root:{totalCount:3,pageInfo:{hasNextPage:true,endCursor:"c1"},nodes:[node(1),node(2)]},
+    c1:{totalCount:3,pageInfo:{hasNextPage:false,endCursor:"c2"},nodes:[node(3)]}};
+  const phantom={totalCount:0,pageInfo:{hasNextPage:false,endCursor:null},nodes:[]};
+  let phantoms=1;const calls=[];
+  const client={async graphql(_q,{after}){const key=after??"root";calls.push(key);
+    if(key==="c1"&&phantoms-->0)return{organization:{projectV2:{id:"P5",items:phantom}}};
+    return{organization:{projectV2:{id:"P5",items:pages[key]}}};}};
+  const result=await readProject(client,{retryDelaysMs:[0],wait:async()=>{}});
+  assert.deepEqual(result.items.map(i=>i.id),["PVTI_1","PVTI_2","PVTI_3"]);
+  assert.deepEqual(calls,["root","c1","c1"]);
+  const stuck={async graphql(_q,{after}){return{organization:{projectV2:{id:"P5",items:after?phantom:pages.root}}};}};
+  await assert.rejects(readProject(stuck,{retryDelaysMs:[0],wait:async()=>{}}),
+    e=>e.code==="PROJECT_ITEMS_PHANTOM"&&/^PROJECT: Project items page stayed empty after 1 retries/u.test(e.message));
+  let firstCalls=0;
+  const phantomFirst={async graphql(_q,{after}){
+    if(!after&&firstCalls++===0)return{organization:{projectV2:{id:"P5",items:phantom}}};
+    return{organization:{projectV2:{id:"P5",items:pages[after??"root"]}}};}};
+  assert.equal((await readProject(phantomFirst,{retryDelaysMs:[0],wait:async()=>{}})).items.length,3);
+  assert.equal(firstCalls,2);
+  const empty={async graphql(){return{organization:{projectV2:{id:"P5",items:phantom}}};}};
+  await assert.rejects(readProject(empty,{retryDelaysMs:[0],wait:async()=>{}}),
+    e=>e.code==="PROJECT_ITEMS_PHANTOM"&&/^PROJECT: Project items first page stayed empty/u.test(e.message));
+});
 test("Project GraphQL permission failures become actionable blockers",async()=>{
   await assert.rejects(readProject({async graphql(){throw new Error("403 Forbidden");}}),/PROJECT_PERMISSION:.*org Projects v2/u);
 });
