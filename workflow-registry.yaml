@@ -10,7 +10,7 @@ schemaVersion: 1
 standardVersion: v1            # tag line of the standard this registry agrees with
 project:
   number: 5
-  statuses: [Backlog, Todo, In Progress, Done]   # Done is a derived mirror only
+  statuses: [Backlog, Todo, In Progress, Awaiting release, Done]   # Done is a derived mirror only
 repositories:
   - repository: ChipIn-one/chipin-frontend
     kind: code                 # code | docs | meta

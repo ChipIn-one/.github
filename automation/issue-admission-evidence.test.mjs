@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAdmissionEnvelope, verifyAdmissionEvidence } from './issue-admission-evidence.mjs';
+import { assertCanonicalReceipt, createAdmissionEnvelope, verifyAdmissionEvidence } from './issue-admission-evidence.mjs';
 const issue = 'ChipIn-one/chipin-frontend#153';
 const revision = 'a'.repeat(64), sha = 'b'.repeat(40), reader = 'c'.repeat(40), config = 'd'.repeat(64);
 const requestId = 'fixed-unique-request-1234';
@@ -107,5 +107,15 @@ test('evidence accepts a .github receipt and rejects repositories outside the ad
     forged.expectedIssue = outside;
     // a tampered receipt fails the envelope digest first (UNTRUSTED_EVIDENCE); either way nothing is admitted
     await assert.rejects(verifyAdmissionEvidence(forged), (error) => ['INVALID_RECEIPT', 'UNTRUSTED_EVIDENCE'].includes(error.code));
+  }
+});
+test('canonical receipt accepts every active Project Status, including Awaiting release, and rejects Done or retired values', () => {
+  for (const status of ['Backlog', 'Todo', 'In Progress', 'Awaiting release']) {
+    const value = receipt(); value.project.status = status;
+    assert.equal(assertCanonicalReceipt(value, { issue, revision }), true, status);
+  }
+  for (const status of ['Done', 'DEV', 'PROD', null]) {
+    const value = receipt(); value.project.status = status;
+    assert.throws(() => assertCanonicalReceipt(value, { issue, revision }), { code: 'INVALID_RECEIPT' });
   }
 });

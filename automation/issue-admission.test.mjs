@@ -5,7 +5,7 @@ import { buildReconcilePlan, createIssue, verifyFinalState } from './issue-intak
 
 const config = {
   organization: 'ChipIn-one',
-  project: { number: 5, statusField: 'Status', statusValues: ['Backlog', 'Todo', 'In Progress', 'Done'] },
+  project: { number: 5, statusField: 'Status', statusValues: ['Backlog', 'Todo', 'In Progress', 'Awaiting release', 'Done'] },
   issueFields: { Priority: { id: 1, options: ['P0', 'P1', 'P2', 'P3'] },
     Severity: { id: 2, options: ['Critical', 'Major', 'Minor'] } },
   issueTypes: { Task: 10, Feature: 11, Bug: 12 },

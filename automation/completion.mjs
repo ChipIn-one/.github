@@ -12,7 +12,10 @@
 // same-repository PRs only, no linked branches, no open blockers, no incomplete sub-issues, no scope change
 // after the last merge (timeline + body-revision history, .github#178), stale-snapshot check before the
 // only mutation (`state=closed`, `state_reason=completed`), never reopen, never set Project Status except
-// the existing repair of an open Issue that still shows derived `Done`.
+// the existing repair of an open Issue that still shows derived `Done`, and, for production-merge with
+// `awaitingRelease` on (.github#180), `Todo`/`In Progress` -> `Awaiting release` for Issues whose decision is
+// `awaiting-production` and that pass evaluateAwaitingReleaseCandidate (setAwaitingReleaseStatus). Status is
+// never an input of the close decision.
 import fs from "node:fs";
 import process from "node:process";
 import { resolve } from "node:path";
@@ -38,6 +41,36 @@ import {
 
 export const COMPLETION_CONTRACT = "chipin-completion/v1";
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
+
+export const AWAITING_RELEASE_STATUS = "Awaiting release";
+// Only these Statuses move to Awaiting release; Done (derived mirror), Backlog and anything else stay as they are.
+const AWAITING_RELEASE_SOURCES = Object.freeze(["Todo", "In Progress"]);
+
+// Same shape as PROJECT_ITEM_STATUS_QUERY / SET_PROJECT_STATUS of frontend-production-completion.mjs, which
+// does not export them (that module stays unchanged).
+const PROJECT_ITEM_STATUS_QUERY = [
+  "query CompletionProjectItemStatus($itemId: ID!) {",
+  "  node(id: $itemId) {",
+  "    __typename",
+  "    ... on ProjectV2Item {",
+  "      id",
+  "      fieldValueByName(name: \"Status\") {",
+  "        __typename",
+  "        ... on ProjectV2ItemFieldSingleSelectValue { name }",
+  "      }",
+  "    }",
+  "  }",
+  "}",
+].join("\n");
+
+const SET_PROJECT_STATUS = [
+  "mutation SetCompletionAwaitingRelease($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {",
+  "  updateProjectV2ItemFieldValue(input: {",
+  "    projectId: $projectId, itemId: $itemId, fieldId: $fieldId,",
+  "    value: { singleSelectOptionId: $optionId }",
+  "  }) { projectV2Item { id } }",
+  "}",
+].join("\n");
 
 export class CompletionBlocked extends Error {
   constructor(code, message) {
@@ -246,6 +279,257 @@ export async function readBranchHead(client, repository, branch) {
   return commit.sha;
 }
 
+export function projectStatusCoordinates(project, desiredStatus, statusField = "Status") {
+  const fields = (project?.fields ?? []).filter((field) => field?.name === statusField);
+  if (fields.length !== 1) {
+    throw blocked("PROJECT_STATUS_FIELD", "Project Status field is missing or ambiguous (" + fields.length + " matches)");
+  }
+  const field = fields[0];
+  if (field.isIssueField === true) throw blocked("PROJECT_STATUS_FIELD", "Project Status must remain project-local");
+  const options = (field.options ?? []).filter((option) => option?.name === desiredStatus);
+  if (options.length !== 1) {
+    throw blocked("PROJECT_STATUS_OPTION", desiredStatus + " Status option is missing or ambiguous ("
+      + options.length + " matches)");
+  }
+  if (!project?.id || !field?.id || !options[0]?.id) {
+    throw blocked("PROJECT_STATUS_FIELD", "Project Status mutation coordinates are unreadable");
+  }
+  return { projectId: project.id, fieldId: field.id, optionId: options[0].id };
+}
+
+export async function readProjectItemStatus(client, itemId) {
+  const data = await client.graphql(PROJECT_ITEM_STATUS_QUERY, { itemId });
+  const item = data?.node;
+  if (item?.id !== itemId) throw blocked("PROJECT_ITEM_UNREADABLE", "Project item status read did not return the expected item");
+  return item.fieldValueByName?.name ?? null;
+}
+
+/**
+ * Awaiting release writer (.github#180) for one open Issue whose production-merge decision is
+ * `awaiting-production`: every linked PR merged into the integration branch, none yet in a merged release.
+ * Moves Project #5 Status `Todo` / `In Progress` -> `Awaiting release` and reads it back. `Awaiting release`
+ * is a no-op; `Done`, `Backlog`, any other value or no Status is left untouched. The Issue is re-read right
+ * before the write and the write is abandoned when it is no longer open or changed since the snapshot.
+ * Never closes or reopens anything. Membership checks mirror reconcileOpenDoneProjectStatus.
+ */
+export async function setAwaitingReleaseStatus(client, issue, project, repository, { statusField = "Status" } = {}) {
+  const memberships = (project?.items ?? []).filter((item) => (
+    item?.repository === repository && item?.number === issue.number
+  ));
+  if (memberships.length === 0) {
+    return { mutated: false, code: "project-membership-missing", detail: "Issue is not present in Project #5." };
+  }
+  if (memberships.length !== 1) {
+    return {
+      mutated: false,
+      code: "project-membership-ambiguous",
+      detail: "Project #5 has " + memberships.length + " items for this Issue; manual reconciliation is required.",
+    };
+  }
+  const itemId = memberships[0].id;
+  if (!itemId) {
+    return { mutated: false, code: "project-item-unreadable", detail: "Project #5 item id is unreadable." };
+  }
+
+  const currentStatus = await readProjectItemStatus(client, itemId);
+  if (currentStatus === AWAITING_RELEASE_STATUS) {
+    return { mutated: false, code: "awaiting-release-current", detail: "Project Status is already " + AWAITING_RELEASE_STATUS + "." };
+  }
+  if (!AWAITING_RELEASE_SOURCES.includes(currentStatus)) {
+    return {
+      mutated: false,
+      code: "awaiting-release-skipped:" + (currentStatus ?? "none"),
+      detail: "Project Status " + (currentStatus === null ? "is empty" : currentStatus)
+        + "; only Todo or In Progress move to " + AWAITING_RELEASE_STATUS + ".",
+    };
+  }
+
+  const { owner, repo } = splitRepository(repository);
+  const current = await client.request("/repos/" + owner + "/" + repo + "/issues/" + issue.number);
+  if (current?.pull_request) throw blocked("NOT_AN_ISSUE", "Refusing to set Project Status of PR #" + issue.number + " as an Issue");
+  if (current?.state !== "open") {
+    return { mutated: false, code: "issue-no-longer-open", detail: "Issue is no longer open; Project Status left unchanged." };
+  }
+  if (!issue.updatedAt || current.updated_at !== issue.updatedAt) {
+    return {
+      mutated: false,
+      code: "stale-snapshot",
+      detail: "Issue changed after evaluation; Project Status left unchanged until the next run.",
+    };
+  }
+
+  const coordinates = projectStatusCoordinates(project, AWAITING_RELEASE_STATUS, statusField);
+  const data = await client.graphql(SET_PROJECT_STATUS, {
+    projectId: coordinates.projectId,
+    itemId,
+    fieldId: coordinates.fieldId,
+    optionId: coordinates.optionId,
+  });
+  if (data?.updateProjectV2ItemFieldValue?.projectV2Item?.id !== itemId) {
+    throw blocked("PROJECT_STATUS_WRITE", "Project Status mutation did not return the expected item id");
+  }
+  const readBack = await readProjectItemStatus(client, itemId);
+  if (readBack !== AWAITING_RELEASE_STATUS) {
+    throw blocked("PROJECT_STATUS_WRITE", "Project Status of Issue #" + issue.number + " did not read back as "
+      + AWAITING_RELEASE_STATUS + " (read " + (readBack ?? "none") + ")");
+  }
+  return {
+    mutated: true,
+    code: "awaiting-release-set",
+    detail: "Project Status " + currentStatus + " -> " + AWAITING_RELEASE_STATUS + ".",
+  };
+}
+
+function notEligible(code, detail) {
+  return { eligible: false, code, detail };
+}
+
+/**
+ * Re-verify one `awaiting-production` candidate before the Awaiting release write (.github#180).
+ *
+ * The frontend evaluator returns `awaiting-production` as soon as the first dev-merged PR without a release
+ * is reached, so the remaining linked PRs (in GitHub order, unsorted) and the scope-freshness gate are not
+ * proven by that code alone. This helper checks EVERY linked PR and the #178 scope-freshness rule itself.
+ * The required-relationships gate (sub-issues, blockers) is not re-read here: the frontend sweep applies
+ * evaluateRequiredRelationships before it can reach `awaiting-production`.
+ */
+export async function evaluateAwaitingReleaseCandidate(issue, { repository, readScopeHistory: readHistory } = {}) {
+  if (typeof repository !== "string" || !repository) throw new Error("repository is required");
+  if (issue?.state !== "OPEN") return notEligible("already-closed", "Issue is not open.");
+
+  const total = issue.linkedPullRequestTotalCount;
+  const pullRequests = Array.isArray(issue.linkedPullRequests) ? issue.linkedPullRequests : [];
+  if (!Number.isInteger(total) || total <= 0) {
+    return notEligible("missing-development", "No native Development-linked PR is present.");
+  }
+  if (pullRequests.length !== total) {
+    return notEligible("ambiguous-development", "Native Development linkage is incomplete: read "
+      + pullRequests.length + " of " + total + " linked PR(s).");
+  }
+
+  const identities = new Set();
+  const mergedAtValues = [];
+  for (const pullRequest of pullRequests) {
+    const identity = (pullRequest?.repository ?? "unknown") + "#" + pullRequest?.number;
+    if (identities.has(identity)) {
+      return notEligible("ambiguous-development", "Duplicate Development PR identity: " + identity + ".");
+    }
+    identities.add(identity);
+    if (pullRequest.repository !== repository) {
+      return notEligible("ambiguous-development", "Linked PR " + identity + " is outside " + repository + ".");
+    }
+    if (pullRequest.headRepository !== repository) {
+      return notEligible("ambiguous-development", "Linked PR #" + pullRequest.number + " comes from "
+        + (pullRequest.headRepository ?? "an unknown repository") + "; fork pull requests are not evidence.");
+    }
+    if (!pullRequest.mergedAt || !Number.isFinite(Date.parse(pullRequest.mergedAt))
+      || !SHA_PATTERN.test(String(pullRequest.mergeCommitSha ?? ""))) {
+      return notEligible("implementation-not-merged",
+        "Linked PR #" + pullRequest.number + " is not merged with readable merge evidence.");
+    }
+    if (pullRequest.baseRefName === FRONTEND_PRODUCTION_BRANCH) {
+      // the canonical same-repository dev -> main release PR (headRepository checked above); such an Issue
+      // would normally be production-complete, but it is valid evidence and does not block the Status
+      if (pullRequest.headRefName !== FRONTEND_INTEGRATION_BRANCH) {
+        return notEligible("ambiguous-production", "Linked PR #" + pullRequest.number
+          + " targets " + FRONTEND_PRODUCTION_BRANCH + " but is not the canonical "
+          + FRONTEND_INTEGRATION_BRANCH + " -> " + FRONTEND_PRODUCTION_BRANCH + " release PR.");
+      }
+    } else if (pullRequest.baseRefName !== FRONTEND_INTEGRATION_BRANCH) {
+      return notEligible("ambiguous-development", "Linked PR #" + pullRequest.number + " targets unsupported base "
+        + (pullRequest.baseRefName ?? "unknown") + ".");
+    }
+    mergedAtValues.push(pullRequest.mergedAt);
+  }
+
+  if (issue.linkedBranchCount !== 0) {
+    return notEligible("development-branch-pending",
+      "Development still contains " + (issue.linkedBranchCount ?? "an unknown number of") + " linked branch(es).");
+  }
+
+  let candidate = issue;
+  if (candidate.scopeHistory === undefined && typeof readHistory === "function") {
+    let history;
+    try {
+      history = await readHistory(candidate);
+    } catch (error) {
+      history = { readable: false, detail: error instanceof Error ? error.message : String(error) };
+    }
+    candidate = { ...candidate, scopeHistory: history && typeof history === "object" ? history : null };
+  }
+  const freshness = resolveScopeFreshnessFloor(candidate, mergedAtValues);
+  if (freshness.blocker) return notEligible(freshness.blocker.code, freshness.blocker.detail);
+  if (freshness.floor !== null && !mergedAtValues.some((mergedAt) => isAfter(mergedAt, freshness.floor))) {
+    return notEligible("scope-changed-after-implementation",
+      "The Issue was edited or reopened after all linked PRs merged (" + freshness.floor + ").");
+  }
+  return { eligible: true };
+}
+
+/**
+ * Apply setAwaitingReleaseStatus to every `awaiting-production` result of a production-merge sweep that
+ * passes evaluateAwaitingReleaseCandidate. The Project snapshot is read once, only when at least one
+ * candidate is eligible, and the Status coordinates are resolved before any write (a missing field or
+ * option stops the run). A failure of one Issue's write is recorded (`awaiting-release-failed`) and the run
+ * continues. Returns the results with the outcome appended to `decision.detail` and the receipt block
+ * `{ enabled, updated, skipped, failed }`.
+ */
+export async function reconcileAwaitingRelease(client, results, {
+  repository,
+  projectConfig,
+  readScopeHistory: readHistory = (issue) => readScopeHistory(client, repository, issue),
+}) {
+  if (!projectConfig) throw new Error("projectConfig is required for the Awaiting release writer");
+  const summary = { enabled: true, updated: [], skipped: 0, failed: [] };
+  if (!results.some((result) => result.decision?.code === "awaiting-production")) {
+    return { results, awaitingRelease: summary };
+  }
+
+  const verdicts = new Map();
+  for (const result of results) {
+    if (result.decision?.code !== "awaiting-production") continue;
+    verdicts.set(result, await evaluateAwaitingReleaseCandidate(result.issue, { repository, readScopeHistory: readHistory }));
+  }
+
+  let project = null;
+  const statusField = projectConfig.project.statusField;
+  if ([...verdicts.values()].some((verdict) => verdict.eligible)) {
+    project = await readProjectSnapshot(client, projectConfig);
+    projectStatusCoordinates(project, AWAITING_RELEASE_STATUS, statusField);
+  }
+
+  const appendDetail = (result, text) => ({
+    ...result,
+    decision: { ...result.decision, detail: result.decision.detail + " Awaiting release: " + text },
+  });
+  const updatedResults = [];
+  for (const result of results) {
+    const verdict = verdicts.get(result);
+    if (!verdict) {
+      updatedResults.push(result);
+      continue;
+    }
+    if (!verdict.eligible) {
+      summary.skipped += 1;
+      updatedResults.push(appendDetail(result, "awaiting-release-skipped:" + verdict.code + ". " + verdict.detail));
+      continue;
+    }
+    let outcome;
+    try {
+      outcome = await setAwaitingReleaseStatus(client, result.issue, project, repository, { statusField });
+    } catch (error) {
+      summary.failed.push(result.issue.number);
+      updatedResults.push(appendDetail(result, "awaiting-release-failed: "
+        + (error instanceof Error ? error.message : String(error))));
+      continue;
+    }
+    if (outcome.mutated) summary.updated.push(result.issue.number);
+    else summary.skipped += 1;
+    updatedResults.push(appendDetail(result, outcome.code + ". " + outcome.detail));
+  }
+  return { results: updatedResults, awaitingRelease: summary };
+}
+
 /**
  * integration-merge sweep over every open Issue of `profile.repository`.
  * Mirrors runCompletionSweep of the frontend module: relationships are read before the decision and again
@@ -380,6 +664,7 @@ export async function runCompletion(client, {
   repository,
   registry = loadRegistry(),
   reconcileProjectStatus = true,
+  awaitingRelease = false,
 } = {}) {
   const profile = requireRepositoryProfile(repository, registry);
   if (profile.capabilities.completion !== "automatic") {
@@ -392,6 +677,17 @@ export async function runCompletion(client, {
       + " is not implemented (implemented: " + AUTOMATIC_COMPLETION_STRATEGIES.join(", ") + ").");
   }
 
+  const [organization] = profile.repository.split("/");
+  const projectConfig = { organization, project: { number: registry.project.number, statusField: "Status" } };
+  // Awaiting release is written only for production-merge (a later release step exists) and only with
+  // Project reconciliation on; for integration-merge the merge is terminal and the writer never runs.
+  if (awaitingRelease === true && !reconcileProjectStatus) {
+    throw blocked("AWAITING_RELEASE_NEEDS_PROJECT", "awaitingRelease requires Project reconciliation (an org token that reads and writes Project #"
+      + registry.project.number + "); a repository-local run cannot write Awaiting release.");
+  }
+  const awaitingReleaseEnabled = awaitingRelease === true && strategy === "production-merge";
+  let awaitingReleaseReceipt = { enabled: false, updated: [], skipped: 0, failed: [] };
+
   let results;
   if (strategy === "production-merge") {
     // The frontend module is bound to dev/main; refuse any other layout instead of guessing.
@@ -401,12 +697,13 @@ export async function runCompletion(client, {
         + " declares " + profile.branches.integration + " / " + (profile.branches.promotion ?? "none") + ".");
     }
     results = await runProductionMergeSweep(client, profile.repository, { reconcileProjectStatus });
+    if (awaitingReleaseEnabled) {
+      const reconciled = await reconcileAwaitingRelease(client, results, { repository: profile.repository, projectConfig });
+      results = reconciled.results;
+      awaitingReleaseReceipt = reconciled.awaitingRelease;
+    }
   } else {
-    const [organization] = profile.repository.split("/");
-    results = await runIntegrationCompletionSweep(client, profile, {
-      reconcileProjectStatus,
-      projectConfig: { organization, project: { number: registry.project.number, statusField: "Status" } },
-    });
+    results = await runIntegrationCompletionSweep(client, profile, { reconcileProjectStatus, projectConfig });
   }
 
   return {
@@ -416,6 +713,7 @@ export async function runCompletion(client, {
     branch: strategy === "production-merge" ? profile.branches.promotion : profile.branches.integration,
     projectNumber: registry.project.number,
     projectReconciliation: reconcileProjectStatus,
+    awaitingRelease: awaitingReleaseReceipt,
     results,
   };
 }
@@ -430,6 +728,10 @@ export function formatCompletionSummary(receipt) {
     "- Closed as completed: " + closed,
     "- Left open: " + (results.length - closed),
     "- Project #" + receipt.projectNumber + " reconciliation: " + (receipt.projectReconciliation ? "on" : "off"),
+    "- Awaiting release: " + (receipt.awaitingRelease?.enabled
+      ? "on (set " + receipt.awaitingRelease.updated.length + ", unchanged " + receipt.awaitingRelease.skipped
+        + ", failed " + (receipt.awaitingRelease.failed ?? []).length + ")"
+      : "off"),
     "",
     "| Issue | Result | Diagnostic |",
     "| --- | --- | --- |",
@@ -468,12 +770,18 @@ async function main() {
   const repository = args.get("--repository") ?? process.env.GITHUB_REPOSITORY ?? null;
   if (!repository) throw new Error("--repository owner/name (or GITHUB_REPOSITORY) is required");
   const reconcileProjectStatus = process.env.CHIPIN_COMPLETION_PROJECT_RECONCILE !== "0";
+  const awaitingRelease = process.env.CHIPIN_COMPLETION_AWAITING_RELEASE === "1";
 
-  const receipt = await runCompletion(new GitHubClient(token), { repository, reconcileProjectStatus });
+  const receipt = await runCompletion(new GitHubClient(token), { repository, reconcileProjectStatus, awaitingRelease });
   const summary = formatCompletionSummary(receipt);
   process.stdout.write(summary);
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary, "utf8");
   if (args.get("--output")) fs.writeFileSync(args.get("--output"), JSON.stringify(receipt, null, 2) + "\n", "utf8");
+  const failed = receipt.awaitingRelease?.failed ?? [];
+  if (failed.length > 0) {
+    process.stderr.write("Awaiting release write failed for Issue(s) " + failed.map((number) => "#" + number).join(", ") + "\n");
+    process.exitCode = 1;
+  }
 }
 
 const isMainModule = process.argv[1]
