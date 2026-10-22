@@ -18,7 +18,7 @@ concurrency:
 jobs:
   release:
     if: github.repository_owner == 'ChipIn-one'
-    uses: ChipIn-one/.github/.github/workflows/release.yml@b3f45b9b2d47db4b2722fb6dfd3cae83f580132a   # v1.2.0
+    uses: ChipIn-one/.github/.github/workflows/release.yml@50158ba40353f3cc9b2e90e317ba2c2bd7a5549d   # v1.2.1
     with:
       apply: true               # false prints the plan only
     secrets:

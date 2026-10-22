@@ -120,7 +120,7 @@ Composite actions remain the units of logic and tests; direct action calls from 
   `.github/workflows/release-on-master.yml` runs after every push to `master` (a human merge) and calls the reusable release workflow pinned to an org tag;
   the version is the previous tag bumped by the maximum `## Version impact` of the pull requests merged since that tag ([release.md](release.md)).
   Merges whose PRs all declare `none` create nothing; a head that is already tagged is a no-op. The engine that runs is the pinned one, never the `master` being
-  released, so after a release that changes the engine the pin in the caller is raised (Dependabot `github-actions` or by hand). Tags placed by hand before #175 (`v1.0.0`–`v1.2.0`) stay valid.
+  released, so after a release that changes the engine the pin in the caller is raised (Dependabot `github-actions` or by hand). Tags placed by hand before #175 (`v1.0.0`–`v1.2.1`) stay valid.
 - Choosing `## Version impact` in a `.github` PR (the first non-empty line of the section is one keyword; a mixed PR takes the highest):
   - `none` — nothing a consumer pins changes: documentation, tests, Issue forms, templates, evidence, and org-internal workflows (`.github/workflows/*` that are not `workflow_call`).
   - `patch` — a fix inside `automation/` (modules, composite actions), in a reusable `workflow_call` workflow or in a registry value, without new inputs and without behaviour a consumer must adopt.
