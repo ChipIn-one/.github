@@ -17,7 +17,7 @@ Fail-closed conditions include required native sub-issues that are not explicitl
 Scope changes are read from native history (`.github#178`), not guessed from `lastEditedAt` alone:
 
 - a **reopen** is ignored when the close it reverts happened after every PR that had merged by then (an early manual close after the merge to `dev`, undone so that automation can finish after the release); a reopen whose preceding close was before the merge, or with another merge between the close and the reopen, still counts as a scope change;
-- a **body edit** counts only when the text changed beyond `- [ ]` / `- [x]` checkbox toggles, compared revision by revision through the Issue edit history (`userContentEdits`);
+- a **body edit** counts only when the text changed beyond `- [ ]` / `- [x]` checkbox toggles and beyond well-formed relationship declaration lines inside `## Dependencies` (`.github#223`, parsed by `relationships.mjs`; see [completion.md](../docs/workflow/completion.md)), compared revision by revision through the Issue edit history (`userContentEdits`);
 - a **title change** always counts.
 
 Boundary rule: a close in the same second as the last merge (the shape a closing keyword produces) still counts as "after the merge", so the reopen that reverts it is ignored; a merge in the same second as a reopen counts as merged before the reopen and does not refresh evidence. The edit history must contain the original body (`includesCreatedEdit`, earliest revision at `createdAt`); otherwise it is unreadable.

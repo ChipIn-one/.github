@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   evaluateIssueForCompletion,
+  isSameScopeText,
   normalizeCheckboxes,
   resolveScopeFreshnessFloor,
 } from "./frontend-production-completion-policy.mjs";
@@ -1165,4 +1166,17 @@ test("the sweep leaves an Issue open whose text was edited after the merge, thro
   const results = await runCompletionSweep(client, repository, { reconcileProjectStatus: false });
   assert.deepEqual(results.map((result) => result.decision.code), ["scope-changed-after-implementation"]);
   assert.match(results[0].decision.detail, /text edited at 2026-10-03T10:00:00Z/u);
+});
+
+test("production-merge shares the #223 projection: relationship-only revisions are the same scope", () => {
+  const before = "## Outcome\n\n- [ ] a\n\n## Dependencies\n\nParent: ChipIn-one/chipin-frontend#496\n\n## References\n";
+  const after = before.replace("#496\n", "#496\nRelates to: ChipIn-one/.github#217\n");
+  assert.equal(isSameScopeText(before, after), true);
+  assert.equal(isSameScopeText(after, before), true);
+  assert.equal(isSameScopeText(before, after.replace("- [ ] a", "- [x] a")), true);
+  assert.equal(isSameScopeText(before, after.replace("- [ ] a", "- [ ] b")), false);
+  assert.equal(isSameScopeText(before, before.replace("## References\n", "## References\nRelates to: ChipIn-one/.github#217\n")), false);
+  // creating the Dependencies section changes the heading lines too -> counts (fail closed)
+  assert.equal(isSameScopeText("x\n", "x\n\n## Dependencies\n\nRelates to: ChipIn-one/.github#217\n"), false);
+  assert.equal(isSameScopeText("## Dependencies\n## Dependencies\n", "## Dependencies\nParent: ChipIn-one/.github#1\n## Dependencies\n"), false);
 });
