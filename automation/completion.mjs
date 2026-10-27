@@ -42,6 +42,7 @@ import {
   PRODUCTION_BRANCH as FRONTEND_PRODUCTION_BRANCH,
   evaluateRequiredRelationships,
   resolveScopeFreshnessFloor,
+  unreconciledDeclaredBlockers,
 } from "./frontend-production-completion-policy.mjs";
 
 export const COMPLETION_CONTRACT = "chipin-completion/v1";
@@ -266,13 +267,38 @@ export async function evaluateIssueForIntegrationCompletion(issue, {
  * read (private cross-repository sub-issues disappear), while `sub_issues_summary.total` counts them all.
  */
 export async function readSubIssueTotal(client, repository, number) {
+  return (await readIssueRecord(client, repository, number)).subIssueTotal;
+}
+
+// One REST read of the Issue: the sub-issue total (above) and the current body (the declared-blocker gate,
+// .github#223). A body that is neither a string nor null is unreadable.
+export async function readIssueRecord(client, repository, number) {
   const { owner, repo } = splitRepository(repository);
   const current = await client.request("/repos/" + owner + "/" + repo + "/issues/" + number);
   const total = current?.sub_issues_summary?.total;
   if (!Number.isInteger(total) || total < 0) {
     throw blocked("UNREADABLE_SUB_ISSUE_SUMMARY", "Issue #" + number + " has no readable sub_issues_summary.total");
   }
-  return total;
+  const body = current?.body ?? "";
+  if (typeof body !== "string") throw blocked("UNREADABLE_ISSUE_BODY", "Issue #" + number + " has no readable body");
+  return { subIssueTotal: total, body };
+}
+
+// State of every declared `Blocked by:` target that has no native edge (normally none, so no extra read).
+// An unreadable target stays absent from the map and therefore counts as open (fail closed).
+export async function readDeclaredTargetStates(client, issue) {
+  const states = {};
+  for (const target of unreconciledDeclaredBlockers({ ...issue, declaredTargetStates: {} })) {
+    const [targetRepository, number] = target.split("#");
+    try {
+      const { owner, repo } = splitRepository(targetRepository);
+      const found = await client.request("/repos/" + owner + "/" + repo + "/issues/" + number);
+      if (found?.state === "open" || found?.state === "closed") states[target] = found.state;
+    } catch {
+      // unreadable -> treated as open by the gate
+    }
+  }
+  return states;
 }
 
 export async function readBranchHead(client, repository, branch) {
@@ -586,11 +612,13 @@ async function runOpenIssueSweep(client, profile, {
     let relationships;
     try {
       relationships = await readRequiredRelationships(client, repository, issue.number);
-      const total = await readSubIssueTotal(client, repository, issue.number);
+      const { subIssueTotal: total, body } = await readIssueRecord(client, repository, issue.number);
       if (relationships.subIssues.length !== total) {
         throw new Error("only " + relationships.subIssues.length + " of " + total
           + " sub-issue(s) are visible to this token (private or cross-repository sub-issues are hidden)");
       }
+      relationships = { ...relationships, body };
+      relationships.declaredTargetStates = await readDeclaredTargetStates(client, relationships);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       results.push({
@@ -636,7 +664,7 @@ async function runOpenIssueSweep(client, profile, {
       });
       continue;
     }
-    const finalRelationshipBlocker = evaluateRequiredRelationships({ ...issue, ...finalRelationships });
+    const finalRelationshipBlocker = evaluateRequiredRelationships({ ...issue, ...relationships, ...finalRelationships });
     if (finalRelationshipBlocker) {
       results.push({ issue, decision: finalRelationshipBlocker });
       continue;

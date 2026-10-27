@@ -7,6 +7,7 @@ import { safeAdmissionDiagnostics } from './issue-admission-transport.mjs';
 import {
   BLOCKED_BY_DEPENDENCY, COMMENT_MARKER, GitHubNativeStore, appendDeclarations, declare, dependencyBlockers,
   main, nativeEdges, normalizeIssue, parseDeclarations, parseIssueRef, planIssue, reconcile, renderComment,
+  stripDeclarationLines,
 } from './relationships.mjs';
 
 const FE = 'ChipIn-one/chipin-frontend';
@@ -440,4 +441,22 @@ test('META repository can be a relationship target (relationships: required) for
   const receipt = await reconcile({ store: s, mode: 'apply', notify: false, repositories: [FE] });
   assert.equal(find(receipt, `${FE}#1`).status, 'APPLIED');
   assert.equal(s.parents.get(`${FE}#1`), `${META}#149`);
+});
+
+test('stripDeclarationLines drops exactly the well-formed declarations of ## Dependencies (#223)', () => {
+  const body = '## Outcome\n\nParent: ChipIn-one/.github#1\n\n## Dependencies\n\nParent: ChipIn-one/.github#177\n'
+    + '- Blocks: ChipIn-one/.github#5\nRelates to: see #9\n```\nRelates to: ChipIn-one/.github#6\n```\nnote\n\n## References\n';
+  assert.equal(stripDeclarationLines(body),
+    '## Outcome\n\nParent: ChipIn-one/.github#1\n\n## Dependencies\n\n'
+    + 'Relates to: see #9\n```\nRelates to: ChipIn-one/.github#6\n```\nnote\n\n## References\n');
+  assert.equal(stripDeclarationLines('no section\r\nParent: ChipIn-one/.github#1'), 'no section\nParent: ChipIn-one/.github#1');
+  assert.equal(stripDeclarationLines('## Dependencies\n\n## Dependencies\n'), null);
+  // a well-formed ref to a repository outside the registry is text, not relationship data
+  assert.equal(stripDeclarationLines('## Dependencies\n\nRelates to: ChipIn-one/not-in-registry#3\nParent: ChipIn-one/.github#177\n'),
+    '## Dependencies\n\nRelates to: ChipIn-one/not-in-registry#3\n');
+  // what the intake/reconciler mirror writes (appendDeclarations) projects back to the same body
+  const base = '## Outcome\n\nx\n\n## Dependencies\n\nParent: ChipIn-one/.github#177\n\n## References\n\n- y\n';
+  const mirrored = appendDeclarations(base, ['Relates to: ChipIn-one/.github#221', 'Blocks: ChipIn-one/.github#222']);
+  assert.notEqual(mirrored, base);
+  assert.equal(stripDeclarationLines(mirrored), stripDeclarationLines(base));
 });

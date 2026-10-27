@@ -54,6 +54,8 @@ Flags are repeatable: `--blocked-by`, `--blocks`, `--relates-to`, `--parent`. `i
 - never removes or reverses an edge. A cycle, self-reference, unreachable target or ambiguous declaration ends in `BLOCKED` with a receipt artifact and exactly one upserted comment on the Issue;
 - is idempotent: a rerun without changes performs 0 writes.
 
+Mirror lines written after an Issue's PR merged do not block its completion: the completion scope rule ignores a body revision that differs only in well-formed declaration lines of `## Dependencies` ([#223](https://github.com/ChipIn-one/.github/issues/223), [completion.md](completion.md)). A mirror that has to create the `## Dependencies` section, or a human edit that also changes other text, still counts as a scope change. Like the parser, the completion rule takes a `## Dependencies` heading inside a code fence as the section heading (the section locator does not track fences before the heading); only lines inside fences *within* the section are skipped.
+
 Validations per Issue (any failure → status `BLOCKED`, **no** edge of that Issue is written): malformed, duplicate or multi-target declaration, several `Parent:` lines, several `## Dependencies` sections,
 self-reference, target outside the registry (or `relationships: off`), target missing or not visible, closed target for `blocked by`/`blocks`, dependency cycle (including a reversal of an existing edge and
 two contradictory declarations of the same Issue), a second parent (never re-parented), more than 50 native edges of one kind (cannot be verified). Every write is read back; a missing edge after the

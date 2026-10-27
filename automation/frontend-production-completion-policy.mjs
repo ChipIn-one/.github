@@ -1,3 +1,5 @@
+import { parseDeclarations, stripDeclarationLines } from "./relationships.mjs";
+
 export const FRONTEND_REPOSITORY = "ChipIn-one/chipin-frontend";
 export const INTEGRATION_BRANCH = "dev";
 export const PRODUCTION_BRANCH = "main";
@@ -43,7 +45,32 @@ export function evaluateRequiredRelationships(issue) {
     );
   }
 
+  const unreconciled = unreconciledDeclaredBlockers(issue);
+  if (unreconciled.length > 0) {
+    return leaveOpen(
+      "relationship-not-reconciled",
+      "`## Dependencies` declares blocker(s) without a native blocked-by edge yet: " + unreconciled.join(", ")
+        + ". Wait for the relationships reconciler (or remove the declaration) and rerun.",
+    );
+  }
+
   return null;
+}
+
+// Declared `Blocked by:` targets that have no native blocked-by edge (.github#223 review: a blocker declared
+// after the merge, before the reconciler ran, must not be bypassed by the scope exemption). Runs only when
+// the caller supplies the current `body` (the shared completion.mjs sweep does; the legacy production-merge
+// module does not). A missing target is ignored only when `declaredTargetStates[target]` is "closed" (a closed
+// Issue would not block even with the edge, and the reconciler refuses edges to closed Issues); unknown state
+// counts as open (fail closed).
+export function unreconciledDeclaredBlockers(issue) {
+  if (typeof issue?.body !== "string") return [];
+  const native = new Set((issue.blockedBy ?? []).map((item) => (item.repository ?? "unknown") + "#" + item.number));
+  const states = issue.declaredTargetStates ?? {};
+  return parseDeclarations(issue.body).declarations
+    .filter((declaration) => declaration.kind === "blocked_by" && !native.has(declaration.target))
+    .filter((declaration) => states[declaration.target] !== "closed")
+    .map((declaration) => declaration.target);
 }
 
 function latestTimestamp(...values) {
@@ -74,6 +101,21 @@ export function normalizeCheckboxes(text) {
   return String(text ?? "").replace(/\r\n/gu, "\n").replace(CHECKBOX_PATTERN, "$1[ ]");
 }
 
+// The scope-relevant projection of a body revision: CRLF and checkbox toggles normalized (#178), and the
+// well-formed relationship declaration lines of `## Dependencies` removed (#223: intake/reconciler mirror
+// lines are relationship data, not scope). null when the projection is not well defined (ambiguous
+// Dependencies section); such a revision pair counts as a scope change.
+export function scopeProjection(text) {
+  return stripDeclarationLines(normalizeCheckboxes(text));
+}
+
+export function isSameScopeText(previous, next) {
+  if (normalizeCheckboxes(previous) === normalizeCheckboxes(next)) return true;
+  const before = scopeProjection(previous);
+  const after = scopeProjection(next);
+  return before !== null && after !== null && before === after;
+}
+
 function hasInvalidTimestamp(values) {
   return (values ?? []).some((value) => typeof value !== "string" || !Number.isFinite(Date.parse(value)));
 }
@@ -96,7 +138,9 @@ function scopeHistoryUnreadable(detail) {
  * body edit history) the rule is refined:
  * - a reopen is ignored when the close it reverts happened after every PR merged before that reopen
  *   (an early manual close after the implementation merged, undone to let automation finish);
- * - a body edit counts only when the text changed beyond `- [ ]` / `- [x]` toggles;
+ * - a body edit counts only when the text changed beyond `- [ ]` / `- [x]` toggles and beyond adding,
+ *   removing or changing well-formed relationship declaration lines inside `## Dependencies` (#223);
+ *   any other byte (including whitespace and blank lines) still counts;
  * - a title rename always counts.
  * Unreadable history fails closed.
  */
@@ -155,7 +199,7 @@ export function resolveScopeFreshnessFloor(issue, mergedAtValues = []) {
         + ") does not match lastEditedAt (" + issue.lastEditedAt + ").");
     }
     for (let index = 1; index < ordered.length; index += 1) {
-      if (normalizeCheckboxes(ordered[index - 1].body) === normalizeCheckboxes(ordered[index].body)) continue;
+      if (isSameScopeText(ordered[index - 1].body, ordered[index].body)) continue;
       reasons.push({ at: ordered[index].editedAt, kind: "text edited" });
     }
   }
