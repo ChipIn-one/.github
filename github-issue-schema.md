@@ -60,7 +60,7 @@ Use checkable acceptance criteria. Use GitHub-native relationships for real bloc
 
 ## Issue Forms and complete intake
 
-Shared forms live in `.github/ISSUE_TEMPLATE/` and set only native Issue Type.
+Shared forms live in `.github/ISSUE_TEMPLATE/` and set only native Issue Type. The one exception is `qa-bug.yml` for frontend release QA bugs, which also presets label, assignee and project (see README).
 
 Issue Forms do not encode Priority, Severity, or Milestone as body dropdowns. Body values are Markdown, not canonical metadata.
 

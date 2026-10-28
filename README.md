@@ -4,7 +4,7 @@ Organisation-wide defaults and GitHub coordination tooling for `ChipIn-one`.
 
 | Path | Purpose |
 | --- | --- |
-| `.github/ISSUE_TEMPLATE/` | shared Issue Forms: bug, enhancement, docs, tests, research |
+| `.github/ISSUE_TEMPLATE/` | shared Issue Forms: bug, enhancement, docs, tests, research, qa-bug |
 | `.github/workflows/issue-metadata-finalize.yml` | manual UI finalizer for canonical issue metadata and Project #5 membership/Status |
 | `github-issue-schema.md` | canonical task metadata model |
 | `workflow-registry.yaml` | machine-readable registry of repositories in the ChipIn workflow standard |
@@ -14,6 +14,8 @@ Organisation-wide defaults and GitHub coordination tooling for `ChipIn-one`.
 ## Shared templates and repository overrides
 
 Supported Issue Forms are owned here and set only native GitHub Issue Type: `Bug`, `Feature`, or `Task`. Priority and Severity remain Organization Issue Fields; native repository Milestones are the optional concrete release target; Project #5 Status remains the workflow field.
+
+Exception: `qa-bug.yml` (frontend release QA, #229) also presets label `Frontend`, assignee `syllik` and project `ChipIn-one/5`. GitHub adds the project only when the reporter has write access to Project #5; otherwise the finalizer or intake reconcile adds it. Priority and Severity are still set afterwards. Its Russian `Устройство` / `Preview URL` / `Насколько мешает` / `Скриншоты или видео` answers render inside `## Problem` for admission.
 
 GitHub uses the organization-profile Issue Forms only when a repository does not provide its own local template file. A repository-local template is therefore an explicit override and must remain compatible with the canonical schema or document why it differs.
 
