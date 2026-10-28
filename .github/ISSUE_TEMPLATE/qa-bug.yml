@@ -1,0 +1,94 @@
+name: QA bug (frontend Preview)
+description: Одна ошибка, найденная во время QA-проверки frontend Preview перед релизом.
+title: "QA: "
+type: Bug
+labels:
+  - Frontend
+assignees:
+  - syllik
+projects:
+  - ChipIn-one/5
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Одна ошибка — одна форма.** Если нашли несколько ошибок, заполните форму для каждой отдельно.
+
+        После создания добавьте ссылку на эту ошибку в QA Issue (`Release QA <sha>`) и напишите там комментарий `QA FAIL`.
+
+        Тип, исполнитель и метка `Frontend` ставятся автоматически. Priority и Severity потом выставит владелец или агент — здесь их выбирать не нужно.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Что вы делали по шагам и что увидели. Пишите простыми словами, как получилось.
+      placeholder: |
+        1. Открыл Preview и вошёл в аккаунт.
+        2. Открыл группу «Поездка» и нажал «Добавить расход».
+        3. Ввёл сумму 100 и нажал «Сохранить».
+        Увидел: кнопка крутится, расход не появился в списке.
+    validations:
+      required: true
+  - type: dropdown
+    id: device
+    attributes:
+      label: Устройство
+      description: На чём проверяли.
+      options:
+        - Android Chrome
+        - ноутбук Chrome
+        - ноутбук другой браузер
+        - iPhone Safari
+        - другое
+    validations:
+      required: true
+  - type: input
+    id: preview-url
+    attributes:
+      label: Preview URL
+      description: Точный адрес Preview из QA Issue, на котором вы проверяли.
+      placeholder: https://chipin-frontend-….vercel.app
+    validations:
+      required: true
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Насколько мешает
+      description: Подсказка для владельца, чтобы выставить Severity. Выберите, как вам кажется.
+      options:
+        - не могу пользоваться функцией
+        - мешает, но есть обход
+        - косметика
+    validations:
+      required: true
+  - type: textarea
+    id: media
+    attributes:
+      label: Скриншоты или видео
+      description: Перетащите сюда скриншот или видео (или вставьте из буфера обмена). Необязательно, но очень помогает.
+    validations:
+      required: false
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: Как должно работать правильно.
+      placeholder: После нажатия «Сохранить» расход сразу появляется в списке группы.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: 'Строка для повторной проверки. Замените текст в угловых скобках своими словами, угловые скобки не оставляйте. Пример — "- [ ] QA: добавить расход 100 в группе => расход виден в списке".'
+      value: "- [ ] QA: <шаг> => <как должно быть>"
+    validations:
+      required: true
+  - type: input
+    id: references
+    attributes:
+      label: References
+      description: Ссылка на QA Issue «Release QA <sha>», в котором вы нашли ошибку.
+      placeholder: https://github.com/ChipIn-one/chipin-frontend/issues/…
+    validations:
+      required: true
