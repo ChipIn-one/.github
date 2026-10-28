@@ -494,6 +494,9 @@ test("privileged completion workflow runs only from trusted master events and ca
   assert.match(workflow, /^  push:$/m);
   assert.match(workflow, /^    branches:\n      - master$/m);
   assert.match(workflow, /^  schedule:$/m);
+  // repository_dispatch always runs the default branch; only the frontend Production hint type (.github#228)
+  assert.match(workflow, /^  repository_dispatch:\n    types: \[frontend-production-deployed\]$/m);
+  assert.doesNotMatch(workflow, /client_payload/u);
   assert.doesNotMatch(workflow, /workflow_dispatch:/u);
   assert.match(workflow, /CHIPIN_ISSUE_WRITE_TOKEN/u);
 });

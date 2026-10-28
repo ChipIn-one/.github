@@ -1028,12 +1028,14 @@ test("awaiting release: integration-merge never runs the writer (the merge is te
   assert.deepEqual(client.state, { ITEM_1: "In Progress", ITEM_2: "Todo" });
 });
 
-test("org workflow for the frontend runs the shared engine with Awaiting release on, from master pushes and the schedule only", async () => {
+test("org workflow for the frontend runs the shared engine with Awaiting release on, from master pushes, the Production dispatch and the schedule only", async () => {
   const workflow = await readFile(new URL("../.github/workflows/frontend-production-completion.yml", import.meta.url), "utf8");
-  assert.match(workflow, /^  push:$/mu);
-  assert.match(workflow, /^    branches:\n      - master$/mu);
-  assert.match(workflow, /^  schedule:$/mu);
+  assert.match(workflow, /^on:\n  push:\n    branches:\n      - master\n  repository_dispatch:\n    types: \[frontend-production-deployed\]\n  schedule:\n    - cron: [^\n]*\n\n/mu);
   assert.doesNotMatch(workflow, /workflow_dispatch:/u);
+  // the dispatch payload is only a hint (.github#228): never read, the engine re-reads the Production receipt
+  assert.doesNotMatch(workflow, /client_payload|github\.event\./u);
+  assert.match(workflow, /persist-credentials: false/u);
+  assert.doesNotMatch(workflow, /^\s+ref:/mu, "checkout stays on the trusted default-branch commit of the event");
   assert.match(workflow, /^permissions:\n  contents: read\n\n/mu);
   assert.match(workflow, /CHIPIN_CANONICAL_WRITE_TOKEN: \$\{\{ secrets\.CHIPIN_ISSUE_WRITE_TOKEN \}\}/u);
   assert.doesNotMatch(workflow, /github\.token/u);
