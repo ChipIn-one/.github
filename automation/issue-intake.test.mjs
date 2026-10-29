@@ -982,13 +982,76 @@ test('create --status Todo never overwrites a Status already visible on the item
   assert.match(result.initialStatusNote, /Requested initial Status Todo was not written: the item already had Status In Progress/);
 });
 
-test('create --status Todo blocks when the written Status reads back as something else', async () => {
+test('create --status Todo blocks when the written Status reads back as something else; In Progress is never overridden', async () => {
   const statusCalls = [];
-  const result = await createRun({ status: 'Todo', statusCalls, projects: [project(), project({ items: [item('Backlog')] })] });
+  const result = await createRun({ status: 'Todo', statusCalls, projects: [project(), project({ items: [item('In Progress')] })] });
   assert.equal(result.action, 'incomplete');
   assert.deepEqual(statusCalls, [{ itemId: 'ITEM', value: 'Todo' }]);
-  assert.match(result.blockers.join('\n'), /Read-back Project Status is Backlog, expected the initial Todo written by this run/);
+  assert.ok(!result.applied.some(x => x.includes('override')));
+  assert.match(result.blockers.join('\n'), /Read-back Project Status is In Progress, expected the initial Todo written by this run/);
   assert.equal(result.receipt.status, 'BLOCKED');
+});
+
+// ---- built-in `Item added to project` sets Backlog (.github#157) ----
+
+test('create --status Todo overrides the built-in Backlog on the item this run added', async () => {
+  const statusCalls = [];
+  const backlog = project({ items: [item('Backlog')] });
+  const result = await createRun({ status: 'Todo', statusCalls, projects: [project(), backlog, backlog, backlog, project({ items: [item('Todo')] })] });
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(result.blockers, []);
+  assert.deepEqual(statusCalls, [{ itemId: 'ITEM', value: 'Todo' }, { itemId: 'ITEM', value: 'Todo' }]);
+  assert.ok(result.applied.includes('project-membership'));
+  assert.ok(result.applied.includes('status:Todo:override-built-in-backlog'));
+  assert.equal(result.initialStatusApplied, true);
+  assert.match(result.initialStatusNote, /built-in workflow "Item added to project" set Backlog .* overridden to the requested Todo/);
+  assert.equal('builtInBacklogOverridden' in result, false);
+  assert.equal(result.receipt.project.status, 'Todo');
+});
+
+test('create --status Todo skips the override when the stale re-read no longer shows Backlog', async () => {
+  const statusCalls = [];
+  const backlog = project({ items: [item('Backlog')] });
+  const result = await createRun({ status: 'Todo', statusCalls, projects: [project(), backlog, backlog, project({ items: [item('In Progress')] })] });
+  assert.deepEqual(statusCalls, [{ itemId: 'ITEM', value: 'Todo' }]);
+  assert.ok(!result.applied.some(x => x.includes('override')));
+  assert.equal(result.action, 'incomplete');
+});
+
+test('create --status Todo never overrides a Backlog on an already-present item', async () => {
+  const statusCalls = [];
+  const result = await createRun({
+    status: 'Todo', statusCalls, issueSide: [item('Backlog')],
+    projects: [project(), project({ items: [item('Backlog')] })],
+  });
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(statusCalls, []);
+  assert.ok(result.applied.includes('project-membership:already-present'));
+  assert.equal(result.receipt.project.status, 'Backlog');
+  assert.equal(result.initialStatusApplied, false);
+  assert.match(result.initialStatusNote, /Requested initial Status Todo was not written: the item already had Status Backlog/);
+});
+
+test('create --status Todo never overrides Backlog on a resumed item already in the Project listing', async () => {
+  const statusCalls = [];
+  const result = await createRun({
+    status: 'Todo', statusCalls, projects: [project({ items: [item('Backlog')] })],
+    state: { issueRef: 'ChipIn-one/chipin-frontend#999', classification, title: 'Approved plan sub-task', initialStatus: 'Todo' },
+  });
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(statusCalls, []);
+  assert.equal(result.initialStatusApplied, false);
+  assert.equal(result.receipt.project.status, 'Backlog');
+});
+
+test('the default Backlog request never writes over a built-in Backlog', async () => {
+  const statusCalls = [];
+  const backlog = project({ items: [item('Backlog')] });
+  const result = await createRun({ statusCalls, projects: [project(), backlog] });
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(statusCalls, [{ itemId: 'ITEM', value: 'Backlog' }]);
+  assert.ok(!result.applied.some(x => x.includes('override')));
+  assert.equal('initialStatusNote' in result, false);
 });
 
 test('--status accepts only Backlog or Todo and only with create', async () => {

@@ -47,13 +47,15 @@ See [automation/issue-intake.md](automation/issue-intake.md) for CLI examples, r
 
 ## Workflow and completion
 
+Project #5 holds Issues only: pull requests are not Project items and show in their Issue's Development section (.github#157). Its owner-configured built-in workflows are listed in [docs/workflow/README.md](docs/workflow/README.md#project-5-built-in-workflows).
+
 Project #5 `Status` tracks workflow position plus one derived completion mirror:
 
 - `Backlog` — default for new work (intake)
 - `Todo` — approved scope (`issue-intake.mjs apply create --status Todo`) or a human
-- `In Progress` — set from `Backlog`/`Todo` by the development-link reconciler when an open PR is natively linked (opt-in per caller, default off; `.github` after its caller pin bump; .github#218) or by a human
+- `In Progress` — set by the Project #5 built-in workflows `Pull request linked to issue` (when a PR is linked to the Issue) and `Item reopened`, or by a human; the custom development-link writer (.github#218) stays opt-in per caller, default off
 - `Awaiting release` — implementation merged into the integration branch, waiting for the release step (frontend: a production Deployment receipt on `master`); written only by the completion engine, never closes an Issue
-- `Done` — display mirror for an Issue already `closed/completed`
+- `Done` — display mirror for an Issue already `closed/completed` (built-in workflow `Item closed`)
 
 Do not use or recreate `DEV` or `PROD`. `Done` is not completion authority and must not cause an Issue to be closed.
 

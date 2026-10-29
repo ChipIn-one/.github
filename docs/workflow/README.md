@@ -47,12 +47,36 @@ Principles (fixed inside v1):
 2. Fail closed: unreadable, ambiguous or stale state blocks instead of being guessed.
 3. Only a human merges. Automation never closes an Issue because of Status `Done` and never changes Status because a PR merged.
    Status writers ([github-issue-schema.md](../../github-issue-schema.md)): intake initializes `Backlog` (or `Todo` with `apply create --status Todo` for
-   approved scope), the development-link reconciler moves `Backlog`/`Todo` to `In Progress` when an open PR is linked (opt-in per caller, [completion.md](completion.md#in-progress-at-development-link)),
-   the completion engine alone writes `Awaiting release`, `Done` is a derived mirror.
+   approved scope), the Project #5 built-in workflow `Pull request linked to issue` moves the linked Issue to `In Progress`
+   ([below](#project-5-built-in-workflows); the custom development-link writer of #218 stays default-off, [completion.md](completion.md#in-progress-at-development-link)),
+   the completion engine alone writes `Awaiting release`, `Done` is a derived mirror of `closed/completed`.
 4. One writer per kind of metadata: intake — `automation/issue-intake.mjs`; relationships — `automation/relationships.mjs`;
-   Project — `pr-project-writer.mjs`; completion — `automation/completion.mjs`, driven by the registry strategy ([completion.md](completion.md)). Executor agents have no write rights.
+   Project membership — intake only (Project #5 holds Issues only, no PR items); completion — `automation/completion.mjs`, driven by the registry strategy ([completion.md](completion.md)). Executor agents have no write rights.
 5. Extensibility: a new repository is one registry record plus two caller files. Logic knows `kind` and capabilities, not the names FE/BE/KB.
 6. Cost: $0 of infrastructure beyond GitHub; CI minutes are saved with path filters and self-hosted runners where they exist.
+
+### Project #5 built-in workflows
+
+Project #5 holds **Issues only** (.github#157, owner decision 2026-10-29). Pull requests are not Project items: a PR is visible in
+its Issue's Development section. No automation adds a PR to the Project (the former org writer `pr-project-writer.mjs` and its
+scheduled `pr-metadata-project-reconcile.yml` are removed), and the conformance audit reports any PR card as
+`PROJECT_HAS_PULL_REQUESTS` drift ([conformance.md](conformance.md)).
+
+The built-in workflows (Project #5 → Workflows) are owner configuration, not code. Whether each one is enabled is readable through GraphQL (`organization.projectV2.workflows { name enabled }`); the Status a workflow sets is not exposed by the API and is checked by hand. Required state:
+
+| Built-in workflow | State | Effect |
+| --- | --- | --- |
+| `Item closed` | on | closed Issue → `Done` (the derived mirror; `Done` never closes an Issue) |
+| `Item reopened` | on | reopened Issue → `In Progress` |
+| `Pull request linked to issue` | on | linked Issue → `In Progress` on the Development link, not on merge state; replaces the custom writer of #218, which stays default-off in `development-link-action` |
+| `Auto-add sub-issues to project` | on | a new sub-issue of a Project Issue becomes an item; it sets no Status itself, the new item then gets `Backlog` from `Item added to project` |
+| `Item added to project` | on | trigger type Issue only; sets `Status: Backlog` on a newly added Issue item. Intake writes the initial Status itself and, for `--status Todo` on an item it just added, overrides this built-in `Backlog` ([issue-intake.md](../../automation/issue-intake.md#race-with-the-built-in-item-added-to-project-workflow-github157)) |
+| `Auto-add to project` | off | intake adds Issues with all fields; a repository-wide auto-add would also add PRs |
+| `Auto-close issue` | off | closing stays with the completion engine and humans; `Done` must never close an Issue |
+| `Pull request merged` | off | it would set Status from PR merge state and act on PR items |
+| all others (for example `Code changes requested`, `Code review approved`, `Auto-archive items`) | off | |
+
+A change to this table is an owner decision recorded in an Issue first.
 
 ## 2. Repository registry — `workflow-registry.yaml`
 

@@ -20,7 +20,8 @@ const INITIAL_STATUS = 'Backlog';
 // `apply create --status` (#218): new work lands in Backlog for triage; Todo is only for an Issue inside a
 // scope the owner already approved (for example a sub-task of an approved plan). Reconcile, the finalizer
 // and the connector bridge keep Backlog. Every other value is rejected; the Status is written only on an
-// item that has none, so an existing human-set Status is never overwritten.
+// item that has none, so an existing human-set Status is never overwritten. One exception (.github#157):
+// Backlog set by the built-in `Item added to project` workflow on an item this run added becomes Todo.
 export const INITIAL_STATUS_VALUES = Object.freeze(['Backlog', 'Todo']);
 // The membership wait is governed by the time budget; the read cap only bounds a pathological
 // zero-latency loop (120 reads x 2 s delay > 4 min, so the budget always ends first in practice).
@@ -541,6 +542,7 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             const readIssueItems = overrides.readIssueProjectItems || readIssueProjectItems;
             let statusInitialized = false;
             let knownStatus = null; // Status already visible on the Issue side (human-owned, never re-initialised)
+            let addedThisRun = false; // this run added the Project item (not already-present, not a resumed pre-existing item)
 
             const pendingReturn = async (code, detail) => {
               // Retryable, not a blocker: the next drain re-runs the same idempotent reconcile.
@@ -560,6 +562,7 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
               if (!issueSide.length) {
                 knownItemId = (await (overrides.addProjectMembership || addProjectMembership)(client, project, snapshot)) || null;
                 result.applied.push('project-membership');
+                addedThisRun = true;
               } else {
                 knownItemId = issueSide[0].id || null;
                 knownStatus = issueSide[0].status || null;
@@ -611,6 +614,30 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
                 if (memberships.length > 1) break;
                 if (memberships.length === 1 && memberships[0].status) break;
                 if (attempt + 1 < statusAttempts) await sleep(delayMs);
+              }
+            }
+
+            // .github#157: the Project #5 built-in workflow `Item added to project` sets Backlog on every new
+            // Issue item, asynchronously, so it can land after (or instead of) the Todo this run wrote. Only for
+            // an item this run added, with Todo requested and Backlog read right after the add, the built-in value
+            // is overridden once: stale re-read first, then the same Status read-back. Every other case keeps
+            // whatever Status the item has.
+            if (args.initialStatus === 'Todo' && addedThisRun && memberships.length === 1 && memberships[0].status === 'Backlog') {
+              project = await readProject(client, config);
+              const fresh = projectItemsFor(project, target.repository, target.number);
+              if (fresh.length !== 1) throw new Error('Project membership changed before the Backlog -> Todo override (' + fresh.length + ' items).');
+              memberships = fresh;
+              if (fresh[0].status === 'Backlog') {
+                await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, fresh[0].id, 'Todo');
+                result.applied.push('status:Todo:override-built-in-backlog');
+                statusWritten = true;
+                result.builtInBacklogOverridden = true;
+                for (let attempt = 0; attempt < statusAttempts; attempt += 1) {
+                  project = await readProject(client, config);
+                  memberships = projectItemsFor(project, target.repository, target.number);
+                  if (memberships.length !== 1 || memberships[0].status === 'Todo') break;
+                  if (attempt + 1 < statusAttempts) await sleep(delayMs);
+                }
               }
             }
 
@@ -681,6 +708,10 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
         // Receipt-level answer to "did this run set the initial Status?" (.github#218).
         result.initialStatusApplied = statusWritten;
         const observedStatus = result.receipt?.project?.status ?? null;
+        if (result.builtInBacklogOverridden) {
+          result.initialStatusNote = 'The Project #5 built-in workflow "Item added to project" set Backlog on the item this run added; it was overridden to the requested Todo (.github#157).';
+        }
+        delete result.builtInBacklogOverridden;
         if (!statusWritten && observedStatus && observedStatus !== args.initialStatus) {
           result.initialStatusNote = 'Requested initial Status ' + args.initialStatus + ' was not written: the item already had Status ' + observedStatus + ', which is preserved.';
         }

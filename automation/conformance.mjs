@@ -308,7 +308,7 @@ export function checkProtection(profile, rules, classic) {
 export function checkProjectPullRequests(profile, items) {
   const own = items.filter(i => i.repository === profile.repository);
   if (!own.length) return [];
-  return [finding('PROJECT_HAS_PULL_REQUESTS', 'drift', `${own.length} pull request(s) are items of Project #5 (${own.slice(0, 8).map(i => `#${i.number}`).join(', ')}${own.length > 8 ? ', …' : ''}).`, 'Remove them from the project and disable the built-in workflows that add them (#157).')];
+  return [finding('PROJECT_HAS_PULL_REQUESTS', 'drift', `${own.length} pull request(s) are items of Project #5 (${own.slice(0, 8).map(i => `#${i.number}`).join(', ')}${own.length > 8 ? ', …' : ''}).`, 'Remove them from the project: Project #5 holds Issues only; check the built-in workflows in docs/workflow/README.md#project-5-built-in-workflows (#157).')];
 }
 
 export function checkIntake(profile, issues) {

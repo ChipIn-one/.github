@@ -111,6 +111,16 @@ node automation/issue-intake.mjs apply create ChipIn-one/chipin-frontend \
 - `initialStatusApplied` describes this run only: when a resume follows a `pending-readback` run that already wrote the Status, it is `false` (the Status is then visible and preserved, with no `initialStatusNote` when it equals the requested value).
 - The UI finalizer, the connector bridge and the drain run `reconcile`, so they keep `Backlog`; they do not accept a Status input.
 
+#### Race with the built-in `Item added to project` workflow (.github#157)
+
+Project #5 has the built-in workflow `Item added to project` on (Issues only, sets `Status: Backlog`; see [docs/workflow/README.md](../docs/workflow/README.md#project-5-built-in-workflows)). It runs asynchronously after the add mutation, so it can set `Backlog` before or after the `Todo` this run writes. With `Backlog` requested both writers agree, and intake never writes again over a `Backlog`. With `Todo` requested, intake overrides it once, under all of these conditions:
+
+- this same run added the item (`applied` has `project-membership`, not `project-membership:already-present`); a resume whose item already exists, from an earlier run or a human, is never overridden;
+- the Status read right after the add (the Status read-back of the initial write) is `Backlog`; any other value, for example `In Progress`, is kept;
+- a fresh Project re-read just before the write still shows exactly one item with `Backlog` (stale guard).
+
+Then it writes `Todo`, adds `status:Todo:override-built-in-backlog` to `applied`, waits for the same Status read-back, and the final combined read-back must show `Todo` or the receipt is `BLOCKED`. `initialStatusApplied` is `true`, and `initialStatusNote` says that the built-in Backlog was overridden to Todo. If the built-in workflow lands again after the override, the final read-back blocks; it is not retried in a loop.
+
 Read-only reconcile example:
 
 ```sh
