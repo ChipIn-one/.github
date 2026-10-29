@@ -1018,3 +1018,14 @@ test('plan create reports the requested initial Status', async () => {
   assert.equal(result.action, 'ready-to-create');
   assert.equal(result.initialStatus, 'Todo');
 });
+
+test('a legacy create checkpoint without initialStatus resumes only as Backlog', async () => {
+  const legacy = { issueRef: 'ChipIn-one/chipin-frontend#999', classification, title: 'Approved plan sub-task' };
+  const todo = await createRun({ status: 'Todo', statusCalls: [], projects: [project({ items: [item('Backlog')] })], state: legacy });
+  assert.equal(todo.action, 'incomplete');
+  assert.match(todo.blockers.join('\n'), /State initial Status differs from this retry/);
+  const backlog = await createRun({ statusCalls: [], projects: [project({ items: [item('Backlog')] })], state: legacy });
+  assert.equal(backlog.action, 'complete');
+  assert.ok(backlog.applied.includes('resume-existing-issue'));
+  assert.equal(backlog.initialStatusApplied, false);
+});

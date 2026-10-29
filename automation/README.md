@@ -71,7 +71,8 @@ See [issue-intake.md](./issue-intake.md) for CLI examples, connector request for
   Its only Project #5 write is the opt-in `In Progress` writer (.github#218, action input
   `set-in-progress`, default off, with `project-status-token`): after the link is read back it moves the
   open Issue's Status `Backlog`/`Todo` to `In Progress` (not for draft or Dependabot PRs), leaves every other
-  value, and never fails the link: only a broken Project write path exits 1, anything transient is a warning. See [docs/workflow/completion.md](../docs/workflow/completion.md#in-progress-at-development-link).
+  value, and never fails the link: deterministic faults (write path, Project access, configuration) exit 1
+  after the link, anything transient or drifted is a warning. See [docs/workflow/completion.md](../docs/workflow/completion.md#in-progress-at-development-link).
 
 The composite action at `automation/development-link-action/action.yml` packages this reconciler
 for minimal repository-local PR-event callers. Organization `.github` workflows are not inherited

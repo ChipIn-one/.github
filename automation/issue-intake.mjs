@@ -456,7 +456,8 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
           if (state.title && state.title !== args.title) throw new Error('State title differs from this retry.');
           if (state.owner && state.owner !== requiredOwner(args.target, args.owner)) throw new Error('State owner differs from this retry.');
           if (state.bodySha256 && state.bodySha256 !== createHash('sha256').update(suppliedBody).digest('hex')) throw new Error('State body differs from this retry.');
-          if (state.initialStatus && state.initialStatus !== args.initialStatus) throw new Error('State initial Status differs from this retry.');
+          // A checkpoint written before #218 has no initialStatus: it was a Backlog create.
+          if ((state.initialStatus ?? INITIAL_STATUS) !== args.initialStatus) throw new Error('State initial Status differs from this retry.');
           result.applied.push('resume-existing-issue');
         } else if (state) {
           throw new Error('Create checkpoint exists without issue identity; creation outcome is uncertain. Recover the issue manually before retrying to avoid a duplicate.');

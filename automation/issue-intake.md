@@ -107,7 +107,8 @@ node automation/issue-intake.mjs apply create ChipIn-one/chipin-frontend \
 - `Todo` is only for an Issue inside a scope the owner already approved, for example a sub-task of an approved plan or decomposition. It is not a priority signal and does not replace admission.
 - The Status is written once, on the new item, and only when the item has no Status; a Status already visible on the item (human-set) is preserved as it is.
 - The result carries `initialStatus` and `initialStatusApplied` (`true` when this run wrote it, then `applied` also names `status:<value>`); when a requested Status was not written because the item already had another one, `initialStatusNote` says so. The receipt's `project.status` is the read-back. When this run wrote the Status and the final read-back shows another value, the receipt is `BLOCKED`.
-- The create checkpoint (`--state`) records `initialStatus`; a retry with a different `--status` fails closed.
+- The create checkpoint (`--state`) records `initialStatus`; a retry with a different `--status` fails closed. A checkpoint written before #218 has no `initialStatus` and counts as `Backlog`.
+- `initialStatusApplied` describes this run only: when a resume follows a `pending-readback` run that already wrote the Status, it is `false` (the Status is then visible and preserved, with no `initialStatusNote` when it equals the requested value).
 - The UI finalizer, the connector bridge and the drain run `reconcile`, so they keep `Backlog`; they do not accept a Status input.
 
 Read-only reconcile example:

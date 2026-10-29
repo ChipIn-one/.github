@@ -5,6 +5,7 @@ import {
   InProgressBlocked,
   inProgressOutcomeSeverity,
   parseTaskIdentity,
+  reportInProgressOutcome,
   readInProgressOptIn,
   readTaskIdentityMarker,
   reconcileDevelopmentLink,
@@ -551,23 +552,39 @@ function statusClient({
   headRepo = REPOSITORY,
   mutationError = null,
   draft = false,
+  lateDraft = undefined,
+  latePrState = undefined,
   prStateAfterWrite = "open",
+  issueStateAfterWrite = "open",
+  prReadFailsAfterWrite = false,
+  baseRef = INTEGRATION,
+  body = `Task identity: ${REPOSITORY}#7`,
+  readBackSequence = null,
 } = {}) {
   const calls = [];
   let statusReads = 0;
   let issueReads = 0;
+  let prReads = 0;
   let written = false;
+  let readBacks = 0;
   let current = liveStatus === undefined ? status : liveStatus;
   return {
     calls,
     async request(path) {
       calls.push({ path });
       if (path === `/repos/${REPOSITORY}/pulls/10`) {
-        return { number: 10, state: written ? prStateAfterWrite : prState, draft, user: { login: prUser }, head: { repo: { full_name: headRepo } }, base: { repo: { full_name: REPOSITORY } } };
+        prReads += 1;
+        if (written && prReadFailsAfterWrite) throw new Error("GET pulls -> 502");
+        const late = prReads > 1;
+        const state = written ? prStateAfterWrite : late && latePrState !== undefined ? latePrState : prState;
+        return {
+          number: 10, state, draft: late && lateDraft !== undefined ? lateDraft : draft, body,
+          user: { login: prUser }, head: { repo: { full_name: headRepo } }, base: { ref: baseRef, repo: { full_name: REPOSITORY } },
+        };
       }
       if (path === `/repos/${REPOSITORY}/issues/7`) {
         issueReads += 1;
-        const state = issueReads > 1 && lateIssueState !== undefined ? lateIssueState : issueState;
+        const state = written ? issueStateAfterWrite : issueReads > 1 && lateIssueState !== undefined ? lateIssueState : issueState;
         return { number: 7, state };
       }
       throw new Error("Unexpected REST path " + path);
@@ -576,6 +593,11 @@ function statusClient({
       calls.push({ query, variables });
       if (query.includes("query DevelopmentLinkProjectItemStatus")) {
         statusReads += 1;
+        if (written && readBackSequence) {
+          const next = readBackSequence[Math.min(readBacks++, readBackSequence.length - 1)];
+          if (next instanceof Error) throw next;
+          return { node: { __typename: "ProjectV2Item", id: variables.itemId, fieldValueByName: next === null ? null : { name: next } } };
+        }
         return { node: { __typename: "ProjectV2Item", id: variables.itemId, fieldValueByName: current === null ? null : { name: current } } };
       }
       if (query.includes("mutation SetDevelopmentLinkInProgress")) {
@@ -590,11 +612,13 @@ function statusClient({
   };
 }
 
-function writeStatus(client, { status = "Backlog", project = null, issueSide = null, readProject = null } = {}) {
+function writeStatus(client, { status = "Backlog", project = null, issueSide = null, readProject = null, readIssueItems = null, config = PROJECT_CONFIG, counts = {} } = {}) {
+  counts.snapshot = 0;
   return setInProgressAfterLink(client, {
-    repository: REPOSITORY, issueNumber: 7, pullRequestNumber: 10, config: PROJECT_CONFIG,
-    readProject: readProject ?? (async () => project ?? statusProject(status)),
-    readIssueItems: async () => issueSide ?? [{ id: "ITEM_7", repository: REPOSITORY, number: 7, status }],
+    repository: REPOSITORY, issueNumber: 7, pullRequestNumber: 10, config,
+    readProject: async (...args) => { counts.snapshot += 1; return readProject ? readProject(...args) : project ?? statusProject(status); },
+    readIssueItems: readIssueItems ?? (async () => issueSide ?? [{ id: "ITEM_7", repository: REPOSITORY, number: 7, status }]),
+    wait: async () => {},
   });
 }
 
@@ -615,9 +639,11 @@ for (const source of ["Backlog", "Todo"]) {
 }
 
 for (const other of ["In Progress", "Awaiting release", "Done", null, "Someday"]) {
-  test(`In Progress writer never touches Status ${other ?? "(empty)"}`, async () => {
+  test(`In Progress writer never touches Status ${other ?? "(empty)"} and never reads the full Project for it`, async () => {
     const client = statusClient({ status: other });
-    const result = await writeStatus(client, { status: other });
+    const counts = {};
+    const result = await writeStatus(client, { status: other, counts });
+    assert.equal(counts.snapshot, 0);
     assert.equal(result.result, "unchanged");
     assert.equal(result.mutated, false);
     assert.equal(result.code, other === "In Progress" ? "in-progress-current" : "in-progress-skipped:" + (other ?? "none"));
@@ -625,20 +651,24 @@ for (const other of ["In Progress", "Awaiting release", "Done", null, "Someday"]
   });
 }
 
-test("In Progress writer is a no-op for closed Issues, Dependabot, closed, draft and cross-repository PRs", async () => {
+test("In Progress writer is a no-op for closed Issues, Dependabot, closed, draft, cross-repository, wrong-base and re-targeted PRs", async () => {
   for (const [options, code] of [
     [{ issueState: "closed" }, "issue-not-open"],
     [{ prUser: "dependabot[bot]" }, "dependabot-pr"],
     [{ prState: "closed" }, "pr-not-open"],
     [{ headRepo: "someone/fork" }, "pr-not-same-repository"],
     [{ draft: true }, "pr-draft"],
+    [{ baseRef: "dev" }, "pr-not-integration-branch"],
+    [{ body: `Task identity: ${REPOSITORY}#8` }, "pr-task-identity-changed"],
+    [{ body: "no marker" }, "pr-task-identity-changed"],
+    [{ body: `Task identity: ${REPOSITORY}#7\nTask identity: ${REPOSITORY}#8` }, "pr-task-identity-changed"],
   ]) {
-    let projectReads = 0;
     const client = statusClient(options);
-    const result = await writeStatus(client, { readProject: async () => { projectReads += 1; return statusProject("Backlog"); } });
+    const counts = {};
+    const result = await writeStatus(client, { counts });
     assert.equal(result.code, code);
     assert.equal(result.mutated, false);
-    assert.equal(projectReads, 0, code + " must not read the Project");
+    assert.equal(counts.snapshot, 0, code + " must not read the Project");
     assert.equal(statusMutations(client).length, 0);
   }
 });
@@ -663,25 +693,52 @@ test("mutation boundary order: PR/Issue eligibility re-read, then Status re-read
   assert.ok(statusQueries.every(({ variables }) => variables.statusField === "Status"));
 });
 
-test("a PR closed right after the write is flagged in the receipt, never reverted", async () => {
+test("a PR or Issue closed right after the write is flagged in the receipt, never reverted", async () => {
   const client = statusClient({ status: "Backlog", prStateAfterWrite: "closed" });
   const result = await writeStatus(client, { status: "Backlog" });
   assert.equal(result.result, "updated");
   assert.equal(result.prStateAfterWrite, "closed");
-  assert.match(result.detail, /PR is closed after the write/);
+  assert.equal("issueStateAfterWrite" in result, false);
+  assert.match(result.detail, /After the write the PR is closed/);
   assert.equal(statusMutations(client).length, 1);
   assert.equal(inProgressOutcomeSeverity(result), "warning");
+
+  const issueClosed = await writeStatus(statusClient({ status: "Todo", issueStateAfterWrite: "closed" }), { status: "Todo" });
+  assert.equal(issueClosed.issueStateAfterWrite, "closed");
+  assert.equal("prStateAfterWrite" in issueClosed, false);
+  assert.match(issueClosed.detail, /After the write the Issue is closed/);
+  assert.equal(inProgressOutcomeSeverity(issueClosed), "warning");
+
+  const unreadable = await writeStatus(statusClient({ status: "Backlog", prReadFailsAfterWrite: true }), { status: "Backlog" });
+  assert.equal(unreadable.result, "updated");
+  assert.equal(unreadable.prStateAfterWrite, "unreadable");
+  assert.equal(inProgressOutcomeSeverity(unreadable), "warning");
 });
 
-test("only a broken Project write path is an error; transient failures and stale reads are warnings", () => {
-  for (const code of ["PROJECT_STATUS_WRITE", "PROJECT_STATUS_READBACK", "PROJECT_STATUS_FIELD"]) {
+test("a PR drafted or closed during the late eligibility re-read is not written", async () => {
+  for (const [options, code] of [[{ lateDraft: true }, "pr-draft"], [{ latePrState: "closed" }, "pr-not-open"]]) {
+    const client = statusClient({ status: "Backlog", ...options });
+    const counts = {};
+    const result = await writeStatus(client, { status: "Backlog", counts });
+    assert.equal(result.code, code);
+    assert.equal(counts.snapshot, 1, "the late re-read happens after the snapshot");
+    assert.equal(statusMutations(client).length, 0);
+  }
+});
+
+test("deterministic faults are errors; transient failures, drift and stale reads are warnings", () => {
+  for (const code of ["PROJECT_STATUS_WRITE", "PROJECT_STATUS_READBACK", "PROJECT_STATUS_FIELD", "PROJECT_ACCESS", "PROJECT_CONFIG", "PROJECT_STATUS_ERROR", "OPT_IN_MISCONFIGURED"]) {
     assert.equal(inProgressOutcomeSeverity({ result: "blocked", code }), "error", code);
   }
-  for (const code of ["PROJECT_UNREADABLE", "PROJECT_ITEM_UNREADABLE", "ISSUE_OR_PR_UNREADABLE", "PROJECT_MEMBERSHIP", "NOT_AN_ISSUE", "PROJECT_STATUS_ERROR"]) {
+  for (const code of ["PROJECT_UNREADABLE", "PROJECT_ITEM_UNREADABLE", "ISSUE_OR_PR_UNREADABLE", "PROJECT_MEMBERSHIP", "NOT_AN_ISSUE"]) {
     assert.equal(inProgressOutcomeSeverity({ result: "blocked", code }), "warning", code);
   }
-  assert.equal(inProgressOutcomeSeverity({ result: "unchanged", code: "stale-snapshot" }), "warning");
-  assert.equal(inProgressOutcomeSeverity({ result: "unchanged", code: "opt-in-misconfigured" }), "warning");
+  for (const code of ["stale-snapshot", "pr-not-integration-branch", "pr-task-identity-changed"]) {
+    assert.equal(inProgressOutcomeSeverity({ result: "unchanged", code }), "warning", code);
+  }
+  for (const code of ["pr-draft", "pr-not-open", "dependabot-pr", "issue-not-open", "in-progress-current"]) {
+    assert.equal(inProgressOutcomeSeverity({ result: "unchanged", code }), "none", code);
+  }
   assert.equal(inProgressOutcomeSeverity({ result: "unchanged", code: "in-progress-skipped:Done" }), "none");
   assert.equal(inProgressOutcomeSeverity({ result: "updated", code: "in-progress-set" }), "none");
   assert.equal(inProgressOutcomeSeverity(undefined), "none");
@@ -694,18 +751,51 @@ test("In Progress writer abandons the write when the Issue closed during the sta
   assert.equal(statusMutations(client).length, 0);
 });
 
-test("In Progress writer reports a read-back mismatch as blocked", async () => {
-  const client = statusClient({ status: "Backlog", readBack: "Backlog" });
+test("In Progress writer reports a read-back mismatch as blocked with mutated: true, after one retry", async () => {
+  const client = statusClient({ status: "Backlog", readBackSequence: ["Backlog", "Backlog"] });
   await assert.rejects(writeStatus(client, { status: "Backlog" }), (error) => {
     assert.equal(error.code, "PROJECT_STATUS_READBACK");
+    assert.equal(error.mutated, true);
     assert.match(error.message, /did not read back as In Progress \(read Backlog\)/);
     return true;
   });
+  assert.equal(client.statusReads, 3); // re-read before the write + read-back + one retry
+});
+
+test("an unreadable read-back after a successful write is PROJECT_STATUS_READBACK with mutated: true", async () => {
+  const client = statusClient({ status: "Backlog", readBackSequence: [new Error("GraphQL -> 502"), new Error("GraphQL -> 502")] });
+  await assert.rejects(writeStatus(client, { status: "Backlog" }), (error) => {
+    assert.equal(error.code, "PROJECT_STATUS_READBACK");
+    assert.equal(error.mutated, true);
+    assert.match(error.message, /written but its read-back is unreadable/);
+    return true;
+  });
+  const receipt = await reconcileDevelopmentLink(makeClient(), {
+    repository: REPOSITORY, pullRequestNumber: 10,
+    inProgress: { enabled: true, config: PROJECT_CONFIG, write: (_c, input) => writeStatus(statusClient({ readBackSequence: [new Error("502"), new Error("502")] }), { status: "Backlog", config: input.config }) },
+  });
+  assert.equal(receipt.projectStatus.result, "blocked");
+  assert.equal(receipt.projectStatus.mutated, true, "the receipt never says mutated: false after a successful write");
+  assert.equal(inProgressOutcomeSeverity(receipt.projectStatus), "error");
+});
+
+test("a lagging read-back that catches up on the retry succeeds", async () => {
+  const client = statusClient({ status: "Todo", readBackSequence: [new Error("GraphQL -> 502"), "In Progress"] });
+  const result = await writeStatus(client, { status: "Todo" });
+  assert.equal(result.code, "in-progress-set");
 });
 
 test("In Progress writer fails closed on unreadable, missing, duplicate or divergent Project data", async () => {
   const cases = [
     [{ readProject: async () => { const e = new Error("Project items first page stayed empty"); e.code = "PROJECT_ITEMS_PHANTOM"; throw e; } }, "PROJECT_UNREADABLE"],
+    [{ readProject: async () => { const e = new Error("Project items read exceeded its 60000 ms budget"); e.code = "PROJECT_READ_DEADLINE"; throw e; } }, "PROJECT_UNREADABLE"],
+    [{ readProject: async () => { throw new Error("GraphQL -> 502: bad gateway"); } }, "PROJECT_UNREADABLE"],
+    [{ readProject: async () => { throw new Error("Project #5 is unavailable"); } }, "PROJECT_ACCESS"],
+    [{ readProject: async () => { throw new Error("Resource not accessible by personal access token"); } }, "PROJECT_ACCESS"],
+    [{ readIssueItems: async () => { throw new Error("Could not resolve to a ProjectV2 with the number 5."); } }, "PROJECT_ACCESS"],
+    [{ config: { organization: "ChipIn-one", project: { number: 5 } } }, "PROJECT_CONFIG"],
+    [{ config: { project: { number: 5, statusField: "Status" } } }, "PROJECT_CONFIG"],
+    [{ project: { ...statusProject("Backlog"), fields: [{ id: "STATUS_FIELD", name: "Status", isIssueField: false, options: [{ id: "OPT_Backlog", name: "Backlog" }] }] } }, "PROJECT_STATUS_FIELD"],
     [{ project: statusProject("Backlog", { items: [] }), issueSide: [] }, "PROJECT_MEMBERSHIP"],
     [{ project: statusProject("Backlog", { items: [
       { id: "ITEM_7", repository: REPOSITORY, number: 7, status: "Backlog" },
@@ -716,9 +806,11 @@ test("In Progress writer fails closed on unreadable, missing, duplicate or diver
   ];
   for (const [options, code] of cases) {
     const client = statusClient();
-    await assert.rejects(writeStatus(client, options), (error) => error.code === code);
+    await assert.rejects(writeStatus(client, options), (error) => error.code === code && error.mutated === false, code);
     assert.equal(statusMutations(client).length, 0, code);
   }
+  assert.equal(inProgressOutcomeSeverity({ result: "blocked", code: "PROJECT_ACCESS" }), "error");
+  assert.equal(inProgressOutcomeSeverity({ result: "blocked", code: "PROJECT_UNREADABLE" }), "warning");
 });
 
 test("In Progress writer is off by default: the link flow makes no Project read or write", async () => {
@@ -728,24 +820,28 @@ test("In Progress writer is off by default: the link flow makes no Project read 
   assert.equal("projectStatus" in receipt, false);
   assert.equal(client.calls.some(({ query }) => /ProjectV2|projectV2|Status/.test(query)), false);
   assert.equal(readInProgressOptIn({}, PROJECT_CONFIG), null);
-  assert.equal(readInProgressOptIn({ CHIPIN_SET_IN_PROGRESS: "0", CHIPIN_PROJECT_STATUS_TOKEN: "t" }, PROJECT_CONFIG), null);
+  assert.equal(readInProgressOptIn({ CHIPIN_SET_IN_PROGRESS: "false", CHIPIN_PROJECT_STATUS_TOKEN: "t" }, PROJECT_CONFIG), null);
 });
 
-test("a misconfigured opt-in never blocks the link: Status is skipped with a warning", async () => {
-  assert.match(readInProgressOptIn({ CHIPIN_SET_IN_PROGRESS: "1" }, PROJECT_CONFIG).misconfigured, /project-status-token is empty/);
-  assert.match(readInProgressOptIn({ CHIPIN_SET_IN_PROGRESS: "yes", CHIPIN_PROJECT_STATUS_TOKEN: "t" }, PROJECT_CONFIG).misconfigured, /must be 0 or 1/);
+test("a misconfigured opt-in never blocks the link; it is reported as an error after the link", async () => {
+  assert.match(readInProgressOptIn({ CHIPIN_SET_IN_PROGRESS: "true" }, PROJECT_CONFIG).misconfigured, /project-status-token is empty/);
+  for (const value of ["invalid", "1", "TRUE"]) {
+    assert.match(readInProgressOptIn({ CHIPIN_SET_IN_PROGRESS: value, CHIPIN_PROJECT_STATUS_TOKEN: "t" }, PROJECT_CONFIG).misconfigured, /exactly true or false/);
+  }
   const client = makeClient();
   const receipt = await reconcileDevelopmentLink(client, {
-    repository: REPOSITORY, pullRequestNumber: 10, inProgress: readInProgressOptIn({ CHIPIN_SET_IN_PROGRESS: "1" }, PROJECT_CONFIG),
+    repository: REPOSITORY, pullRequestNumber: 10, inProgress: readInProgressOptIn({ CHIPIN_SET_IN_PROGRESS: "true" }, PROJECT_CONFIG),
   });
   assert.equal(receipt.result, "linked");
   assert.equal(receipt.readBackConfirmed, true);
-  assert.equal(receipt.projectStatus.code, "opt-in-misconfigured");
-  assert.equal(inProgressOutcomeSeverity(receipt.projectStatus), "warning");
+  assert.equal(mutationCalls(client).length, 1);
+  assert.equal(receipt.projectStatus.code, "OPT_IN_MISCONFIGURED");
+  assert.equal(receipt.projectStatus.result, "blocked");
+  assert.equal(inProgressOutcomeSeverity(receipt.projectStatus), "error");
 });
 
 test("In Progress opt-in with a token and the exact flag enables the writer", () => {
-  const enabled = readInProgressOptIn({ CHIPIN_SET_IN_PROGRESS: "1", CHIPIN_PROJECT_STATUS_TOKEN: "t" }, PROJECT_CONFIG, (token) => ({ token }));
+  const enabled = readInProgressOptIn({ CHIPIN_SET_IN_PROGRESS: "true", CHIPIN_PROJECT_STATUS_TOKEN: "t" }, PROJECT_CONFIG, (token) => ({ token }));
   assert.deepEqual(enabled, { enabled: true, client: { token: "t" }, config: PROJECT_CONFIG });
 });
 
@@ -762,7 +858,7 @@ test("In Progress runs after a confirmed link (new and already-linked) and only 
     });
     assert.equal(receipt.result, linkedPullRequests.length ? "already-linked" : "linked");
     assert.equal(receipt.projectStatus.code, "in-progress-set");
-    assert.deepEqual(writes, [{ projectClient: "PROJECT_CLIENT", input: { repository: REPOSITORY, issueNumber: 7, pullRequestNumber: 10, config: PROJECT_CONFIG }, linkedAtWrite: true }]);
+    assert.deepEqual(writes, [{ projectClient: "PROJECT_CLIENT", input: { repository: REPOSITORY, issueNumber: 7, pullRequestNumber: 10, config: PROJECT_CONFIG, allowMissingMarker: false }, linkedAtWrite: true }]);
   }
   let called = false;
   await assert.rejects(reconcileDevelopmentLink(makeClient({ readBackFailure: true }), {
@@ -788,12 +884,66 @@ test("action keeps the In Progress writer opt-in; no caller enables it while pin
   const action = await readFile(new URL("./development-link-action/action.yml", import.meta.url), "utf8");
   assert.match(action, /set-in-progress:\n(?:.*\n)*?    default: 'false'/);
   assert.match(action, /project-status-token:\n(?:.*\n)*?    default: ''/);
-  assert.match(action, /CHIPIN_SET_IN_PROGRESS: \$\{\{ inputs\.set-in-progress == 'true' && '1' \|\| '0' \}\}/);
-  // the admission step sees only whether a token exists, never the token itself
-  const admissionStep = action.slice(action.indexOf("Require canonical Issue admission"), action.indexOf("Reconcile native Development relationship"));
-  assert.match(admissionStep, /HAS_PROJECT_STATUS_TOKEN: \$\{\{ inputs\.project-status-token != '' \}\}/);
-  assert.doesNotMatch(admissionStep, /: \$\{\{ inputs\.project-status-token \}\}/);
-  assert.doesNotMatch(admissionStep, /exit 2 ;;/);
+  const admissionStep = action.slice(action.indexOf("Require canonical Issue admission"), action.indexOf("- name: Reconcile native Development relationship"));
+  const reconcileStep = action.slice(action.indexOf("- name: Reconcile native Development relationship"));
+  // the admission step never sees the Project token; the reconcile step uses only the computed flag
+  assert.doesNotMatch(admissionStep, /project-status-token/);
+  assert.match(reconcileStep, /^ {8}CHIPIN_SET_IN_PROGRESS: \$\{\{ steps\.admission\.outputs\.set_in_progress \}\}$/m);
+  assert.doesNotMatch(reconcileStep, /inputs\.set-in-progress/);
+  assert.match(reconcileStep, /^ {8}CHIPIN_PROJECT_STATUS_TOKEN: \$\{\{ inputs\.project-status-token \}\}$/m);
   const caller = await readFile(new URL("../.github/workflows/native-development-link.yml", import.meta.url), "utf8");
   assert.doesNotMatch(caller, /set-in-progress|project-status-token/);
+});
+
+test("the action computes the opt-in flag once, case-sensitively, as a step output", async () => {
+  const { readFile, mkdtemp, rm } = await import("node:fs/promises");
+  const { execFileSync } = await import("node:child_process");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const action = await readFile(new URL("./development-link-action/action.yml", import.meta.url), "utf8");
+  const block = action.slice(action.indexOf("# opt-in flag:start"), action.indexOf("# opt-in flag:end"))
+    .split("\n").map((line) => line.replace(/^ {8}/u, "")).join("\n");
+  const dir = await mkdtemp(join(tmpdir(), "chipin-218-"));
+  try {
+    const cases = [["true", "true"], ["false", "false"], ["True", "invalid"], ["TRUE", "invalid"], ["", "invalid"], ["yes", "invalid"]];
+    for (const [index, [input, expected]] of cases.entries()) {
+      const output = join(dir, "out-" + index);
+      execFileSync("bash", ["-euo", "pipefail", "-c", block], { env: { PATH: process.env.PATH, SET_IN_PROGRESS: input, GITHUB_OUTPUT: output } });
+      assert.equal(await readFile(output, "utf8"), "set_in_progress=" + expected + "\n", JSON.stringify(input));
+      assert.equal(readInProgressOptIn({ CHIPIN_SET_IN_PROGRESS: expected, CHIPIN_PROJECT_STATUS_TOKEN: "t" }, PROJECT_CONFIG, () => ({}))?.enabled ?? false, expected === "true");
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("main reporting maps severity to ::error:: + exit 1, ::warning:: + exit 0, nothing for settled outcomes", () => {
+  const run = (projectStatus) => {
+    const lines = [];
+    let exitCode;
+    const severity = reportInProgressOutcome({ result: "linked", projectStatus }, { write: (text) => lines.push(text), setExitCode: (code) => { exitCode = code; } });
+    return { severity, lines, exitCode };
+  };
+  const error = run({ result: "blocked", code: "PROJECT_STATUS_READBACK", detail: "did not read back\nsecond line" });
+  assert.equal(error.severity, "error");
+  assert.equal(error.exitCode, 1);
+  assert.deepEqual(error.lines, ["::error::In Progress Status PROJECT_STATUS_READBACK (Development link kept): did not read back second line\n"]);
+  const warning = run({ result: "blocked", code: "PROJECT_UNREADABLE", detail: "phantom" });
+  assert.equal(warning.severity, "warning");
+  assert.equal(warning.exitCode, undefined);
+  assert.match(warning.lines[0], /^::warning::In Progress Status PROJECT_UNREADABLE/);
+  const settled = run({ result: "updated", code: "in-progress-set", detail: "ok" });
+  assert.deepEqual([settled.severity, settled.lines, settled.exitCode], ["none", [], undefined]);
+  assert.equal(run(undefined).severity, "none");
+});
+
+test("a dispatch-supplied Task identity lets the writer accept a PR body without its own marker", async () => {
+  const client = statusClient({ status: "Backlog", body: "no marker" });
+  const result = await setInProgressAfterLink(client, {
+    repository: REPOSITORY, issueNumber: 7, pullRequestNumber: 10, config: PROJECT_CONFIG, allowMissingMarker: true,
+    readProject: async () => statusProject("Backlog"),
+    readIssueItems: async () => [{ id: "ITEM_7", repository: REPOSITORY, number: 7, status: "Backlog" }],
+    wait: async () => {},
+  });
+  assert.equal(result.code, "in-progress-set");
 });
