@@ -365,11 +365,20 @@ export function reportInProgressOutcome(receipt, { write = (text) => process.std
 // Project reads that fail for a deterministic reason (Project gone, token without access) are errors;
 // phantom pages, read deadlines, item growth and other transient failures are warnings.
 const TRANSIENT_PROJECT_CODES = new Set(["PROJECT_ITEMS_PHANTOM", "PROJECT_READ_DEADLINE", "PROJECT_ITEMS_GREW"]);
-const ACCESS_FAILURE = /is unavailable|Could not resolve to a ProjectV2|not accessible|INSUFFICIENT_SCOPES|FORBIDDEN|-> 40[13]\b/iu;
+// Rate limits (primary or secondary, also answered as HTTP 403) are transient. Access failures are only a 401,
+// or a permission answer: not accessible / INSUFFICIENT_SCOPES / an unresolvable or null projectV2.
+const RATE_LIMIT = /rate limit|abuse|retry-after|RATE_LIMITED/iu;
+const ACCESS_FAILURE = /-> 401\b|is unavailable|Could not resolve to a ProjectV2|not accessible|INSUFFICIENT_SCOPES/iu;
+
+export function isProjectAccessFailure(error) {
+  const text = errorText(error);
+  if (TRANSIENT_PROJECT_CODES.has(error?.code) || RATE_LIMIT.test(text)) return false;
+  return ACCESS_FAILURE.test(text);
+}
 
 function projectReadBlocked(projectNumber, error, what) {
   const text = errorText(error);
-  const transient = TRANSIENT_PROJECT_CODES.has(error?.code) || !ACCESS_FAILURE.test(text);
+  const transient = !isProjectAccessFailure(error);
   return inProgressBlocked(transient ? "PROJECT_UNREADABLE" : "PROJECT_ACCESS",
     `Project #${projectNumber} ${what} ${transient ? "is unreadable" : "is not accessible with the Project token"}: ${text}`);
 }
@@ -402,7 +411,7 @@ async function readItemStatus(client, itemId, statusField) {
 
 // Every eligibility check that GitHub can change between the link and the Status write. Returns a skip
 // receipt when the PR or Issue is no longer eligible, null when the write may proceed; throws when unreadable.
-async function readInProgressEligibility(client, { repository, issueNumber, pullRequestNumber, allowMissingMarker = false }) {
+async function readInProgressEligibility(client, { repository, issueNumber, pullRequestNumber }) {
   let pullRequest;
   let issue;
   try {
@@ -436,7 +445,8 @@ async function readInProgressEligibility(client, { repository, issueNumber, pull
   try { marker = readTaskIdentityMarker(pullRequest.body); }
   catch (error) { return statusSkip("pr-task-identity-changed", `PR Task identity is no longer readable (${errorText(error)}); Project Status left unchanged.`); }
   const expected = `${repository}#${issueNumber}`;
-  if (marker ? marker.canonical !== expected : !allowMissingMarker) {
+  // The Status write always needs the PR body's own marker, also after a dispatch that named the identity.
+  if (marker?.canonical !== expected) {
     return statusSkip("pr-task-identity-changed", `PR Task identity is ${marker?.canonical ?? "missing"}, not the linked ${expected}; Project Status left unchanged.`);
   }
   if (issue?.number !== issueNumber || issue?.pull_request) {
@@ -472,7 +482,6 @@ export async function setInProgressAfterLink(client, {
   issueNumber,
   pullRequestNumber,
   config,
-  allowMissingMarker = false,
   readProject = readProjectSnapshot,
   readIssueItems = readIssueProjectItems,
   wait = (ms) => new Promise((done) => setTimeout(done, ms)),
@@ -483,13 +492,13 @@ export async function setInProgressAfterLink(client, {
   if (!config?.organization || !Number.isInteger(projectNumber) || typeof statusField !== "string" || !statusField) {
     throw inProgressBlocked("PROJECT_CONFIG", "Project #5 configuration (organization, project number, statusField) is missing.");
   }
-  const eligibility = { repository, issueNumber, pullRequestNumber, allowMissingMarker };
+  const eligibility = { repository, issueNumber, pullRequestNumber };
 
   const ineligible = await readInProgressEligibility(client, eligibility);
   if (ineligible) return ineligible;
 
   let issueSide;
-  try { issueSide = await readIssueItems(client, repository, issueNumber, projectNumber); }
+  try { issueSide = await readIssueItems(client, repository, issueNumber, projectNumber, config.organization); }
   catch (error) { throw projectReadBlocked(projectNumber, error, "membership of the Issue"); }
   if (!Array.isArray(issueSide) || issueSide.length !== 1 || !issueSide[0]?.id) {
     throw inProgressBlocked("PROJECT_MEMBERSHIP", `Project #${projectNumber} membership of ${repository}#${issueNumber} is missing or ambiguous `
@@ -575,8 +584,6 @@ async function applyInProgress(receipt, inProgress) {
       issueNumber: receipt.issueNumber,
       pullRequestNumber: receipt.pullRequestNumber,
       config: inProgress.config,
-      // a PR without a body marker is acceptable only when an explicit dispatch input named the Task identity
-      allowMissingMarker: inProgress.allowMissingMarker === true,
     });
     return { ...receipt, projectStatus };
   } catch (error) {
@@ -801,12 +808,7 @@ async function main() {
     selectedOwner: process.env.CHIPIN_SELECTED_OWNER,
   };
   const client = new GitHubClient(process.env.GITHUB_TOKEN);
-  const optIn = readInProgressOptIn(process.env, config);
-  // CHIPIN_TASK_IDENTITY is always the admitted identity in the action; only a requested (dispatch) identity
-  // lets the Status writer accept a PR body without its own marker.
-  const inProgress = optIn?.enabled
-    ? { ...optIn, allowMissingMarker: Boolean(args.get("--task") || process.env.CHIPIN_REQUESTED_TASK_IDENTITY) }
-    : optIn;
+  const inProgress = readInProgressOptIn(process.env, config);
   const receipt = await reconcileDevelopmentLink(client, {
     repository,
     pullRequestNumber,

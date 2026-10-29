@@ -160,7 +160,7 @@ query MetadataIssueProjectItems($owner: String!, $repo: String!, $number: Int!) 
         totalCount
         nodes {
           id
-          project { number }
+          project { number owner { __typename ... on Organization { login } } }
           fieldValueByName(name: "Status") {
             __typename
             ... on ProjectV2ItemFieldSingleSelectValue { name }
@@ -175,8 +175,11 @@ query MetadataIssueProjectItems($owner: String!, $repo: String!, $number: Int!) 
  * Issue-side read of the Project memberships of one Issue. The organization Project items listing
  * (readProjectSnapshot) can lag behind a fresh addProjectV2ItemById for more than a minute; the
  * Issue's own projectItems connection is a second, independent view used to avoid a duplicate add.
+ * Only items of `organization`'s Project `projectNumber` count (.github#218): a user-owned or another
+ * organization's Project with the same number is ignored. A same-numbered item whose owner is unreadable fails closed.
  */
-export async function readIssueProjectItems(client, repository, number, projectNumber) {
+export async function readIssueProjectItems(client, repository, number, projectNumber, organization) {
+  if (typeof organization !== "string" || !organization) throw new Error("Project owner organization is required to read Issue Project items");
   const [owner, repo] = repository.split("/");
   const data = await client.graphql(ISSUE_PROJECT_ITEMS_QUERY, { owner, repo, number });
   const issue = data?.repository?.issue;
@@ -187,8 +190,12 @@ export async function readIssueProjectItems(client, repository, number, projectN
   if (connection.nodes.length !== connection.totalCount) {
     throw new Error(`Issue ${repository}#${number} Project items are incomplete: read ${connection.nodes.length} of ${connection.totalCount}`);
   }
-  return connection.nodes
-    .filter((item) => item?.project?.number === projectNumber)
+  const sameNumber = connection.nodes.filter((item) => item?.project?.number === projectNumber);
+  if (sameNumber.some((item) => !item.project.owner?.__typename)) {
+    throw new Error(`Issue ${repository}#${number} Project #${projectNumber} owner is unreadable`);
+  }
+  return sameNumber
+    .filter((item) => item.project.owner.__typename === "Organization" && item.project.owner.login === organization)
     .map((item) => ({ id: item.id, repository, number, status: item.fieldValueByName?.name ?? null }));
 }
 

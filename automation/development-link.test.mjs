@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   InProgressBlocked,
   inProgressOutcomeSeverity,
+  isProjectAccessFailure,
   parseTaskIdentity,
   reportInProgressOutcome,
   readInProgressOptIn,
@@ -858,7 +859,7 @@ test("In Progress runs after a confirmed link (new and already-linked) and only 
     });
     assert.equal(receipt.result, linkedPullRequests.length ? "already-linked" : "linked");
     assert.equal(receipt.projectStatus.code, "in-progress-set");
-    assert.deepEqual(writes, [{ projectClient: "PROJECT_CLIENT", input: { repository: REPOSITORY, issueNumber: 7, pullRequestNumber: 10, config: PROJECT_CONFIG, allowMissingMarker: false }, linkedAtWrite: true }]);
+    assert.deepEqual(writes, [{ projectClient: "PROJECT_CLIENT", input: { repository: REPOSITORY, issueNumber: 7, pullRequestNumber: 10, config: PROJECT_CONFIG }, linkedAtWrite: true }]);
   }
   let called = false;
   await assert.rejects(reconcileDevelopmentLink(makeClient({ readBackFailure: true }), {
@@ -937,7 +938,7 @@ test("main reporting maps severity to ::error:: + exit 1, ::warning:: + exit 0, 
   assert.equal(run(undefined).severity, "none");
 });
 
-test("a dispatch-supplied Task identity lets the writer accept a PR body without its own marker", async () => {
+test("the Status write always requires the PR body's own Task identity marker", async () => {
   const client = statusClient({ status: "Backlog", body: "no marker" });
   const result = await setInProgressAfterLink(client, {
     repository: REPOSITORY, issueNumber: 7, pullRequestNumber: 10, config: PROJECT_CONFIG, allowMissingMarker: true,
@@ -945,5 +946,37 @@ test("a dispatch-supplied Task identity lets the writer accept a PR body without
     readIssueItems: async () => [{ id: "ITEM_7", repository: REPOSITORY, number: 7, status: "Backlog" }],
     wait: async () => {},
   });
-  assert.equal(result.code, "in-progress-set");
+  assert.equal(result.code, "pr-task-identity-changed");
+  assert.equal(statusMutations(client).length, 0);
+});
+
+test("the Issue-side read is scoped to the configured organization", async () => {
+  const seen = [];
+  const client = statusClient({ status: "Backlog" });
+  await setInProgressAfterLink(client, {
+    repository: REPOSITORY, issueNumber: 7, pullRequestNumber: 10, config: PROJECT_CONFIG,
+    readProject: async () => statusProject("Backlog"),
+    readIssueItems: async (...args) => { seen.push(args.slice(1)); return [{ id: "ITEM_7", repository: REPOSITORY, number: 7, status: "Backlog" }]; },
+    wait: async () => {},
+  });
+  assert.deepEqual(seen, [[REPOSITORY, 7, 5, "ChipIn-one"]]);
+});
+
+test("a 403 rate limit is transient; a 401 or a permission answer is an access error", async () => {
+  const cases = [
+    ["GraphQL -> 403: {\"message\":\"You have exceeded a secondary rate limit. Please wait a few minutes before you try again.\"}", "PROJECT_UNREADABLE"],
+    ["GraphQL -> 403: API rate limit exceeded for user ID 1. Retry-After: 60", "PROJECT_UNREADABLE"],
+    ["GraphQL -> 403: You have triggered an abuse detection mechanism.", "PROJECT_UNREADABLE"],
+    ["GraphQL -> 403: Forbidden", "PROJECT_UNREADABLE"],
+    ["GraphQL -> 403: {\"message\":\"Resource not accessible by personal access token\"}", "PROJECT_ACCESS"],
+    ["GraphQL -> 401: Bad credentials", "PROJECT_ACCESS"],
+    ["Your token has not been granted the required scopes (INSUFFICIENT_SCOPES)", "PROJECT_ACCESS"],
+    ["Project #5 is unavailable", "PROJECT_ACCESS"],
+  ];
+  for (const [message, code] of cases) {
+    const client = statusClient();
+    await assert.rejects(writeStatus(client, { readProject: async () => { throw new Error(message); } }), (error) => error.code === code, message);
+    assert.equal(inProgressOutcomeSeverity({ result: "blocked", code }), code === "PROJECT_ACCESS" ? "error" : "warning");
+  }
+  assert.equal(isProjectAccessFailure(Object.assign(new Error("not accessible"), { code: "PROJECT_READ_DEADLINE" })), false);
 });

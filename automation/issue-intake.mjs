@@ -554,7 +554,7 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             if (!memberships.length) {
               // The Project items listing can lag behind an earlier add (2026-10-20: more than 60 s).
               // The Issue's own projectItems view is read first so a retry never adds a second item.
-              const issueSide = await readIssueItems(client, target.repository, target.number, config.project.number);
+              const issueSide = await readIssueItems(client, target.repository, target.number, config.project.number, config.organization);
               if (issueSide.length > 1) throw new Error('Project #' + config.project.number + ' has duplicate membership (' + issueSide.length + ' items on the Issue).');
               let knownItemId = null;
               if (!issueSide.length) {
@@ -587,7 +587,7 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
                 // The add succeeded (or was already present on the Issue) but the Project listing has not
                 // caught up within the budget. The next drain skips the add once the membership is visible.
                 let issueSideCount = 'unknown';
-                try { issueSideCount = String((await readIssueItems(client, target.repository, target.number, config.project.number)).length); }
+                try { issueSideCount = String((await readIssueItems(client, target.repository, target.number, config.project.number, config.organization)).length); }
                 catch { /* diagnostic only; the pending state does not depend on it */ }
                 return pendingReturn(PENDING_READBACK_CODE,
                   'Project #' + config.project.number + ' membership for ' + key(target.repository, target.number)

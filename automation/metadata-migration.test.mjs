@@ -510,22 +510,44 @@ test("GraphQL errors next to partial data fail the read instead of returning a s
   await assert.rejects(client.graphql("query { x }", {}), /Resource limits/);
 });
 
-test("issue-side Project items are read for one Project and fail closed when incomplete", async () => {
+const ORG_OWNER = { __typename: "Organization", login: "ChipIn-one" };
+
+test("issue-side Project items are read for one org Project and fail closed when incomplete", async () => {
   const client = {
     graphql: async (query, variables) => {
       assert.match(query, /MetadataIssueProjectItems/);
+      assert.match(query, /owner \{ __typename \.\.\. on Organization \{ login \} \}/);
       assert.deepEqual(variables, { owner: "ChipIn-one", repo: "chipin-frontend", number: 466 });
       return { repository: { issue: { number: 466, projectItems: { totalCount: 2, nodes: [
-        { id: "PVTI_5", project: { number: 5 }, fieldValueByName: { name: "Todo" } },
-        { id: "PVTI_9", project: { number: 9 }, fieldValueByName: null },
+        { id: "PVTI_5", project: { number: 5, owner: ORG_OWNER }, fieldValueByName: { name: "Todo" } },
+        { id: "PVTI_9", project: { number: 9, owner: ORG_OWNER }, fieldValueByName: null },
       ] } } } };
     },
   };
-  assert.deepEqual(await readIssueProjectItems(client, "ChipIn-one/chipin-frontend", 466, 5), [
+  assert.deepEqual(await readIssueProjectItems(client, "ChipIn-one/chipin-frontend", 466, 5, "ChipIn-one"), [
     { id: "PVTI_5", repository: "ChipIn-one/chipin-frontend", number: 466, status: "Todo" },
   ]);
   const incomplete = { graphql: async () => ({ repository: { issue: { number: 466, projectItems: { totalCount: 3, nodes: [] } } } }) };
-  await assert.rejects(readIssueProjectItems(incomplete, "ChipIn-one/chipin-frontend", 466, 5), /incomplete: read 0 of 3/);
+  await assert.rejects(readIssueProjectItems(incomplete, "ChipIn-one/chipin-frontend", 466, 5, "ChipIn-one"), /incomplete: read 0 of 3/);
   const wrong = { graphql: async () => ({ repository: { issue: null } }) };
-  await assert.rejects(readIssueProjectItems(wrong, "ChipIn-one/chipin-frontend", 466, 5), /unreadable/);
+  await assert.rejects(readIssueProjectItems(wrong, "ChipIn-one/chipin-frontend", 466, 5, "ChipIn-one"), /unreadable/);
+  await assert.rejects(readIssueProjectItems(client, "ChipIn-one/chipin-frontend", 466, 5), /organization is required/);
+});
+
+test("issue-side Project items ignore a user-owned or other-org Project with the same number (.github#218)", async () => {
+  const nodes = [
+    { id: "PVTI_USER", project: { number: 5, owner: { __typename: "User", login: "ChipIn-one" } }, fieldValueByName: { name: "Done" } },
+    { id: "PVTI_OTHER", project: { number: 5, owner: { __typename: "Organization", login: "other-org" } }, fieldValueByName: null },
+    { id: "PVTI_ORG", project: { number: 5, owner: ORG_OWNER }, fieldValueByName: { name: "Backlog" } },
+  ];
+  const client = { graphql: async () => ({ repository: { issue: { number: 466, projectItems: { totalCount: nodes.length, nodes } } } }) };
+  assert.deepEqual(await readIssueProjectItems(client, "ChipIn-one/chipin-frontend", 466, 5, "ChipIn-one"), [
+    { id: "PVTI_ORG", repository: "ChipIn-one/chipin-frontend", number: 466, status: "Backlog" },
+  ]);
+  const onlyUser = { graphql: async () => ({ repository: { issue: { number: 466, projectItems: { totalCount: 1, nodes: [nodes[0]] } } } }) };
+  assert.deepEqual(await readIssueProjectItems(onlyUser, "ChipIn-one/chipin-frontend", 466, 5, "ChipIn-one"), []);
+  const unreadableOwner = { graphql: async () => ({ repository: { issue: { number: 466, projectItems: { totalCount: 1, nodes: [
+    { id: "PVTI_X", project: { number: 5, owner: null }, fieldValueByName: null },
+  ] } } } }) };
+  await assert.rejects(readIssueProjectItems(unreadableOwner, "ChipIn-one/chipin-frontend", 466, 5, "ChipIn-one"), /owner is unreadable/);
 });
