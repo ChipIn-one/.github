@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {classifyPR,implementationIdentity,releaseReferences,bodyGaps,chooseOwner,chooseReviewer,uniqueProjectItem,ensureProjectPR,ensureCategory,readProject,reconcilePR,assertSingleNativeIssue,requiredShaCIGreen} from "./pr-metadata.mjs";
+import {classifyPR,implementationIdentity,releaseReferences,bodyGaps,chooseOwner,chooseReviewer,ensureCategory,reconcilePR,assertSingleNativeIssue,requiredShaCIGreen} from "./pr-metadata.mjs";
 const repo="ChipIn-one/chipin-frontend";
-// Fakes below model a genuinely empty Project #5; an empty zero-count first page otherwise fails closed as phantom (#221).
-const EMPTY_PROJECT={retryDelaysMs:[],allowEmptyProject:true};
 const pr=(base,head)=>({base:{ref:base,repo:{full_name:repo}},head:{ref:head,repo:{full_name:repo}}});
 // the frontend dev/main layout before the canonical-master cutover (.github#216): rollback target of chipin-frontend#497
 const LEGACY_BRANCHES=Object.freeze({default:"main",integration:"dev",promotion:"main"});
@@ -55,136 +53,12 @@ test("reviewer policy differs from assignment and forbids self-review",()=>{
   assert.throws(()=>chooseReviewer({approved:["a","b"],author:"owner"}),/REVIEWER_POLICY/);
   assert.equal(chooseReviewer({approved:["reviewer"],author:"owner"}),"reviewer");
 });
-test("Project duplicates fail; existing membership read-back is idempotent",async()=>{
-  const content={__typename:"PullRequest",id:"PR_10"};
-  assert.throws(()=>uniqueProjectItem([{id:"1",content},{id:"2",content}],"PR_10"),/duplicate/);
-  let writes=0;
-  const node={id:"1",content};
-  const client={async graphql(q){
-    if(q.startsWith("query"))return{organization:{projectV2:{id:"P5",items:{totalCount:1,pageInfo:{hasNextPage:false,endCursor:null},nodes:[node]}}}};
-    writes++;throw new Error("write not expected");
-  }};
-  assert.equal((await ensureProjectPR(client,"PR_10")).created,false);
-  assert.equal((await ensureProjectPR(client,"PR_10")).readBack,true);
-  assert.equal(writes,0);
-});
-test("Project write requires actual read-back, not mutation claim",async()=>{
-  let writes=0;
-  const client={async graphql(q){
-    if(q.startsWith("query"))return{organization:{projectV2:{id:"P5",items:{totalCount:0,pageInfo:{hasNextPage:false,endCursor:null},nodes:[]}}}};
-    writes++;return{addProjectV2ItemById:{item:{id:"new"}}};
-  }};
-  await assert.rejects(ensureProjectPR(client,"PR_NEW",{pageRetry:EMPTY_PROJECT,beforeWrite:async()=>{},retryWait:async()=>{}}),/missing PR item on read-back after 7 complete reads/);
-  assert.equal(writes,1);
-});
-
-test("Project membership becomes visible after a successful write without a second mutation",async()=>{
-  let reads=0,writes=0,admissions=0,waits=0;
-  const item={id:"ITEM_42",content:{__typename:"PullRequest",id:"PR_42"}};
-  const client={async graphql(query){
-    if(query.startsWith("query")){
-      reads++;
-      const items=reads>=4?[item]:[];
-      return{organization:{projectV2:{id:"P5",items:{
-        totalCount:items.length,pageInfo:{hasNextPage:false,endCursor:null},nodes:items
-      }}}};
-    }
-    writes++;
-    return{addProjectV2ItemById:{item:{id:"ITEM_42"}}};
-  }};
-  const result=await ensureProjectPR(client,"PR_42",{pageRetry:EMPTY_PROJECT,
-    beforeWrite:async()=>{admissions++;assert.equal(reads,1);},
-    retryWait:async(ms)=>{assert.ok(ms>0);waits++;}
-  });
-  assert.deepEqual(result,{id:"ITEM_42",created:true,readBack:true});
-  assert.equal(reads,4);assert.equal(writes,1);
-  assert.equal(admissions,1);assert.equal(waits,2);
-});
-
-test("Project read-back exhausts bounded reads without making duplicate writes",async()=>{
-  let reads=0,writes=0,admissions=0,waits=0;
-  const client={async graphql(query){
-    if(query.startsWith("query")){
-      reads++;
-      return{organization:{projectV2:{id:"P5",items:{
-        totalCount:0,pageInfo:{hasNextPage:false,endCursor:null},nodes:[]
-      }}}};
-    }
-    writes++;return{addProjectV2ItemById:{item:{id:"ITEM_42"}}};
-  }};
-  await assert.rejects(ensureProjectPR(client,"PR_42",{pageRetry:EMPTY_PROJECT,
-    beforeWrite:async()=>{admissions++;},
-    retryWait:async()=>{waits++;}
-  }),/missing PR item on read-back after 7 complete reads/);
-  assert.equal(reads,8); // initial scan, then 7 full read-back attempts
-  assert.equal(writes,1);assert.equal(admissions,1);assert.equal(waits,6);
-});
-
-test("Project read-back never accepts a different mutation item ID",async()=>{
-  let writes=0;
-  const client={async graphql(query){
-    if(query.startsWith("query")){
-      const nodes=writes?[{id:"DIFFERENT",content:{__typename:"PullRequest",id:"PR_42"}}]:[];
-      return{organization:{projectV2:{id:"P5",items:{
-        totalCount:nodes.length,pageInfo:{hasNextPage:false,endCursor:null},nodes
-      }}}};
-    }
-    writes++;return{addProjectV2ItemById:{item:{id:"ITEM_42"}}};
-  }};
-  await assert.rejects(ensureProjectPR(client,"PR_42",{pageRetry:EMPTY_PROJECT,
-    beforeWrite:async()=>{},retryWait:async()=>{}
-  }),/mutation item ID differs from membership read-back/);
-  assert.equal(writes,1);
-});
-
-test("new Project item requires a successful pre-write admission gate after scan",async()=>{
-  let reads=0,mutations=0,checks=0;
-  const client={async graphql(q){
-    if(q.startsWith("query")){
-      reads++;return {organization:{projectV2:{id:"P5",items:{
-        totalCount:0,pageInfo:{hasNextPage:false,endCursor:null},nodes:[]
-      }}}};
-    }
-    mutations++;return{addProjectV2ItemById:{item:{id:"NEW"}}};
-  }};
-  await assert.rejects(ensureProjectPR(client,"PR_42",{pageRetry:EMPTY_PROJECT}),/pre-write validation callback required/);
-  assert.equal(reads,1);assert.equal(mutations,0);
-  await assert.rejects(ensureProjectPR(client,"PR_42",{pageRetry:EMPTY_PROJECT,
-    beforeWrite:async()=>{
-      checks++;assert.equal(reads,2);assert.equal(mutations,0);
-      throw new Error("canonical Issue revision changed during Project scan");
-    }
-  }),/revision changed/);
-  assert.equal(checks,1);assert.equal(mutations,0);
-});
-
-test("Project membership read re-reads a phantom empty cursor page (#221)",async()=>{
-  const node=(n)=>({id:"PVTI_"+n,content:{__typename:"PullRequest",id:"PR_"+n,number:n,repository:{nameWithOwner:repo}}});
-  const pages={root:{totalCount:3,pageInfo:{hasNextPage:true,endCursor:"c1"},nodes:[node(1),node(2)]},
-    c1:{totalCount:3,pageInfo:{hasNextPage:false,endCursor:"c2"},nodes:[node(3)]}};
-  const phantom={totalCount:0,pageInfo:{hasNextPage:false,endCursor:null},nodes:[]};
-  let phantoms=1;const calls=[];
-  const client={async graphql(_q,{after}){const key=after??"root";calls.push(key);
-    if(key==="c1"&&phantoms-->0)return{organization:{projectV2:{id:"P5",items:phantom}}};
-    return{organization:{projectV2:{id:"P5",items:pages[key]}}};}};
-  const result=await readProject(client,{retryDelaysMs:[0],wait:async()=>{}});
-  assert.deepEqual(result.items.map(i=>i.id),["PVTI_1","PVTI_2","PVTI_3"]);
-  assert.deepEqual(calls,["root","c1","c1"]);
-  const stuck={async graphql(_q,{after}){return{organization:{projectV2:{id:"P5",items:after?phantom:pages.root}}};}};
-  await assert.rejects(readProject(stuck,{retryDelaysMs:[0],wait:async()=>{}}),
-    e=>e.code==="PROJECT_ITEMS_PHANTOM"&&/^PROJECT: Project items page stayed empty after 1 retries/u.test(e.message));
-  let firstCalls=0;
-  const phantomFirst={async graphql(_q,{after}){
-    if(!after&&firstCalls++===0)return{organization:{projectV2:{id:"P5",items:phantom}}};
-    return{organization:{projectV2:{id:"P5",items:pages[after??"root"]}}};}};
-  assert.equal((await readProject(phantomFirst,{retryDelaysMs:[0],wait:async()=>{}})).items.length,3);
-  assert.equal(firstCalls,2);
-  const empty={async graphql(){return{organization:{projectV2:{id:"P5",items:phantom}}};}};
-  await assert.rejects(readProject(empty,{retryDelaysMs:[0],wait:async()=>{}}),
-    e=>e.code==="PROJECT_ITEMS_PHANTOM"&&/^PROJECT: Project items first page stayed empty/u.test(e.message));
-});
-test("Project GraphQL permission failures become actionable blockers",async()=>{
-  await assert.rejects(readProject({async graphql(){throw new Error("403 Forbidden");}}),/PROJECT_PERMISSION:.*org Projects v2/u);
+test("PR metadata never adds pull requests to Project #5 (.github#157)",async()=>{
+  const mod=await import("./pr-metadata.mjs");
+  for (const name of ["ensureProjectPR","readProject","uniqueProjectItem"]) assert.equal(mod[name],undefined,name);
+  const {readFile}=await import("node:fs/promises");
+  const source=await readFile(new URL("./pr-metadata.mjs",import.meta.url),"utf8");
+  assert.doesNotMatch(source,/addProjectV2ItemById|projectV2\(/u);
 });
 test("manual category conflicts block instead of adding competing labels",async()=>{
   let writes=0;
@@ -195,7 +69,7 @@ test("manual category conflicts block instead of adding competing labels",async(
   await assert.rejects(ensureCategory(client,42,"implementation"),/LABEL_CONFLICT/u);
   assert.equal(writes,0);
 });
-test("release retries preserve manual values, avoid duplicate Project item and never change Issues",async()=>{
+test("release retries preserve manual values, never add a Project item and never change Issues",async()=>{
   const SHA="a".repeat(40), PATH="/repos/ChipIn-one/chipin-frontend";
   const body="Included implementation PRs: "+repo+"#10\nIncluded Issues: "+repo+"#5\n"
     +"## Summary\nrelease\n## Tests\nCI pending\n## Version impact\nnone\n## Dependencies\nnone";
@@ -259,8 +133,8 @@ test("release retries preserve manual values, avoid duplicate Project item and n
     admit:async()=>({status:"INTAKE_COMPLETE",receipts:[]})};
   const one=await reconcilePR(client,policy,20,SHA,options);
   const two=await reconcilePR(client,policy,20,SHA,options);
-  assert.equal(one.kind,"release");assert.equal(one.project.status,"pending-org-writer");
-  assert.equal(two.project.status,"pending-org-writer");
+  assert.equal(one.kind,"release");assert.equal(one.project.status,"issues-only");
+  assert.equal(two.project.status,"issues-only");
   assert.equal(projectAdds,0);assert.equal(labelAdds,1);assert.equal(issueWrites,1); // no FE Project write
   assert.ok(nativeReads>=2); // read-only native link verification on both retries
   assert.ok(!two.blockers.some(x=>x.includes("REVIEWER_POLICY")));

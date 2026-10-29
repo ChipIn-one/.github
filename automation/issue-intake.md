@@ -110,6 +110,7 @@ node automation/issue-intake.mjs apply create ChipIn-one/chipin-frontend \
 - The create checkpoint (`--state`) records `initialStatus`; a retry with a different `--status` fails closed. A checkpoint written before #218 has no `initialStatus` and counts as `Backlog`.
 - `initialStatusApplied` describes this run only: when a resume follows a `pending-readback` run that already wrote the Status, it is `false` (the Status is then visible and preserved, with no `initialStatusNote` when it equals the requested value).
 - The UI finalizer, the connector bridge and the drain run `reconcile`, so they keep `Backlog`; they do not accept a Status input.
+- With the Project #5 built-in workflow `Item added to project` on (Issues only, sets `Status: Backlog`, [docs/workflow/README.md](../docs/workflow/README.md#project-5-built-in-workflows)), a requested `--status Todo` can be overtaken: the built-in `Backlog` may land before this run's write (the receipt then reports `initialStatusApplied: false` with the preserved `Backlog`) or after it (the final read-back blocks, or the item ends at `Backlog` after the receipt). A fix is tracked separately; until then check the Status after a `--status Todo` create.
 
 Read-only reconcile example:
 

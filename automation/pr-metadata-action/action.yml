@@ -1,5 +1,5 @@
 name: Frontend PR metadata
-description: Shared FE-only PR metadata reconcile with native Development and Project #5 read-back.
+description: Shared FE-only PR metadata reconcile with native Development read-back; never adds the PR to Project #5.
 inputs:
   pull-request-number:
     description: Exact PR number
