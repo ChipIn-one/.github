@@ -20,6 +20,19 @@ inputs:
   token:
     description: GitHub token with permission to read the PR and write the Issue Development relationship.
     required: true
+  set-in-progress:
+    description: >-
+      Opt-in In Progress writer (.github#218): "true" moves the linked open Issue's Project #5 Status
+      Backlog/Todo to In Progress after the link is read back; any other Status is left as it is.
+      Default "false" (no Project read or write).
+    required: false
+    default: 'false'
+  project-status-token:
+    description: >-
+      Org token that reads and writes Project #5 (CHIPIN_ISSUE_WRITE_TOKEN); required only when
+      set-in-progress is "true". The repository token cannot write an org Project.
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -31,9 +44,17 @@ runs:
         CHIPIN_PR_NUMBER: ${{ inputs.pull-request-number }}
         EXPECTED_HEAD_SHA: ${{ inputs.expected-head-sha }}
         GITHUB_TOKEN: ${{ inputs.admission-token }}
+        SET_IN_PROGRESS: ${{ inputs.set-in-progress }}
+        HAS_PROJECT_STATUS_TOKEN: ${{ inputs.project-status-token != '' }}
       run: |
         set -euo pipefail
         test -n "${GITHUB_TOKEN:-}"
+        # A misconfigured opt-in never blocks the link: warn here, link as usual, skip only the Status move.
+        if [[ "$SET_IN_PROGRESS" != 'true' && "$SET_IN_PROGRESS" != 'false' ]]; then
+          echo "::warning::set-in-progress must be true or false (got: $SET_IN_PROGRESS); Project Status is left unchanged."
+        elif [[ "$SET_IN_PROGRESS" == 'true' && "$HAS_PROJECT_STATUS_TOKEN" != 'true' ]]; then
+          echo '::warning::set-in-progress is true but project-status-token is empty; Project Status is left unchanged.'
+        fi
         node "$GITHUB_ACTION_PATH/../issue-admission-pr.mjs" \
           --repository "$CHIPIN_PR_REPOSITORY" --pr "$CHIPIN_PR_NUMBER" --expected-head-sha "$EXPECTED_HEAD_SHA" \
           --config "$GITHUB_ACTION_PATH/../metadata-migration.config.json" \
@@ -54,6 +75,8 @@ runs:
         CHIPIN_ADMISSION_TOKEN: ${{ inputs.admission-token }}
         CHIPIN_REQUESTED_TASK_IDENTITY: ${{ inputs.task-identity }}
         GITHUB_TOKEN: ${{ inputs.token }}
+        CHIPIN_SET_IN_PROGRESS: ${{ inputs.set-in-progress == 'true' && '1' || '0' }}
+        CHIPIN_PROJECT_STATUS_TOKEN: ${{ inputs.project-status-token }}
       run: |
         set -euo pipefail
         if [[ -n "$CHIPIN_REQUESTED_TASK_IDENTITY" && "$CHIPIN_REQUESTED_TASK_IDENTITY" != "$CHIPIN_TASK_IDENTITY" ]]; then

@@ -15,7 +15,7 @@ Every run requires explicit Issue Type and Priority, plus Severity when applicab
 
 Native Milestone is optional. Missing milestone is valid and means “not scheduled for a concrete release”. Intake never infers, writes, clears, or renames Milestones.
 
-Existing canonical values are human-owned. If requested Issue Type/Priority/Severity conflicts with an existing value, reconciliation stops rather than overwriting it. Existing Project Status is also preserved. Project Status values are `Backlog`, `Todo`, `In Progress`, `Awaiting release` (written only by the completion engine), and `Done`; `Done` is valid only when the Issue is already `closed/completed` and is never completion authority. `DEV`/`PROD` are retired. `Backlog` is initialized only when the issue has exactly one Project #5 item with no Status. Intake never closes or reopens an Issue.
+Existing canonical values are human-owned. If requested Issue Type/Priority/Severity conflicts with an existing value, reconciliation stops rather than overwriting it. Existing Project Status is also preserved. Project Status values are `Backlog`, `Todo`, `In Progress`, `Awaiting release` (written only by the completion engine), and `Done`; `Done` is valid only when the Issue is already `closed/completed` and is never completion authority. `DEV`/`PROD` are retired. The initial Status (`Backlog`, or `Todo` with `apply create --status Todo`) is initialized only when the issue has exactly one Project #5 item with no Status. Intake never writes `In Progress` (the development-link reconciler does, .github#218), `Awaiting release` or `Done`. Intake never closes or reopens an Issue.
 
 Project membership is read independently. Missing membership may be added by the guarded writer; duplicate membership is fail-closed and requires manual reconciliation. Native dependency, parent/sub-issue, Milestone, assignee, body, labels, and Development relationships are not modified.
 
@@ -74,7 +74,7 @@ On 2026-10-20 seven requests ended BLOCKED although every write succeeded: the P
 
 - `readProjectSnapshot` re-reads the Project from the first page (up to two more times) when `items.length > totalCount`; `items.length < totalCount` still fails.
 - Before adding a membership the writer reads the Issue's own `projectItems`; an item already visible there is never added again (`project-membership:already-present`), two items are a duplicate and block.
-- Status `Backlog` is initialised right after the add on the item id the mutation returned (or on the item the Issue side already shows, when its Status is absent), so a lagging listing cannot turn the Status step into a blocker.
+- The initial Status (`Backlog`, or `Todo` from `apply create --status Todo`) is initialised right after the add on the item id the mutation returned (or on the item the Issue side already shows, when its Status is absent), so a lagging listing cannot turn the Status step into a blocker.
 - The membership wait is a time budget (4 minutes, 2 s between full Project reads, hard cap 120 reads). If the listing has still not caught up, the writer returns `action: pending-readback` with `pending.code = PROJECT_MEMBERSHIP_READBACK_PENDING` (or `PROJECT_STATUS_READBACK_PENDING` when the item is visible but its freshly set Status is not) and no blockers (exit 2 for the CLI). It is a distinct, retryable state: the bridge/finalizer post a **PENDING** result comment, the control Issue stays open, the drain summary outcome is `pending` (exit 0, not `attention-required`), and `.github/workflows/issue-intake-drain-retry.yml` re-runs the drain for open control Issues every 30 minutes with the same `canonical-issue-intake-writes` concurrency group. The retry runs the same idempotent reconcile: metadata and assignee are already canonical, the add is skipped once the membership is visible, Status is initialised only when absent, and the control Issue is closed after `INTAKE_COMPLETE`.
 - Cost: each full Project read is two GraphQL pages today (about 250 items), so one lagging request spends roughly 120–240 GraphQL points per drain run on the shared write token; several lagging requests in one run stay well under the 5 000 points/hour limit but are visible in the rate-limit budget.
 - On a pending early return the relationships step of `apply create` (`--blocked-by` and friends) has not run yet; the create checkpoint keeps the Issue identity, so the retry resumes the same create and declares the relationships once the Project read-back is complete.
@@ -93,10 +93,22 @@ node automation/issue-intake.mjs apply create ChipIn-one/chipin-frontend \
   --type Task \
   --priority P2 \
   --severity none \
+  --status Backlog \
   --state /tmp/issue-create-state.json \
   --activate issue-intake-v1 \
   --output /tmp/issue-intake.json
 ```
+
+### Initial Status: `--status Backlog|Todo` (#218)
+
+`apply create` (and `plan create`) accepts `--status Backlog` (the default) or `--status Todo`; any other value, and `--status` with `reconcile`, is rejected before any GitHub read.
+
+- `Backlog` is for new work: it waits for owner triage.
+- `Todo` is only for an Issue inside a scope the owner already approved, for example a sub-task of an approved plan or decomposition. It is not a priority signal and does not replace admission.
+- The Status is written once, on the new item, and only when the item has no Status; a Status already visible on the item (human-set) is preserved as it is.
+- The result carries `initialStatus` and `initialStatusApplied` (`true` when this run wrote it, then `applied` also names `status:<value>`); when a requested Status was not written because the item already had another one, `initialStatusNote` says so. The receipt's `project.status` is the read-back. When this run wrote the Status and the final read-back shows another value, the receipt is `BLOCKED`.
+- The create checkpoint (`--state`) records `initialStatus`; a retry with a different `--status` fails closed.
+- The UI finalizer, the connector bridge and the drain run `reconcile`, so they keep `Backlog`; they do not accept a Status input.
 
 Read-only reconcile example:
 

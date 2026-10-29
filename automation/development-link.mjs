@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 
-import { GitHubClient } from "./github-metadata.mjs";
+import { GitHubClient, readIssueProjectItems, readProjectSnapshot } from "./github-metadata.mjs";
 import { readAdmission, assertFreshReceipt } from "./issue-admission.mjs";
 import { getRepositoryProfile, integrationBranch, listRepositories } from "./registry.mjs";
 
@@ -21,6 +21,34 @@ const TASK_IDENTITY_PATTERN = new RegExp(
   "u",
 );
 const TASK_IDENTITY_MARKER = "Task identity:";
+
+// In Progress writer (.github#218): opt-in, run only after the native Development link is confirmed.
+export const IN_PROGRESS_STATUS = "In Progress";
+// Only these move forward to In Progress; In Progress, Awaiting release, Done, empty and unknown stay as they are.
+export const IN_PROGRESS_SOURCES = Object.freeze(["Backlog", "Todo"]);
+const DEPENDABOT_LOGIN = "dependabot[bot]";
+
+const PROJECT_ITEM_STATUS_QUERY = `
+query DevelopmentLinkProjectItemStatus($itemId: ID!, $statusField: String!) {
+  node(id: $itemId) {
+    __typename
+    ... on ProjectV2Item {
+      id
+      fieldValueByName(name: $statusField) {
+        __typename
+        ... on ProjectV2ItemFieldSingleSelectValue { name }
+      }
+    }
+  }
+}`;
+
+const SET_IN_PROGRESS_MUTATION = `
+mutation SetDevelopmentLinkInProgress($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+  updateProjectV2ItemFieldValue(input: {
+    projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
+    value: { singleSelectOptionId: $optionId }
+  }) { projectV2Item { id } }
+}`;
 
 const TARGET_QUERY = `
 query DevelopmentLinkTarget(
@@ -285,12 +313,218 @@ query DevelopmentLinkPullRequest($owner: String!, $repo: String!, $pullRequestNu
   return pullRequest;
 }
 
+export class InProgressBlocked extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = "InProgressBlocked";
+    this.code = code;
+  }
+}
+
+function inProgressBlocked(code, message) {
+  return new InProgressBlocked(code, message);
+}
+
+function statusSkip(code, detail) {
+  return { result: "unchanged", mutated: false, code, detail };
+}
+
+// Only a broken Project write path fails the check (exit 1); anything transient or stale is a warning (exit 0).
+// Neither ever undoes or hides the Development link.
+export const IN_PROGRESS_ERROR_CODES = Object.freeze(["PROJECT_STATUS_WRITE", "PROJECT_STATUS_READBACK", "PROJECT_STATUS_FIELD"]);
+
+export function inProgressOutcomeSeverity(projectStatus) {
+  if (!projectStatus) return "none";
+  if (projectStatus.result === "blocked") return IN_PROGRESS_ERROR_CODES.includes(projectStatus.code) ? "error" : "warning";
+  if (projectStatus.code === "stale-snapshot" || projectStatus.code === "opt-in-misconfigured" || projectStatus.prStateAfterWrite) return "warning";
+  return "none";
+}
+
+function inProgressCoordinates(project, statusField) {
+  const fields = (project?.fields ?? []).filter((field) => field?.name === statusField);
+  if (fields.length !== 1) {
+    throw inProgressBlocked("PROJECT_STATUS_FIELD", `Project Status field is missing or ambiguous (${fields.length} matches).`);
+  }
+  const field = fields[0];
+  if (field.isIssueField === true) throw inProgressBlocked("PROJECT_STATUS_FIELD", "Project Status must remain project-local.");
+  const options = (field.options ?? []).filter((option) => option?.name === IN_PROGRESS_STATUS);
+  if (options.length !== 1) {
+    throw inProgressBlocked("PROJECT_STATUS_FIELD", `${IN_PROGRESS_STATUS} Status option is missing or ambiguous (${options.length} matches).`);
+  }
+  if (!project?.id || !field.id || !options[0].id) {
+    throw inProgressBlocked("PROJECT_STATUS_FIELD", "Project Status mutation coordinates are unreadable.");
+  }
+  return { projectId: project.id, fieldId: field.id, optionId: options[0].id };
+}
+
+async function readItemStatus(client, itemId, statusField) {
+  let data;
+  try { data = await client.graphql(PROJECT_ITEM_STATUS_QUERY, { itemId, statusField }); }
+  catch (error) { throw inProgressBlocked("PROJECT_ITEM_UNREADABLE", `Project item ${itemId} Status is unreadable: ${error instanceof Error ? error.message : String(error)}`); }
+  const item = data?.node;
+  if (item?.id !== itemId) throw inProgressBlocked("PROJECT_ITEM_UNREADABLE", `Project item ${itemId} Status read did not return the expected item.`);
+  return item.fieldValueByName?.name ?? null;
+}
+
+// Every eligibility check that GitHub can change between the link and the Status write. Returns a skip
+// receipt when the PR or Issue is no longer eligible, null when the write may proceed; throws when unreadable.
+async function readInProgressEligibility(client, { repository, issueNumber, pullRequestNumber }) {
+  let pullRequest;
+  let issue;
+  try {
+    [pullRequest, issue] = await Promise.all([
+      client.request(`/repos/${repository}/pulls/${pullRequestNumber}`),
+      client.request(`/repos/${repository}/issues/${issueNumber}`),
+    ]);
+  } catch (error) {
+    throw inProgressBlocked("ISSUE_OR_PR_UNREADABLE", `Issue/PR state for the In Progress write is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (pullRequest?.number !== pullRequestNumber || !pullRequest?.user?.login || !pullRequest?.state) {
+    throw inProgressBlocked("ISSUE_OR_PR_UNREADABLE", `Pull request ${repository}#${pullRequestNumber} is unreadable.`);
+  }
+  if (pullRequest.user.login === DEPENDABOT_LOGIN) {
+    return statusSkip("dependabot-pr", "Dependabot PRs never move Project Status.");
+  }
+  if (pullRequest.state !== "open") {
+    return statusSkip("pr-not-open", `PR ${repository}#${pullRequestNumber} is ${pullRequest.state}; Project Status left unchanged.`);
+  }
+  // A draft PR is parked work: converting a PR to draft is one of the ways to keep an Issue out of In Progress.
+  if (pullRequest.draft === true) {
+    return statusSkip("pr-draft", `PR ${repository}#${pullRequestNumber} is a draft; Project Status left unchanged until it is ready for review.`);
+  }
+  if (pullRequest.head?.repo?.full_name !== repository || pullRequest.base?.repo?.full_name !== repository) {
+    return statusSkip("pr-not-same-repository", "Only same-repository PRs move Project Status.");
+  }
+  if (issue?.number !== issueNumber || issue?.pull_request) {
+    throw inProgressBlocked("NOT_AN_ISSUE", `${repository}#${issueNumber} is unreadable or is not an Issue.`);
+  }
+  if (issue.state !== "open") {
+    return statusSkip("issue-not-open", `Issue ${repository}#${issueNumber} is ${issue.state ?? "unreadable"}; Project Status left unchanged.`);
+  }
+  return null;
+}
+
+/**
+ * In Progress writer (.github#218), run only after the native Development link of an open same-repository
+ * PR to its open Issue is confirmed. Moves the Issue's Project #5 Status Backlog / Todo -> In Progress.
+ * In Progress, Awaiting release, Done, empty or any other value is left as it is (never backwards). Dependabot
+ * PRs, closed PRs and closed Issues are no-ops. The Project item list comes from readProjectSnapshot (the
+ * .github#221 phantom-page reader) and must agree with the Issue's own projectItems view; the item Status is
+ * re-read right before the mutation (a change since the snapshot abandons the write) and read back after it.
+ * Unreadable or ambiguous Project data throws InProgressBlocked; nothing is guessed.
+ */
+export async function setInProgressAfterLink(client, {
+  repository,
+  issueNumber,
+  pullRequestNumber,
+  config,
+  readProject = readProjectSnapshot,
+  readIssueItems = readIssueProjectItems,
+}) {
+  const projectNumber = config?.project?.number;
+  const statusField = config?.project?.statusField ?? "Status";
+  if (!config?.organization || !Number.isInteger(projectNumber)) {
+    throw inProgressBlocked("PROJECT_CONFIG", "Project #5 configuration (organization, project number) is missing.");
+  }
+
+  const ineligible = await readInProgressEligibility(client, { repository, issueNumber, pullRequestNumber });
+  if (ineligible) return ineligible;
+
+  let project;
+  let issueSide;
+  try {
+    project = await readProject(client, config);
+    issueSide = await readIssueItems(client, repository, issueNumber, projectNumber);
+  } catch (error) {
+    throw inProgressBlocked("PROJECT_UNREADABLE", `Project #${projectNumber} is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const listed = (project?.items ?? []).filter((item) => item?.repository === repository && item?.number === issueNumber);
+  if (listed.length !== 1 || !Array.isArray(issueSide) || issueSide.length !== 1) {
+    throw inProgressBlocked("PROJECT_MEMBERSHIP", `Project #${projectNumber} membership of ${repository}#${issueNumber} is missing or ambiguous `
+      + `(listing ${listed.length}, Issue side ${Array.isArray(issueSide) ? issueSide.length : "unreadable"}); manual reconciliation is required.`);
+  }
+  const itemId = listed[0].id;
+  if (!itemId || issueSide[0].id !== itemId) {
+    throw inProgressBlocked("PROJECT_MEMBERSHIP", `Project #${projectNumber} item of ${repository}#${issueNumber} differs between the listing and the Issue side.`);
+  }
+  const snapshotStatus = listed[0].status ?? null;
+  if (snapshotStatus === IN_PROGRESS_STATUS) {
+    return statusSkip("in-progress-current", `Project Status is already ${IN_PROGRESS_STATUS}.`);
+  }
+  if (!IN_PROGRESS_SOURCES.includes(snapshotStatus)) {
+    return statusSkip("in-progress-skipped:" + (snapshotStatus ?? "none"), `Project Status ${snapshotStatus === null ? "is empty" : snapshotStatus}; `
+      + `only ${IN_PROGRESS_SOURCES.join(" or ")} move to ${IN_PROGRESS_STATUS}.`);
+  }
+  const coordinates = inProgressCoordinates(project, statusField);
+
+  // Stale check at the mutation boundary: PR/Issue eligibility first, the item Status last (closest to the write).
+  const lateIneligible = await readInProgressEligibility(client, { repository, issueNumber, pullRequestNumber });
+  if (lateIneligible) return lateIneligible;
+  const currentStatus = await readItemStatus(client, itemId, statusField);
+  if (currentStatus !== snapshotStatus) {
+    return statusSkip("stale-snapshot", `Project Status changed from ${snapshotStatus} to ${currentStatus ?? "empty"} after the snapshot; left unchanged.`);
+  }
+
+  let data;
+  try {
+    data = await client.graphql(SET_IN_PROGRESS_MUTATION, { ...coordinates, itemId });
+  } catch (error) {
+    throw inProgressBlocked("PROJECT_STATUS_WRITE", `Project Status mutation failed: ${error instanceof Error ? error.message : String(error)}. Check that the token writes Project #${projectNumber}.`);
+  }
+  if (data?.updateProjectV2ItemFieldValue?.projectV2Item?.id !== itemId) {
+    throw inProgressBlocked("PROJECT_STATUS_WRITE", "Project Status mutation did not return the expected item id.");
+  }
+  const readBack = await readItemStatus(client, itemId, statusField);
+  if (readBack !== IN_PROGRESS_STATUS) {
+    throw inProgressBlocked("PROJECT_STATUS_READBACK", `Project Status of ${repository}#${issueNumber} did not read back as ${IN_PROGRESS_STATUS} (read ${readBack ?? "none"}).`);
+  }
+  const updated = { result: "updated", mutated: true, code: "in-progress-set", detail: `Project Status ${snapshotStatus} -> ${IN_PROGRESS_STATUS}.`, itemId };
+  // The PR may close in the window between the last eligibility read and the write. Report it; never revert.
+  let prStateAfterWrite = null;
+  try { prStateAfterWrite = (await client.request(`/repos/${repository}/pulls/${pullRequestNumber}`))?.state ?? null; }
+  catch { prStateAfterWrite = null; }
+  if (prStateAfterWrite !== "open") {
+    return { ...updated, prStateAfterWrite: prStateAfterWrite ?? "unreadable",
+      detail: updated.detail + ` The PR is ${prStateAfterWrite ?? "unreadable"} after the write; check the Issue Status by hand.` };
+  }
+  return updated;
+}
+
+// Runs the opt-in writer after a confirmed link. A blocked Status write never discards the link result: the
+// receipt keeps result/readBackConfirmed of the link and reports the Status outcome next to it.
+async function applyInProgress(receipt, inProgress) {
+  if (inProgress?.misconfigured) {
+    return { ...receipt, projectStatus: { result: "unchanged", mutated: false, code: "opt-in-misconfigured", detail: inProgress.misconfigured } };
+  }
+  if (!inProgress?.enabled) return receipt;
+  try {
+    const projectStatus = await (inProgress.write ?? setInProgressAfterLink)(inProgress.client, {
+      repository: receipt.repository,
+      issueNumber: receipt.issueNumber,
+      pullRequestNumber: receipt.pullRequestNumber,
+      config: inProgress.config,
+    });
+    return { ...receipt, projectStatus };
+  } catch (error) {
+    return {
+      ...receipt,
+      projectStatus: {
+        result: "blocked",
+        mutated: false,
+        code: error instanceof InProgressBlocked ? error.code : "PROJECT_STATUS_ERROR",
+        detail: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
+}
+
 export async function reconcileDevelopmentLink(client, {
   repository,
   pullRequestNumber,
   explicitTaskIdentity = null,
   expectedHeadSha = null,
   admission = null,
+  inProgress = null,
 }) {
   assertSupportedRepository(repository);
   const prNumber = parsePositiveInteger(pullRequestNumber, "Pull request number");
@@ -404,14 +638,14 @@ export async function reconcileDevelopmentLink(client, {
   }
 
   if (before.linked) {
-    return {
+    return applyInProgress({
       result: "already-linked",
       taskIdentity: task.canonical,
       repository,
       issueNumber: task.issueNumber,
       pullRequestNumber: prNumber,
       readBackConfirmed: true,
-    };
+    }, inProgress);
   }
 
   let mutation;
@@ -447,14 +681,14 @@ export async function reconcileDevelopmentLink(client, {
     );
   }
 
-  return {
+  return applyInProgress({
     result: "linked",
     taskIdentity: task.canonical,
     repository,
     issueNumber: task.issueNumber,
     pullRequestNumber: prNumber,
     readBackConfirmed: true,
-  };
+  }, inProgress);
 }
 
 function parseArgs(argv) {
@@ -493,14 +727,36 @@ async function main() {
     selectedOwner: process.env.CHIPIN_SELECTED_OWNER,
   };
   const client = new GitHubClient(process.env.GITHUB_TOKEN);
+  const inProgress = readInProgressOptIn(process.env, config);
   const receipt = await reconcileDevelopmentLink(client, {
     repository,
     pullRequestNumber,
     explicitTaskIdentity,
     expectedHeadSha,
     admission,
+    inProgress,
   });
   process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
+  // The native link above is done and read back in every case; only the Status move is reported here.
+  const severity = inProgressOutcomeSeverity(receipt.projectStatus);
+  if (severity !== "none") {
+    const line = `In Progress Status ${receipt.projectStatus.code} (Development link kept): ${receipt.projectStatus.detail}`;
+    process.stdout.write(`::${severity}::${line.replace(/\r?\n/gu, " ")}\n`);
+    if (severity === "error") process.exitCode = 1;
+  }
+}
+
+// Opt-in (.github#218): off unless CHIPIN_SET_IN_PROGRESS is exactly "1". A misconfigured opt-in (another value,
+// or "1" without a Project #5 write token) never blocks the link: the link runs and the Status move is skipped
+// with a warning in the receipt.
+export function readInProgressOptIn(env, config, makeClient = (token) => new GitHubClient(token)) {
+  const flag = env.CHIPIN_SET_IN_PROGRESS ?? "";
+  if (flag === "" || flag === "0") return null;
+  if (flag !== "1") return { misconfigured: `CHIPIN_SET_IN_PROGRESS must be 0 or 1, got ${JSON.stringify(flag)}; Project Status left unchanged.` };
+  if (!env.CHIPIN_PROJECT_STATUS_TOKEN) {
+    return { misconfigured: "set-in-progress is on but project-status-token is empty; Project Status left unchanged." };
+  }
+  return { enabled: true, client: makeClient(env.CHIPIN_PROJECT_STATUS_TOKEN), config };
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {

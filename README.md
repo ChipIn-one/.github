@@ -36,7 +36,7 @@ Product/domain documentation lives in [chipin-knowledge-base](https://github.com
 - explicit inputs are required for Issue Type, Priority, and applicable Severity; missing Milestone is valid and intake preserves any existing Milestone;
 - existing human Issue Type/Issue Field values and Project Status are preserved;
 - missing Project #5 membership is added; duplicate membership fails closed for manual reconciliation;
-- `Backlog` is initialized only when the sole Project item has no Status;
+- `Backlog` is initialized only when the sole Project item has no Status; `apply create --status Todo` initializes `Todo` instead, only for an Issue inside a scope the owner already approved (.github#218);
 - every apply path performs fresh reads and final read-back before reporting success; receipts include the preserved native Milestone;
 - API/agent create mode checkpoints the created issue identity before later stages so a retry cannot create a duplicate issue;
 - apply mode requires both `--activate issue-intake-v1` and `CHIPIN_ISSUE_WRITE=1`.
@@ -49,9 +49,9 @@ See [automation/issue-intake.md](automation/issue-intake.md) for CLI examples, r
 
 Project #5 `Status` tracks workflow position plus one derived completion mirror:
 
-- `Backlog`
-- `Todo`
-- `In Progress`
+- `Backlog` — default for new work (intake)
+- `Todo` — approved scope (`issue-intake.mjs apply create --status Todo`) or a human
+- `In Progress` — set from `Backlog`/`Todo` by the development-link reconciler when an open PR is natively linked (opt-in per caller, default off; `.github` after its caller pin bump; .github#218) or by a human
 - `Awaiting release` — implementation merged into the integration branch, waiting for the release step (frontend: a production Deployment receipt on `master`); written only by the completion engine, never closes an Issue
 - `Done` — display mirror for an Issue already `closed/completed`
 
@@ -63,7 +63,7 @@ Native GitHub Issue state is the terminal source of truth:
 - closed as completed = completed;
 - closed as not planned = cancelled / intentionally not completed.
 
-Development-linked PRs and their merge state remain implementation evidence and are not copied into Project Status, except `Awaiting release`, which only the completion engine writes ([docs/workflow/completion.md](docs/workflow/completion.md)).
+Development-linked PRs and their merge state remain implementation evidence and are not copied into Project Status, except `In Progress` when an open PR is linked (above) and `Awaiting release`, which only the completion engine writes ([docs/workflow/completion.md](docs/workflow/completion.md)).
 
 For frontend code work, merge to the integration branch (`master` since .github#216) is integration only. The Issue closes only after the required implementation is in production (a Vercel `Production` deployment of `master`, written at Promote to Production); since .github#217 the completion engine closes it through the org sweep (`.github/workflows/frontend-production-completion.yml`, within minutes of the Promote via the frontend Production dispatch, otherwise on `.github` pushes and a throttled schedule observed every ~5–6 hours; .github#228).
 

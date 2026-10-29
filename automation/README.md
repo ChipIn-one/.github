@@ -67,8 +67,11 @@ See [issue-intake.md](./issue-intake.md) for CLI examples, connector request for
 - Missing/ambiguous identity, unsupported repositories, unreadable Issue/PR/relationship state,
   unavailable mutation permission/capability, incomplete pagination, and failed read-back all
   block without guessing.
-- This path never closes/reopens an Issue, mutates Project #5 Status, writes `Done`, or implements
-  production completion from #40.
+- This path never closes/reopens an Issue, writes `Done`, or implements production completion from #40.
+  Its only Project #5 write is the opt-in `In Progress` writer (.github#218, action input
+  `set-in-progress`, default off, with `project-status-token`): after the link is read back it moves the
+  open Issue's Status `Backlog`/`Todo` to `In Progress` (not for draft or Dependabot PRs), leaves every other
+  value, and never fails the link: only a broken Project write path exits 1, anything transient is a warning. See [docs/workflow/completion.md](../docs/workflow/completion.md#in-progress-at-development-link).
 
 The composite action at `automation/development-link-action/action.yml` packages this reconciler
 for minimal repository-local PR-event callers. Organization `.github` workflows are not inherited

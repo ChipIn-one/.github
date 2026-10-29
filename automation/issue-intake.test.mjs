@@ -913,3 +913,108 @@ test('Status is set on the known item id right after the add; a lagging Status r
   assert.equal(notOurs.action, 'pending-readback', 'a listing that lags on a human Status is retried, never overwritten');
   assert.equal(notOurs.pending.code, 'PROJECT_STATUS_READBACK_PENDING');
 });
+
+// ---- --status Backlog|Todo on create (.github#218) ----
+
+function createRun({ status = undefined, projects, issueSide = [], statusCalls, extra = {}, state = null } = {}) {
+  let projectReads = 0;
+  let issueReads = 0;
+  return withoutExitLeak(() => run([
+    ...argsFor('create', 'ChipIn-one/chipin-frontend'),
+    '--title', 'Approved plan sub-task',
+    '--state', '/tmp/state-218.json',
+    ...(status === undefined ? [] : ['--status', status]),
+  ], { CHIPIN_ISSUE_WRITE: '1' }, {
+    config,
+    client: {},
+    readGlobalContext: async () => ({ project: project(), blockers: [] }),
+    readCreateState: async () => state,
+    reserveCreateState: async () => {},
+    writeCreateState: async () => {},
+    createIssue: async () => ({ number: 999, html_url: 'https://github.com/ChipIn-one/chipin-frontend/issues/999' }),
+    readIssueSnapshot: async () => { issueReads += 1; return fullIssue(); },
+    readProjectSnapshot: async () => projects[Math.min(projectReads++, projects.length - 1)],
+    readIssueProjectItems: async () => issueSide,
+    addProjectMembership: async () => 'ITEM',
+    initializeProjectStatus: async (_client, _config, _project, itemId, value) => { statusCalls.push({ itemId, value }); },
+    projectMembershipReadDelayMs: 0,
+    sleep: async () => {},
+    writeFile: async () => {},
+    ...extra,
+  }));
+}
+
+const item = (status) => ({ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status });
+
+test('create --status Todo writes Todo once on the new item and the receipt reads it back', async () => {
+  const statusCalls = [];
+  const result = await createRun({ status: 'Todo', statusCalls, projects: [project(), project({ items: [item('Todo')] })] });
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(result.blockers, []);
+  assert.deepEqual(statusCalls, [{ itemId: 'ITEM', value: 'Todo' }]);
+  assert.ok(result.applied.includes('status:Todo'));
+  assert.equal(result.initialStatus, 'Todo');
+  assert.equal(result.initialStatusApplied, true);
+  assert.equal('initialStatusNote' in result, false);
+  assert.equal(result.receipt.project.status, 'Todo');
+});
+
+test('create without --status keeps the Backlog default', async () => {
+  const statusCalls = [];
+  const result = await createRun({ statusCalls, projects: [project(), project({ items: [item('Backlog')] })] });
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(statusCalls, [{ itemId: 'ITEM', value: 'Backlog' }]);
+  assert.equal(result.initialStatus, 'Backlog');
+  assert.equal(result.receipt.project.status, 'Backlog');
+});
+
+test('create --status Todo never overwrites a Status already visible on the item', async () => {
+  const statusCalls = [];
+  const result = await createRun({
+    status: 'Todo', statusCalls, issueSide: [item('In Progress')],
+    projects: [project(), project({ items: [item('In Progress')] })],
+  });
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(statusCalls, []);
+  assert.ok(result.applied.includes('project-membership:already-present'));
+  assert.equal(result.receipt.project.status, 'In Progress');
+  assert.equal(result.initialStatusApplied, false);
+  assert.match(result.initialStatusNote, /Requested initial Status Todo was not written: the item already had Status In Progress/);
+});
+
+test('create --status Todo blocks when the written Status reads back as something else', async () => {
+  const statusCalls = [];
+  const result = await createRun({ status: 'Todo', statusCalls, projects: [project(), project({ items: [item('Backlog')] })] });
+  assert.equal(result.action, 'incomplete');
+  assert.deepEqual(statusCalls, [{ itemId: 'ITEM', value: 'Todo' }]);
+  assert.match(result.blockers.join('\n'), /Read-back Project Status is Backlog, expected the initial Todo written by this run/);
+  assert.equal(result.receipt.status, 'BLOCKED');
+});
+
+test('--status accepts only Backlog or Todo and only with create', async () => {
+  for (const value of ['In Progress', 'Awaiting release', 'Done', 'todo', '']) {
+    await assert.rejects(createRun({ status: value, statusCalls: [], projects: [project()] }), /Unsupported --status|Missing|expected one of/);
+  }
+  await assert.rejects(withoutExitLeak(() => run([...argsFor(), '--status', 'Todo'], { CHIPIN_ISSUE_WRITE: '1' }, { config })),
+    /--status is supported only with create/);
+});
+
+test('create retry with a different --status than the checkpoint fails closed', async () => {
+  const statusCalls = [];
+  const result = await createRun({
+    status: 'Todo', statusCalls, projects: [project({ items: [item('Backlog')] })],
+    state: { issueRef: 'ChipIn-one/chipin-frontend#999', classification, title: 'Approved plan sub-task', initialStatus: 'Backlog' },
+  });
+  assert.equal(result.action, 'incomplete');
+  assert.match(result.blockers.join('\n'), /State initial Status differs from this retry/);
+  assert.deepEqual(statusCalls, []);
+});
+
+test('plan create reports the requested initial Status', async () => {
+  const result = await withoutExitLeak(() => run([
+    'plan', 'create', 'ChipIn-one/chipin-frontend', '--type', 'Task', '--priority', 'P2', '--severity', 'none',
+    '--title', 'Approved plan sub-task', '--body', DURABLE_BODY, '--status', 'Todo',
+  ], {}, { config, client: {}, readGlobalContext: async () => ({ project: project(), blockers: [] }), writeFile: async () => {} }));
+  assert.equal(result.action, 'ready-to-create');
+  assert.equal(result.initialStatus, 'Todo');
+});
