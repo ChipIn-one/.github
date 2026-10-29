@@ -121,6 +121,8 @@ const ORG_SWEEP = { path: '.github/workflows/frontend-production-completion.yml'
 test('completionRunner org-sweep: no repository caller, but a scheduled org sweep must run the engine for the repository', () => {
   const fe = profile(FE);
   assert.ok(completionSweepCovers(ORG_SWEEP, FE), 'the live org sweep covers chipin-frontend');
+  // the Production dispatch trigger (.github#228) sits next to the schedule; the schedule stays required
+  assert.deepEqual(workflowTriggers(ORG_SWEEP.text), ['push', 'repository_dispatch', 'schedule']);
   assert.equal(completionSweepCovers(ORG_SWEEP, KB), false);
   assert.deepEqual(checkCompletionSweep(fe, [ORG_SWEEP]), []);
   const missing = checkCompletionSweep(fe, []);

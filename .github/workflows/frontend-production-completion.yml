@@ -6,17 +6,25 @@
 # this run is the only FE completion writer. It closes an Issue once every linked PR's merge commit is in a valid
 # Vercel `Production` receipt (written by vercel[bot] at Promote to Production) and moves Todo / In Progress to
 # `Awaiting release` for merged but not yet promoted work (the repository GITHUB_TOKEN cannot write the org Project).
-# Latency: up to 15 minutes after the Promote. Conformance checks that this workflow keeps covering the repository
+# Latency (.github#228): within minutes of the Promote when chipin-frontend forwards its successful vercel[bot]
+# Production deployment as repository_dispatch `frontend-production-deployed` (chipin-frontend#559); otherwise on the
+# next push to master here or the next schedule run, which GitHub throttles (observed every ~5-6 hours, not the 15
+# minutes the cron asks for). Conformance checks that this workflow keeps covering the repository
 # (COMPLETION_SWEEP_MISSING). Emergency switch-off: set `capabilities.completion: manual` AND drop `completionRunner`
 # in the frontend record (validation rejects org-sweep with manual); CHIPIN_COMPLETION_SKIP_MANUAL=1 then makes this run
 # a green no-op (harmless while the record is automatic). Rollback to the dev/main record needs no change here.
-# Runs only from trusted master pushes and the schedule; no branch-selectable dispatch.
+# Runs only trusted master code: pushes to master, the schedule and repository_dispatch, which GitHub always runs from
+# the default branch; there is no branch-selectable workflow_dispatch. The dispatch payload (deployment id, SHA) is only
+# a hint and is never read: the engine re-reads the Vercel Production receipt itself, so a forged dispatch can at most
+# start an ordinary sweep run.
 name: Frontend production completion
 
 on:
   push:
     branches:
       - master
+  repository_dispatch:
+    types: [frontend-production-deployed]
   schedule:
     - cron: "7,22,37,52 * * * *"
 
