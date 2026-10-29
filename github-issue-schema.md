@@ -86,11 +86,21 @@ Branch names, titles, closing keywords, plain URLs, matching numbers, and Milest
 fallbacks. Canonical implementation evidence exists only after the native Development relationship is
 read back from GitHub.
 
-Project #5 Status tracks active work as `Backlog -> Todo -> In Progress -> Awaiting release`. `Awaiting release` means the last required implementation PR merged into the integration branch of a repository whose completion needs a later step (frontend: a production Deployment receipt on `master`); it is set only by the completion engine and is never a closure trigger. `Done` stays the derived mirror of `closed/completed`: a display state only for an Issue already `closed/completed`. Do not use or recreate `DEV` or `PROD`; `Done` must never authorize Issue closure.
+Project #5 Status tracks active work as `Backlog -> Todo -> In Progress -> Awaiting release`. Who writes each value (.github#218):
+
+| Status | Written by | Rule |
+| --- | --- | --- |
+| `Backlog` | intake (`issue-intake.mjs`, finalizer, connector bridge) | default initial Status for new work, set only on an item that has no Status |
+| `Todo` | intake `apply create --status Todo`, or a human | only for an Issue inside a scope the owner already approved (e.g. a sub-task of an approved plan); set only when the item has no Status; reconcile, finalizer and bridge never write it |
+| `In Progress` | the development-link reconciler (opt-in per caller), or a human | `Backlog`/`Todo` -> `In Progress` after the native Development link of an open same-repository PR to the open Issue is read back; every other value is left as it is, never backwards; no draft or Dependabot PRs, no closed Issues ([completion.md](docs/workflow/completion.md#in-progress-at-development-link)) |
+| `Awaiting release` | the completion engine only | see below |
+| `Done` | derived mirror | display only for an Issue already `closed/completed` |
+
+`Awaiting release` means the last required implementation PR merged into the integration branch of a repository whose completion needs a later step (frontend: a production Deployment receipt on `master`); it is set only by the completion engine and is never a closure trigger. `Done` stays the derived mirror of `closed/completed`: a display state only for an Issue already `closed/completed`. Do not use or recreate `DEV` or `PROD`; `Done` must never authorize Issue closure.
 
 Native Issue state is the completion authority. Closing as completed means the task is complete; closing as not planned means it was cancelled or intentionally abandoned. Reopening makes the task unfinished again.
 
-Development-linked PRs are implementation evidence. Their merge state must not be copied into Project Status, except `Awaiting release`, which only the completion engine writes (docs/workflow/completion.md).
+Development-linked PRs are implementation evidence. Their merge state must not be copied into Project Status, except `Awaiting release`, which only the completion engine writes (docs/workflow/completion.md). Linking an open PR may move `Backlog`/`Todo` to `In Progress` (table above); that move reflects started work, not merge state, and is never completion evidence.
 
 For frontend code work, merge to the integration branch (`master` since .github#216) is not completion. Close only after the required implementation is in production (a Vercel `Production` deployment of `master`).
 

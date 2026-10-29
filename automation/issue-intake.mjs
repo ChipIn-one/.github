@@ -17,6 +17,11 @@ import { GitHubNativeStore, appendDeclarations, declare, parseIssueRef as parseR
 const APPLY_ACTIVATION = 'issue-intake-v1';
 const APPLY_ENV = 'CHIPIN_ISSUE_WRITE';
 const INITIAL_STATUS = 'Backlog';
+// `apply create --status` (#218): new work lands in Backlog for triage; Todo is only for an Issue inside a
+// scope the owner already approved (for example a sub-task of an approved plan). Reconcile, the finalizer
+// and the connector bridge keep Backlog. Every other value is rejected; the Status is written only on an
+// item that has none, so an existing human-set Status is never overwritten.
+export const INITIAL_STATUS_VALUES = Object.freeze(['Backlog', 'Todo']);
 // The membership wait is governed by the time budget; the read cap only bounds a pathological
 // zero-latency loop (120 reads x 2 s delay > 4 min, so the budget always ends first in practice).
 const MEMBERSHIP_READ_ATTEMPTS = 120;
@@ -112,7 +117,7 @@ function projectStatusConsistencyBlockers(config, snapshot, status, prefix = '')
   return [prefix + 'Project Status Done is derived from Issue closed/completed; observed Issue state=' + (state || 'unreadable') + ', state_reason=' + (reason || 'unreadable') + '.'];
 }
 
-export function buildReconcilePlan({ config, repository, number, classification, snapshot, project, selectedOwner = null }) {
+export function buildReconcilePlan({ config, repository, number, classification, snapshot, project, selectedOwner = null, initialStatus = INITIAL_STATUS }) {
   const operations = [];
   const blockers = [];
   // GitHub /issues/{number} also returns PR-shaped resources. Verify exact
@@ -155,7 +160,7 @@ export function buildReconcilePlan({ config, repository, number, classification,
   if (memberships.length === 0) {
     if (writable) operations.push({ kind: 'addProjectMembership' });
   } else if (memberships.length > 1) blockers.push('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items); manual reconciliation is required.');
-  else if (!memberships[0].status && writable) operations.push({ kind: 'initializeStatus', itemId: memberships[0].id, value: INITIAL_STATUS });
+  else if (!memberships[0].status && writable) operations.push({ kind: 'initializeStatus', itemId: memberships[0].id, value: initialStatus });
   else blockers.push(...projectStatusConsistencyBlockers(config, snapshot, memberships[0].status));
   return {
     issue: key(repository, number),
@@ -222,22 +227,23 @@ export async function addProjectMembership(client, project, snapshot) {
   return id;
 }
 
-function statusCoordinates(config, project) {
+function statusCoordinates(config, project, status = INITIAL_STATUS) {
   const blockers = [];
   const fields = (project?.fields || []).filter((field) => field?.name === config.project.statusField);
   if (fields.length !== 1) return { blockers: ['Project Status field is missing or ambiguous (' + fields.length + ' matches).'] };
   const field = fields[0];
   if (field.isIssueField === true) blockers.push('Project Status must remain project-local.');
-  const options = (field.options || []).filter((option) => option?.name === INITIAL_STATUS);
-  if (options.length !== 1) blockers.push(INITIAL_STATUS + ' Status option is missing or ambiguous (' + options.length + ' matches).');
+  if (!INITIAL_STATUS_VALUES.includes(status)) blockers.push('Initial Status ' + status + ' is not one of ' + INITIAL_STATUS_VALUES.join(', ') + '.');
+  const options = (field.options || []).filter((option) => option?.name === status);
+  if (options.length !== 1) blockers.push(status + ' Status option is missing or ambiguous (' + options.length + ' matches).');
   if (!project?.id) blockers.push('Project node id is unreadable.');
   if (!field?.id) blockers.push('Project Status field node id is unreadable.');
-  if (!options[0]?.id) blockers.push(INITIAL_STATUS + ' Status option id is unreadable.');
+  if (!options[0]?.id) blockers.push(status + ' Status option id is unreadable.');
   return { blockers, projectId: project?.id || null, fieldId: field?.id || null, optionId: options[0]?.id || null };
 }
 
-export async function initializeProjectStatus(client, config, project, itemId) {
-  const coordinates = statusCoordinates(config, project);
+export async function initializeProjectStatus(client, config, project, itemId, status = INITIAL_STATUS) {
+  const coordinates = statusCoordinates(config, project, status);
   if (coordinates.blockers.length) throw new Error(coordinates.blockers.join(' '));
   if (!itemId) throw new Error('Project item id is unreadable.');
   const data = await client.graphql(SET_STATUS, {
@@ -342,7 +348,7 @@ function parseArgs(argv) {
     mode: null, operation: null, target: null, issueType: null, priority: null,
     severity: null, title: null, body: null, bodyFile: null, owner: null,
     state: null, output: null, activate: null, config: 'automation/metadata-migration.config.json',
-    relationships: [],
+    relationships: [], status: null,
   };
   const values = [...argv];
   args.mode = values.shift(); args.operation = values.shift(); args.target = values.shift();
@@ -353,6 +359,7 @@ function parseArgs(argv) {
     '--type': 'issueType', '--priority': 'priority',
     '--severity': 'severity', '--title': 'title', '--body': 'body', '--body-file': 'bodyFile', '--owner': 'owner',
     '--state': 'state', '--output': 'output', '--activate': 'activate', '--config': 'config',
+    '--status': 'status',
   };
   const relationshipFlags = { '--blocked-by': 'blocked_by', '--blocks': 'blocks', '--relates-to': 'relates_to', '--parent': 'parent' };
   for (let i = 0; i < values.length; i += 1) {
@@ -368,6 +375,13 @@ function parseArgs(argv) {
     throw new Error('Relationship flags are supported only with create; use relationships.mjs declare for an existing Issue.');
   }
   for (const { target } of args.relationships) parseRelationshipRef(target);
+  if (args.status !== null && args.operation !== 'create') {
+    throw new Error('--status is supported only with create; reconcile keeps an existing Status and initialises ' + INITIAL_STATUS + ' only when it is absent.');
+  }
+  if (args.status !== null && !INITIAL_STATUS_VALUES.includes(args.status)) {
+    throw new Error('Unsupported --status ' + JSON.stringify(args.status) + '; expected one of: ' + INITIAL_STATUS_VALUES.join(', ') + '.');
+  }
+  args.initialStatus = args.status ?? INITIAL_STATUS;
   if (args.operation === 'create' && args.mode === 'apply' && !args.state) throw new Error('Create apply requires --state for retry-safe issue identity persistence.');
   if (args.operation === 'create' && args.mode === 'apply' && args.output && resolve(args.state) === resolve(args.output)) {
     throw new Error('Create apply requires --state and --output to resolve to different paths.');
@@ -396,6 +410,7 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
     schemaVersion: 2, contractVersion: ADMISSION_CONTRACT, mode: args.mode, operation: args.operation,
     generatedAt: new Date().toISOString(), desired: checked.classification,
     issue: null, action: 'incomplete', blockers: [...checked.blockers], applied: [], receipt: null,
+    initialStatus: args.initialStatus, initialStatusApplied: false,
   };
 
   try { requiredOwner(args.operation === 'create' ? args.target : parseIssueRef(args.target).repository, args.owner); }
@@ -441,6 +456,8 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
           if (state.title && state.title !== args.title) throw new Error('State title differs from this retry.');
           if (state.owner && state.owner !== requiredOwner(args.target, args.owner)) throw new Error('State owner differs from this retry.');
           if (state.bodySha256 && state.bodySha256 !== createHash('sha256').update(suppliedBody).digest('hex')) throw new Error('State body differs from this retry.');
+          // A checkpoint written before #218 has no initialStatus: it was a Backlog create.
+          if ((state.initialStatus ?? INITIAL_STATUS) !== args.initialStatus) throw new Error('State initial Status differs from this retry.');
           result.applied.push('resume-existing-issue');
         } else if (state) {
           throw new Error('Create checkpoint exists without issue identity; creation outcome is uncertain. Recover the issue manually before retrying to avoid a duplicate.');
@@ -454,7 +471,7 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             schemaVersion: 1,
             repository: args.target,
             classification: checked.classification,
-            title: args.title, owner, bodySha256,
+            title: args.title, owner, bodySha256, initialStatus: args.initialStatus,
             phase: 'reserved-before-create',
             reservedAt: new Date().toISOString(),
           });
@@ -466,7 +483,7 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
           await writeState(args.state, {
             schemaVersion: 1, repository: args.target, issueRef: key(args.target, created.number),
             issueUrl: created.html_url || created.url || null, classification: checked.classification,
-            title: args.title, owner, bodySha256, createdAt: new Date().toISOString(),
+            title: args.title, owner, bodySha256, initialStatus: args.initialStatus, createdAt: new Date().toISOString(),
           });
           result.applied.push('issue-created-and-identity-persisted');
         }
@@ -481,7 +498,8 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
     try {
       let snapshot = await readIssue(client, target.repository, target.number);
       let project = global.project;
-      const plan = buildReconcilePlan({ config, repository: target.repository, number: target.number, classification: checked.classification, snapshot, project, selectedOwner: args.owner });
+      let statusWritten = false; // this run wrote the initial Status (checked again at the final read-back)
+      const plan = buildReconcilePlan({ config, repository: target.repository, number: target.number, classification: checked.classification, snapshot, project, selectedOwner: args.owner, initialStatus: args.initialStatus });
       result.plan = plan;
       result.blockers.push(...plan.blockers);
       if (!result.blockers.length && args.mode === 'plan') result.action = plan.action;
@@ -501,7 +519,7 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
         if (!result.blockers.length) {
           try {
             snapshot = await readIssue(client, target.repository, target.number);
-            const check = buildReconcilePlan({ config, repository: target.repository, number: target.number, classification: checked.classification, snapshot, project, selectedOwner: args.owner });
+            const check = buildReconcilePlan({ config, repository: target.repository, number: target.number, classification: checked.classification, snapshot, project, selectedOwner: args.owner, initialStatus: args.initialStatus });
             const remaining = check.operations.filter((op) => op.kind === 'setIssueField' || op.kind === 'setIssueType');
             if (remaining.length || check.operations.some(op => op.kind === 'addAssignee') || check.blockers.length) result.blockers.push('Issue metadata/assignee read-back did not confirm canonical state: ' + check.blockers.join(' '));
           } catch (error) { result.blockers.push('Issue metadata read-back failed: ' + error.message); }
@@ -536,7 +554,7 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             if (!memberships.length) {
               // The Project items listing can lag behind an earlier add (2026-10-20: more than 60 s).
               // The Issue's own projectItems view is read first so a retry never adds a second item.
-              const issueSide = await readIssueItems(client, target.repository, target.number, config.project.number);
+              const issueSide = await readIssueItems(client, target.repository, target.number, config.project.number, config.organization);
               if (issueSide.length > 1) throw new Error('Project #' + config.project.number + ' has duplicate membership (' + issueSide.length + ' items on the Issue).');
               let knownItemId = null;
               if (!issueSide.length) {
@@ -550,9 +568,10 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
               // Status is initialised on the item id we already know, so a lagging listing cannot turn
               // the Status step into a blocker later; the listing wait below only confirms visibility.
               if (knownItemId && !knownStatus) {
-                await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, knownItemId);
-                result.applied.push('status:' + INITIAL_STATUS);
+                await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, knownItemId, args.initialStatus);
+                result.applied.push('status:' + args.initialStatus);
                 statusInitialized = true;
+                statusWritten = true;
               }
 
               const startedAt = now();
@@ -568,7 +587,7 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
                 // The add succeeded (or was already present on the Issue) but the Project listing has not
                 // caught up within the budget. The next drain skips the add once the membership is visible.
                 let issueSideCount = 'unknown';
-                try { issueSideCount = String((await readIssueItems(client, target.repository, target.number, config.project.number)).length); }
+                try { issueSideCount = String((await readIssueItems(client, target.repository, target.number, config.project.number, config.organization)).length); }
                 catch { /* diagnostic only; the pending state does not depend on it */ }
                 return pendingReturn(PENDING_READBACK_CODE,
                   'Project #' + config.project.number + ' membership for ' + key(target.repository, target.number)
@@ -579,9 +598,10 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
 
             if (memberships.length > 1) throw new Error('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items).');
             if (memberships.length === 1 && !memberships[0].status && !statusInitialized && !knownStatus) {
-              await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, memberships[0].id);
-              result.applied.push('status:' + INITIAL_STATUS);
+              await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, memberships[0].id, args.initialStatus);
+              result.applied.push('status:' + args.initialStatus);
               statusInitialized = true;
+              statusWritten = true;
             }
 
             if (statusInitialized) {
@@ -598,7 +618,7 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             if (!memberships[0].status) {
               if (!statusInitialized && !knownStatus) throw new Error('Project Status read-back is missing after mutation.');
               return pendingReturn(PENDING_STATUS_READBACK_CODE,
-                'Project #' + config.project.number + ' Status ' + (knownStatus ?? INITIAL_STATUS) + ' is ' + (knownStatus ? 'visible on the Issue side' : 'set on item ' + memberships[0].id)
+                'Project #' + config.project.number + ' Status ' + (knownStatus ?? args.initialStatus) + ' is ' + (knownStatus ? 'visible on the Issue side' : 'set on item ' + memberships[0].id)
                   + ' but the Project listing does not show it yet. Retry the same intake later; Status is initialised only when still absent.');
             }
           } catch (error) { result.blockers.push('Project reconciliation failed: ' + error.message); }
@@ -632,6 +652,10 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
               if (confirmed.receipt.revision !== first.receipt.revision) {
                 blockers.push('STALE: native Issue/metadata/Project changed during final intake read-back.');
               }
+              // The Status this run wrote must read back as written; a Status found already set is preserved as-is.
+              if (statusWritten && confirmed.receipt.project?.status !== args.initialStatus) {
+                blockers.push('Read-back Project Status is ' + (confirmed.receipt.project?.status || 'missing') + ', expected the initial ' + args.initialStatus + ' written by this run.');
+              }
               result.blockers.push(...blockers);
               result.receipt = {
                 ...confirmed.receipt,
@@ -653,6 +677,12 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             result.blockers.push(...result.relationships.blockers.map((blocker) => 'Relationships: ' + blocker));
             if (!result.relationships.blockers.length) result.applied.push('native-relationships');
           } catch (error) { result.blockers.push('Relationships failed: ' + error.message); }
+        }
+        // Receipt-level answer to "did this run set the initial Status?" (.github#218).
+        result.initialStatusApplied = statusWritten;
+        const observedStatus = result.receipt?.project?.status ?? null;
+        if (!statusWritten && observedStatus && observedStatus !== args.initialStatus) {
+          result.initialStatusNote = 'Requested initial Status ' + args.initialStatus + ' was not written: the item already had Status ' + observedStatus + ', which is preserved.';
         }
         result.action = result.blockers.length ? 'incomplete' : 'complete';
       }

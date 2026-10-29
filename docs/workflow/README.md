@@ -46,6 +46,9 @@ Principles (fixed inside v1):
    native relationships (blocked by, relates to, parent/sub-issue, Development link). Markdown, labels and comments only transport intent; they are not state.
 2. Fail closed: unreadable, ambiguous or stale state blocks instead of being guessed.
 3. Only a human merges. Automation never closes an Issue because of Status `Done` and never changes Status because a PR merged.
+   Status writers ([github-issue-schema.md](../../github-issue-schema.md)): intake initializes `Backlog` (or `Todo` with `apply create --status Todo` for
+   approved scope), the development-link reconciler moves `Backlog`/`Todo` to `In Progress` when an open PR is linked (opt-in per caller, [completion.md](completion.md#in-progress-at-development-link)),
+   the completion engine alone writes `Awaiting release`, `Done` is a derived mirror.
 4. One writer per kind of metadata: intake — `automation/issue-intake.mjs`; relationships — `automation/relationships.mjs`;
    Project — `pr-project-writer.mjs`; completion — `automation/completion.mjs`, driven by the registry strategy ([completion.md](completion.md)). Executor agents have no write rights.
 5. Extensibility: a new repository is one registry record plus two caller files. Logic knows `kind` and capabilities, not the names FE/BE/KB.
