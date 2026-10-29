@@ -47,12 +47,41 @@ Principles (fixed inside v1):
 2. Fail closed: unreadable, ambiguous or stale state blocks instead of being guessed.
 3. Only a human merges. Automation never closes an Issue because of Status `Done` and never changes Status because a PR merged.
    Status writers ([github-issue-schema.md](../../github-issue-schema.md)): intake initializes `Backlog` (or `Todo` with `apply create --status Todo` for
-   approved scope), the development-link reconciler moves `Backlog`/`Todo` to `In Progress` when an open PR is linked (opt-in per caller, [completion.md](completion.md#in-progress-at-development-link)),
-   the completion engine alone writes `Awaiting release`, `Done` is a derived mirror.
+   approved scope), the Project #5 built-in workflow `Pull request linked to issue` moves the linked Issue to `In Progress`
+   ([below](#project-5-built-in-workflows); the custom development-link writer of #218 stays default-off, [completion.md](completion.md#in-progress-at-development-link)),
+   the completion engine alone writes `Awaiting release`, `Done` is a derived mirror of `closed/completed`.
 4. One writer per kind of metadata: intake — `automation/issue-intake.mjs`; relationships — `automation/relationships.mjs`;
-   Project — `pr-project-writer.mjs`; completion — `automation/completion.mjs`, driven by the registry strategy ([completion.md](completion.md)). Executor agents have no write rights.
+   Project membership — intake, plus conformance for its own drift Issues and the built-in `Auto-add sub-issues to project` (Project #5 holds Issues only, never PR items); completion — `automation/completion.mjs`, driven by the registry strategy ([completion.md](completion.md)). Executor agents have no write rights.
 5. Extensibility: a new repository is one registry record plus two caller files. Logic knows `kind` and capabilities, not the names FE/BE/KB.
 6. Cost: $0 of infrastructure beyond GitHub; CI minutes are saved with path filters and self-hosted runners where they exist.
+
+### Project #5 built-in workflows
+
+Project #5 holds **Issues only** (.github#157, owner decision 2026-10-29). Pull requests are not Project items: a PR is visible in
+its Issue's Development section. No automation adds a PR to the Project (the former org writer `pr-project-writer.mjs` and its
+scheduled `pr-metadata-project-reconcile.yml` are removed), and the conformance audit reports any PR card as
+`PROJECT_HAS_PULL_REQUESTS` drift ([conformance.md](conformance.md)).
+
+The built-in workflows (Project #5 → Workflows) are owner configuration, not code. GraphQL `organization.projectV2.workflows { name enabled }` returns only 7 of them; `Auto-add to project`, `Code changes requested`, `Code review approved` and `Auto-archive items` are not exposed, and the Status a workflow sets is not exposed for any of them, so those are checked by hand. The conformance check `PROJECT_HAS_PULL_REQUESTS` is the backstop for PR cards whatever the workflow settings. Required state:
+
+| Built-in workflow | State | Effect |
+| --- | --- | --- |
+| `Item closed` | on | closed Issue → `Done`, also for a `not planned` closure (display only; `Done` never closes an Issue, and the completion engine never reads Status) |
+| `Item reopened` | on | reopened Issue → `In Progress` |
+| `Pull request linked to issue` | on | linked Issue → `In Progress` on the Development link, not on merge state, **whatever its current Status**; replaces the custom writer of #218, which stays default-off in `development-link-action` |
+| `Auto-add sub-issues to project` | on | a new sub-issue of a Project Issue becomes an item; it sets no Status itself; the new item is expected to get `Backlog` from `Item added to project` (not verifiable through the API) |
+| `Item added to project` | on | trigger type Issue only; sets `Status: Backlog` on a newly added Issue item. Intake also writes the initial Status, only while the item has none, so a requested `--status Todo` can be overtaken by this `Backlog` ([issue-intake.md](../../automation/issue-intake.md#initial-status---status-backlogtodo-218)) |
+| `Auto-add to project` | off | intake adds Issues with all fields; a repository-wide auto-add would also add PRs (not exposed by the API: checked by hand) |
+| `Auto-close issue` | off | closing stays with the completion engine and humans; `Done` must never close an Issue |
+| `Pull request merged` | off | it would set Status from PR merge state and act on PR items |
+| all others (for example `Code changes requested`, `Code review approved`, `Auto-archive items`) | off | the three named here are not exposed by the API: checked by hand |
+
+Interaction to know: `Pull request linked to issue` does not check the current Status. Unlike the custom #218 writer
+(`Backlog`/`Todo` only, never backwards), it also moves an Issue from `Awaiting release` back to `In Progress` when a follow-up
+PR is linked to it, and from `Backlog`/`Todo` straight to `In Progress`. Status is never completion input, so this changes
+the board only; the completion engine writes `Awaiting release` again once every linked PR, the follow-up included, is merged and the Issue is still awaiting production.
+
+A change to this table is an owner decision recorded in an Issue first.
 
 ## 2. Repository registry — `workflow-registry.yaml`
 

@@ -1,8 +1,7 @@
 import process from "node:process";
-import { setTimeout as wait } from "node:timers/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { GitHubClient, projectReadBudget, readProjectItemsPage } from "./github-metadata.mjs";
+import { GitHubClient } from "./github-metadata.mjs";
 import { preflightPr } from "./issue-admission-pr.mjs";
 import { readAdmission, assertFreshReceipt } from "./issue-admission.mjs";
 import { reconcileDevelopmentLink, readTaskIdentityMarker } from "./development-link.mjs";
@@ -16,14 +15,11 @@ const ROOT = "/repos/" + REPO;
 const PROJECT = loadRegistry().project.number;
 const FE_BRANCHES = Object.freeze({ ...requireRepositoryProfile(REPO).branches });
 const CATEGORIES = { implementation: "pr:implementation", release: "pr:release" };
-const PROJECT_QUERY = 'query PRMembership($after:String){ organization(login:"ChipIn-one"){ projectV2(number:5){id items(first:100,after:$after){totalCount pageInfo{hasNextPage endCursor} nodes{id content{__typename ... on PullRequest{id number repository{nameWithOwner}}}}}}}}';
-const PROJECT_ADD = 'mutation AddPR($project:ID!,$pr:ID!){addProjectV2ItemById(input:{projectId:$project,contentId:$pr}){item{id}}}';
 const FULL_REF = /^ChipIn-one\/chipin-frontend#([1-9]\d*)$/u;
 const PR_NATIVE_QUERY = 'query PRNativeIdentity($number:Int!,$after:String){repository(owner:"ChipIn-one",name:"chipin-frontend"){nameWithOwner pullRequest(number:$number){number closingIssuesReferences(first:100,after:$after,userLinkedOnly:true){totalCount pageInfo{hasNextPage endCursor} nodes{id number repository{nameWithOwner}}}}}}';
 // Issue #138: automated dependency PRs carry no Task identity by design. They are
 // an explicit SKIP (successful run, nothing reconciled), never a BLOCK. The skip
-// grants nothing: no pr:* label is written, so the org Project writer never admits
-// them, and human-only merge policy is unchanged.
+// grants nothing: no pr:* label is written, and human-only merge policy is unchanged.
 const DEPENDABOT_LOGIN = "dependabot[bot]";
 const DEPENDABOT_BRANCH = /^dependabot\//u;
 export function isDependabotPR(pr) {
@@ -79,11 +75,6 @@ export function chooseReviewer({manual=[],approved=[],author}) {
   if (approved[0]===author || !approved[0]) throw new Error("REVIEWER_POLICY: no self-review");
   return approved[0];
 }
-export function uniqueProjectItem(items, id) {
-  const selected=items.filter(x=>x?.content?.__typename==="PullRequest" && x.content.id===id);
-  if (selected.length>1) throw new Error("PROJECT: duplicate PR membership, manual reconciliation required");
-  return selected[0]??null;
-}
 // A single-Issue implementation identity also forbids stale manual Development links
 // to any other Issue (for example after a PR body edit).
 export async function assertSingleNativeIssue(client,number,issueNumber,requireLinked=false) {
@@ -114,70 +105,6 @@ export async function assertSingleNativeIssue(client,number,issueNumber,requireL
   return nodes.length===1;
 }
 
-export async function readProject(client,pageRetry={}) {
-  const items=[];const seen=new Set(); let cursor=null, projectId=null, count=null;
-  const budget=projectReadBudget(pageRetry);
-  do {
-    let result;
-    try {
-      result=await readProjectItemsPage(client,PROJECT_QUERY,{after:cursor},
-        {...pageRetry,budget,after:cursor,select:(data)=>data?.organization?.projectV2?.items});
-    } catch (error) {
-      // A phantom page or an exhausted budget is a read failure, not a permission problem.
-      if (error?.code==="PROJECT_ITEMS_PHANTOM"||error?.code==="PROJECT_READ_DEADLINE")
-        throw Object.assign(new Error("PROJECT: "+error.message,{cause:error}),{code:error.code});
-      throw new Error("PROJECT_PERMISSION: Project #5 GraphQL read failed; configure FE token with org Projects v2 read/write: "+error.message);
-    }
-    const p=result?.organization?.projectV2;
-    if (!p?.id || !p.items?.pageInfo || !Array.isArray(p.items.nodes) || !Number.isInteger(p.items.totalCount))
-      throw new Error("PROJECT_PERMISSION: Project #5 unreadable; needs organization Projects read/write grant");
-    if (projectId && projectId!==p.id) throw new Error("PROJECT: project changed mid-read");
-    if (count!==null && count!==p.items.totalCount) throw new Error("PROJECT: membership changed mid-read");
-    projectId=p.id;count=p.items.totalCount;
-    for (const item of p.items.nodes) {
-      if (!item?.id || seen.has(item.id)) throw new Error("PROJECT: duplicate or missing item ID");
-      seen.add(item.id);items.push(item);
-    }
-    if (p.items.pageInfo.hasNextPage && (!p.items.pageInfo.endCursor || cursor===p.items.pageInfo.endCursor))
-      throw new Error("PROJECT: broken pagination");
-    cursor=p.items.pageInfo.hasNextPage?p.items.pageInfo.endCursor:null;
-  }while(cursor);
-  if (items.length!==count) throw new Error("PROJECT: incomplete pagination");
-  return {id:projectId,items};
-}
-// GitHub Projects v2 can return a successful item mutation before that item is
-// visible in the paginated membership collection. Retry READS only; never repeat
-// the mutation, bypass admission, or treat a missing item as a success.
-const PROJECT_READBACK_DELAYS_MS = Object.freeze([1000, 2000, 4000, 6000, 8000, 10000]);
-
-export async function ensureProjectPR(client,prId,{beforeWrite,retryWait=wait,pageRetry={}}={}) {
-  const before=await readProject(client,pageRetry);
-  const existing=uniqueProjectItem(before.items,prId);
-  let addedId=null;
-  if (!existing) {
-    // Project pagination can exceed admission's 120-second lifetime.
-    // No new Project item is authorized without an explicit trusted gate.
-    if (typeof beforeWrite !== "function")
-      throw new Error("PROJECT_ADMISSION: pre-write validation callback required");
-    await beforeWrite();
-    const added=await client.graphql(PROJECT_ADD,{project:before.id,pr:prId});
-    addedId=added?.addProjectV2ItemById?.item?.id;
-    if (!addedId) throw new Error("PROJECT: membership write not confirmed");
-  }
-  for(let attempt=0;attempt<=PROJECT_READBACK_DELAYS_MS.length;attempt++) {
-    if(attempt>0) await retryWait(PROJECT_READBACK_DELAYS_MS[attempt-1]);
-    // Fail closed on malformed pages, permissions and duplicates. Only a valid,
-    // complete Project read lacking this particular PR is retryable.
-    const after=await readProject(client,pageRetry);
-    const found=uniqueProjectItem(after.items,prId);
-    if(!found) continue;
-    if(addedId && found.id!==addedId)
-      throw new Error("PROJECT: mutation item ID differs from membership read-back");
-    return {id:found.id,created:!existing,readBack:true};
-  }
-  throw new Error("PROJECT: missing PR item on read-back after "
-    +(PROJECT_READBACK_DELAYS_MS.length+1)+" complete reads");
-}
 export async function verifyRelease(client,refs,{integration}=FE_BRANCHES) {
   const issues=[];
   for (const num of refs.prs) {
@@ -392,9 +319,9 @@ export async function reconcilePR(client,policy,number,expectedSha,{admissionCli
   await admit({client:admissionClient,config:admissionConfig,
     repository:REPO,number:n,expectedHeadSha:expectedSha});
   await ensureCategory(client,n,kind);
-  // Project #5 is exclusively written/read back by the .github trusted worker.
-  // FE GITHUB_TOKEN never receives the org Project credential.
-  const project={status:"pending-org-writer",number:5};
+  // Project #5 holds Issues only (.github#157): a PR is never added as a Project item.
+  // The PR shows in its Issue's Development section; FE GITHUB_TOKEN has no Project credential.
+  const project={status:"issues-only",number:5};
   const prIssue=await client.request(ROOT+"/issues/"+n);
   const currentOwners=(prIssue.assignees??[]).map(x=>x.login);
   const issueOwners=issue?(issue.assignees??[]).map(x=>x.login):[];
@@ -433,7 +360,7 @@ export async function reconcilePR(client,policy,number,expectedSha,{admissionCli
   } catch(e) {blockers.push(e.message);}
   const last=await client.request(url);
   if (last.head?.sha!==pr.head.sha) throw new Error("SHA: PR changed before receipt");
-  // No Project GraphQL calls from FE; org worker verifies membership after write.
+  // No Project GraphQL calls: PRs are not Project #5 items.
   if (issue) {
     const afterIssue=await client.request(ROOT+"/issues/"+issue.number);
     if (afterIssue.state!==issue.state || afterIssue.state_reason!==issue.state_reason)

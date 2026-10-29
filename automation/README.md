@@ -146,8 +146,8 @@ request without separate cross-repository check-run/dispatch infrastructure.
 ## Project #5 items reads (#221)
 
 Every Project #5 items reader (`readProjectSnapshot` in `github-metadata.mjs`, used by completion,
-intake, admission and the metadata migration; `readProject` in `pr-metadata.mjs`, used by the PR
-Project writer; the conformance PR scan) goes through `readProjectItemsPage`:
+intake, admission and the metadata migration; the conformance PR scan) goes through
+`readProjectItemsPage`:
 
 - GitHub intermittently answers a Project items page, first page or cursor page alike, with HTTP
   200, no `errors`, and a phantom empty connection (`totalCount: 0`, `hasNextPage: false`, no

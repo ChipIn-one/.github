@@ -86,15 +86,17 @@ Branch names, titles, closing keywords, plain URLs, matching numbers, and Milest
 fallbacks. Canonical implementation evidence exists only after the native Development relationship is
 read back from GitHub.
 
-Project #5 Status tracks active work as `Backlog -> Todo -> In Progress -> Awaiting release`. Who writes each value (.github#218):
+Project #5 holds Issues only (.github#157): pull requests are never Project items; a PR shows in its Issue's Development section, and conformance reports a PR card as `PROJECT_HAS_PULL_REQUESTS` drift. The owner-configured built-in workflows of Project #5 are listed in [docs/workflow/README.md](docs/workflow/README.md#project-5-built-in-workflows).
+
+Project #5 Status tracks active work as `Backlog -> Todo -> In Progress -> Awaiting release`. Who writes each value (.github#218, .github#157):
 
 | Status | Written by | Rule |
 | --- | --- | --- |
-| `Backlog` | intake (`issue-intake.mjs`, finalizer, connector bridge) | default initial Status for new work, set only on an item that has no Status |
-| `Todo` | intake `apply create --status Todo`, or a human | only for an Issue inside a scope the owner already approved (e.g. a sub-task of an approved plan); set only when the item has no Status; reconcile, finalizer and bridge never write it |
-| `In Progress` | the development-link reconciler (opt-in per caller), or a human | `Backlog`/`Todo` -> `In Progress` after the native Development link of an open same-repository PR to the open Issue is read back; every other value is left as it is, never backwards; no draft or Dependabot PRs, no closed Issues ([completion.md](docs/workflow/completion.md#in-progress-at-development-link)) |
+| `Backlog` | intake (`issue-intake.mjs`, finalizer, connector bridge); conformance (`conformance.mjs`) for its own new drift Issues; the built-in workflow `Item added to project` on every new Issue item | default initial Status for new work, set only on an item that has no Status |
+| `Todo` | intake `apply create --status Todo`, or a human | only for an Issue inside a scope the owner already approved (e.g. a sub-task of an approved plan); intake writes it only while the item has no Status, so the built-in `Item added to project` `Backlog` can overtake it ([issue-intake.md](automation/issue-intake.md#initial-status---status-backlogtodo-218)); reconcile, finalizer and bridge never write it |
+| `In Progress` | the built-in workflows `Pull request linked to issue` and `Item reopened`, the development-link reconciler (opt-in per caller, default off), or a human | built-ins: the linked or reopened Issue moves to `In Progress` whatever its current Status, including back from `Awaiting release` when a follow-up PR is linked ([docs/workflow/README.md](docs/workflow/README.md#project-5-built-in-workflows)); custom writer: `Backlog`/`Todo` -> `In Progress` after the native Development link of an open same-repository PR to the open Issue is read back; every other value is left as it is, never backwards; no draft or Dependabot PRs, no closed Issues ([completion.md](docs/workflow/completion.md#in-progress-at-development-link)) |
 | `Awaiting release` | the completion engine only | see below |
-| `Done` | derived mirror | display only for an Issue already `closed/completed` |
+| `Done` | derived mirror: the built-in workflow `Item closed`; conformance when it closes its own drift Issue | display only for a closed Issue; `Item closed` also marks `not planned` closures `Done`, which stays display only (the completion engine never reads Status) |
 
 `Awaiting release` means the last required implementation PR merged into the integration branch of a repository whose completion needs a later step (frontend: a production Deployment receipt on `master`); it is set only by the completion engine and is never a closure trigger. `Done` stays the derived mirror of `closed/completed`: a display state only for an Issue already `closed/completed`. Do not use or recreate `DEV` or `PROD`; `Done` must never authorize Issue closure.
 
