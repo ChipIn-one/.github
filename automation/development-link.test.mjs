@@ -880,7 +880,7 @@ test("a blocked Status write keeps the confirmed link result in the receipt", as
   assert.deepEqual(receipt.projectStatus, { result: "blocked", mutated: false, code: "PROJECT_UNREADABLE", detail: "Project #5 is unreadable" });
 });
 
-test("action keeps the In Progress writer opt-in; no caller enables it while pinned to a tag without it", async () => {
+test("action keeps the In Progress writer opt-in; the .github caller enables it on v1.8.0 (#233)", async () => {
   const { readFile } = await import("node:fs/promises");
   const action = await readFile(new URL("./development-link-action/action.yml", import.meta.url), "utf8");
   assert.match(action, /set-in-progress:\n(?:.*\n)*?    default: 'false'/);
@@ -893,7 +893,10 @@ test("action keeps the In Progress writer opt-in; no caller enables it while pin
   assert.doesNotMatch(reconcileStep, /inputs\.set-in-progress/);
   assert.match(reconcileStep, /^ {8}CHIPIN_PROJECT_STATUS_TOKEN: \$\{\{ inputs\.project-status-token \}\}$/m);
   const caller = await readFile(new URL("../.github/workflows/native-development-link.yml", import.meta.url), "utf8");
-  assert.doesNotMatch(caller, /set-in-progress|project-status-token/);
+  assert.match(caller, /development-link-action@bfde2814300329afad373443d345ff034194d327 # v1\.8\.0/);
+  assert.match(caller, /^ {10}set-in-progress: 'true'$/m);
+  assert.match(caller, /^ {10}project-status-token: \$\{\{ secrets\.CHIPIN_ISSUE_WRITE_TOKEN \}\}$/m);
+  assert.match(caller, /- ready_for_review/);
 });
 
 test("the action computes the opt-in flag once, case-sensitively, as a step output", async () => {
