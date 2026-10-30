@@ -28,11 +28,9 @@ export const INITIAL_STATUS_VALUES = Object.freeze(['Backlog', 'Todo']);
 // zero-latency loop (120 reads x 2 s delay > 4 min, so the budget always ends first in practice).
 const MEMBERSHIP_READ_ATTEMPTS = 120;
 const MEMBERSHIP_READ_BUDGET_MS = 240000;
-// Todo override (#236): how long to wait for the built-in Backlog, the pause before the final settle re-read,
-// and the clock-skew tolerance when comparing the Status updatedAt with the time this run added the item.
+// Todo override (#236): how long to wait for the built-in Backlog and the pause before the final settle re-read.
 const TODO_OVERRIDE_WAIT_BUDGET_MS = 30000;
 const TODO_SETTLE_DELAY_MS = 3000;
-const TODO_CLOCK_SKEW_MS = 60000;
 export const PENDING_READBACK_CODE = 'PROJECT_MEMBERSHIP_READBACK_PENDING';
 export const PENDING_STATUS_READBACK_CODE = 'PROJECT_STATUS_READBACK_PENDING';
 // Intake scope is the admission scope of the registry (#183): FE, BE, KB and .github today.
@@ -555,7 +553,23 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             // Todo override (#236). The item id this create added comes from the checkpoint (a resume) or the add
             // below; an older checkpoint has none, so such an item is never treated as ours and never overridden.
             let ourItemId = args.operation === 'create' ? checkpoint?.addedItemId || null : null;
-            let ourAddedAt = ourItemId ? checkpoint?.addedAt || null : null;
+            // Adopt the single item found after an add that was requested (addRequestedAt persisted before the
+            // mutation) but whose id was never recorded, for example after a process kill between the two.
+            const adoptRequestedAdd = async (itemId) => {
+              if (args.operation !== 'create' || ourItemId || !checkpoint?.addRequestedAt || !itemId) return;
+              try { await persistCheckpoint({ addedItemId: itemId }); }
+              catch (error) { throw new Error('Create checkpoint could not record the added Project item ' + itemId + ': ' + error.message); }
+              ourItemId = itemId;
+            };
+            // The one Todo write (override or direct): flags first so the receipt is accurate, then the checkpoint.
+            const writeTodo = async (itemId, appliedEntry) => {
+              await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, itemId, 'Todo');
+              result.applied.push(appliedEntry);
+              statusInitialized = true;
+              statusWritten = true;
+              try { await persistCheckpoint({ todoWritten: true }); }
+              catch (error) { throw new Error('Create checkpoint could not record the Todo write on Project item ' + itemId + ': ' + error.message); }
+            };
             const persistCheckpoint = async (fields) => {
               if (args.operation !== 'create' || !checkpoint) return;
               checkpoint = { ...checkpoint, ...fields };
@@ -578,19 +592,23 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
               if (issueSide.length > 1) throw new Error('Project #' + config.project.number + ' has duplicate membership (' + issueSide.length + ' items on the Issue).');
               let knownItemId = null;
               if (!issueSide.length) {
-                const addedAt = new Date(now()).toISOString(); // taken before the add: anything the built-in writes is later
+                if (args.operation === 'create') {
+                  // Persisted BEFORE the add: a kill between the add and the id checkpoint must not lose "we added it".
+                  try { await persistCheckpoint({ addRequestedAt: new Date(now()).toISOString() }); }
+                  catch (error) { throw new Error('Create checkpoint could not record the Project add request: ' + error.message); }
+                }
                 knownItemId = (await (overrides.addProjectMembership || addProjectMembership)(client, project, snapshot)) || null;
                 result.applied.push('project-membership');
                 if (knownItemId && args.operation === 'create') {
                   // Persisted before anything else so a resume can still tell this create added the item.
                   try {
-                    await persistCheckpoint({ addedItemId: knownItemId, addedAt });
+                    await persistCheckpoint({ addedItemId: knownItemId });
                   } catch (error) { throw new Error('Create checkpoint could not record the added Project item ' + knownItemId + ': ' + error.message); }
                   ourItemId = knownItemId;
-                  ourAddedAt = addedAt;
                 }
               } else {
                 knownItemId = issueSide[0].id || null;
+                await adoptRequestedAdd(knownItemId);
                 knownStatus = issueSide[0].status || null;
                 result.applied.push('project-membership:already-present');
               }
@@ -628,50 +646,47 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             }
 
             if (memberships.length > 1) throw new Error('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items).');
+            if (memberships.length === 1) await adoptRequestedAdd(memberships[0].id);
             const ours = args.initialStatus === 'Todo' && memberships.length === 1 && ourItemId !== null && memberships[0].id === ourItemId;
             const todoWrittenBefore = ours && checkpoint?.todoWritten === true;
+            let overrideNote = null; // success note, set on the result only after the settle confirms Todo
             let todoSettle = todoWrittenBefore; // re-read once more after the pause before trusting a Todo we wrote
             if (ours && !todoWrittenBefore && !memberships[0].status) {
               // The built-in Backlog normally lands within seconds of the add: wait for any Status (bounded).
               const waitBudgetMs = overrides.todoOverrideWaitBudgetMs ?? TODO_OVERRIDE_WAIT_BUDGET_MS;
               const waitStartedAt = now();
-              for (let waits = 0; !memberships[0].status && waits < MEMBERSHIP_READ_ATTEMPTS && now() - waitStartedAt + delayMs <= waitBudgetMs; waits += 1) {
+              for (let waits = 0; !memberships[0]?.status && waits < MEMBERSHIP_READ_ATTEMPTS && now() - waitStartedAt + delayMs <= waitBudgetMs; waits += 1) {
                 await sleep(delayMs);
                 project = await readProject(client, config);
                 memberships = projectItemsFor(project, target.repository, target.number);
-                if (memberships.length !== 1) throw new Error('Project membership changed while waiting for the built-in Status (' + memberships.length + ' items).');
+                if (memberships.length > 1) throw new Error('Project membership changed while waiting for the built-in Status (' + memberships.length + ' items).');
+                // An item briefly missing from the listing is tolerated: keep polling within the budget.
+              }
+              if (!memberships.length) {
+                return pendingReturn(PENDING_READBACK_CODE,
+                  'Project #' + config.project.number + ' item ' + ourItemId + ' for ' + key(target.repository, target.number)
+                    + ' is missing from the Project items listing after waiting for the built-in Status. Retry the same intake later; nothing is re-added while the Issue shows the item.');
               }
             }
             if (ours && !memberships[0].status && !statusInitialized && !knownStatus && !todoWrittenBefore) {
               // Still empty after the wait: the built-in did not (yet) fire, so Todo is written directly.
-              await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, memberships[0].id, 'Todo');
-              await persistCheckpoint({ todoWritten: true });
-              result.applied.push('status:Todo');
-              statusInitialized = true;
-              statusWritten = true;
               todoSettle = true;
+              await writeTodo(memberships[0].id, 'status:Todo');
             } else if (ours && memberships[0].status === 'Backlog' && !statusWritten) {
-              const updatedAt = Date.parse(memberships[0].statusUpdatedAt || '');
               if (todoWrittenBefore) {
                 result.initialStatusNote = 'Todo override blocked: the item is Backlog again after this intake wrote Todo; it is not overridden twice.';
                 throw new Error('Project Status is Backlog after this intake already wrote Todo on item ' + ourItemId + '; the built-in workflow landed again and is not overridden twice. Set the Status manually.');
               }
-              if (Number.isFinite(updatedAt) && Number.isFinite(Date.parse(ourAddedAt || '')) && updatedAt < Date.parse(ourAddedAt) - TODO_CLOCK_SKEW_MS) {
-                result.initialStatusNote = 'Requested initial Status Todo was not written: the item has Backlog set before this run added it, which is preserved.';
-              } else {
+              {
                 // Stale guard: the listing may lag, so confirm on a fresh read right before the one override write.
                 project = await readProject(client, config);
                 const fresh = projectItemsFor(project, target.repository, target.number);
                 if (fresh.length !== 1) throw new Error('Project membership changed before the Backlog -> Todo override (' + fresh.length + ' items).');
                 memberships = fresh;
                 if (fresh[0].status === 'Backlog') {
-                  await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, fresh[0].id, 'Todo');
-                  await persistCheckpoint({ todoWritten: true });
-                  result.applied.push('status:Todo:override-built-in-backlog');
-                  statusInitialized = true;
-                  statusWritten = true;
                   todoSettle = true;
-                  result.initialStatusNote = 'The Project #5 built-in workflow "Item added to project" set Backlog on the item this run added; it was overridden to the requested Todo (.github#236).';
+                  overrideNote = 'The Project #5 built-in workflow "Item added to project" set Backlog on the item this run added; it was overridden to the requested Todo (.github#236).';
+                  await writeTodo(fresh[0].id, 'status:Todo:override-built-in-backlog');
                 }
               }
             }
@@ -692,20 +707,26 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
                 if (attempt + 1 < statusAttempts) await sleep(delayMs);
               }
             }
+            if (todoSettle && memberships.length === 1 && memberships[0].status && memberships[0].status !== 'Todo' && statusWritten) {
+              // The listing kept showing the old value for every read-back attempt after this run's write.
+              result.initialStatusNote = 'Todo override blocked: this run wrote Todo but the read-back still shows ' + memberships[0].status + '; it is not overridden twice.';
+              throw new Error('Project Status is ' + memberships[0].status + ' after the Todo write; the Todo was not confirmed and is not overridden twice.');
+            }
             if (todoSettle && memberships.length === 1 && memberships[0].status === 'Todo') {
               // Final settle: the built-in may still land late, so pause and confirm Todo once more. No retry loop.
               await sleep(overrides.todoSettleDelayMs ?? TODO_SETTLE_DELAY_MS);
               project = await readProject(client, config);
               memberships = projectItemsFor(project, target.repository, target.number);
-              if (memberships.length === 1 && memberships[0].status !== 'Todo') {
-                result.initialStatusNote = 'Todo override blocked: the item is ' + (memberships[0].status || 'empty') + ' after this run wrote Todo; it is not overridden twice.';
+              if (memberships.length === 1 && memberships[0].status !== 'Todo' && (statusWritten || memberships[0].status === 'Backlog')) {
+                result.initialStatusNote = 'Todo override blocked: the item is ' + (memberships[0].status || 'empty') + ' after this intake wrote Todo; it is not overridden twice.';
                 throw new Error('Project Status is ' + (memberships[0].status || 'empty') + ' after the Todo write and settle re-read; the built-in workflow landed again and is not overridden twice.');
               }
+              if (overrideNote && memberships.length === 1 && memberships[0].status === 'Todo') result.initialStatusNote = overrideNote;
             }
 
             if (memberships.length !== 1) throw new Error('Project membership read-back count is ' + memberships.length + ', expected exactly 1.');
             if (!memberships[0].status) {
-              if (!statusInitialized && !knownStatus) throw new Error('Project Status read-back is missing after mutation.');
+              if (!statusInitialized && !knownStatus && !todoWrittenBefore) throw new Error('Project Status read-back is missing after mutation.');
               return pendingReturn(PENDING_STATUS_READBACK_CODE,
                 'Project #' + config.project.number + ' Status ' + (knownStatus ?? args.initialStatus) + ' is ' + (knownStatus ? 'visible on the Issue side' : 'set on item ' + memberships[0].id)
                   + ' but the Project listing does not show it yet. Retry the same intake later; Status is initialised only when still absent.');

@@ -143,7 +143,7 @@ query MetadataProject($org: String!, $number: Int!, $itemsAfter: String, $fields
           content { __typename ... on Issue { number repository { nameWithOwner } } }
           fieldValueByName(name: "Status") {
             __typename
-            ... on ProjectV2ItemFieldSingleSelectValue { name updatedAt }
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
         }
       }
@@ -362,8 +362,6 @@ async function readProjectSnapshotOnce(client, config, options) {
       repository: item.content?.repository?.nameWithOwner ?? null,
       number: item.content?.number ?? null,
       status: item.fieldValueByName?.name ?? null,
-      // When the Status value was last written (ProjectV2ItemFieldSingleSelectValue.updatedAt); null when not exposed.
-      statusUpdatedAt: item.fieldValueByName?.updatedAt ?? null,
     })),
   };
 }
