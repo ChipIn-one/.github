@@ -110,7 +110,28 @@ node automation/issue-intake.mjs apply create ChipIn-one/chipin-frontend \
 - The create checkpoint (`--state`) records `initialStatus`; a retry with a different `--status` fails closed. A checkpoint written before #218 has no `initialStatus` and counts as `Backlog`.
 - `initialStatusApplied` describes this run only: when a resume follows a `pending-readback` run that already wrote the Status, it is `false` (the Status is then visible and preserved, with no `initialStatusNote` when it equals the requested value).
 - The UI finalizer, the connector bridge and the drain run `reconcile`, so they keep `Backlog`; they do not accept a Status input.
-- With the Project #5 built-in workflow `Item added to project` on (Issues only, sets `Status: Backlog`, [docs/workflow/README.md](../docs/workflow/README.md#project-5-built-in-workflows)), a requested `--status Todo` can be overtaken: the built-in `Backlog` may land before this run's write (the receipt then reports `initialStatusApplied: false` with the preserved `Backlog`) or after it (the final read-back blocks, or the item ends at `Backlog` after the receipt). A fix is tracked separately; until then check the Status after a `--status Todo` create.
+- `Todo` versus the Project #5 built-in workflow: see the next subsection.
+
+#### `--status Todo` versus the built-in `Item added to project` Backlog (#236)
+
+Project #5 has the built-in workflow `Item added to project` on (Issues only, sets `Status: Backlog`; [docs/workflow/README.md](../docs/workflow/README.md#project-5-built-in-workflows)). It runs asynchronously after the add, so it can land before or after any Todo intake writes. For `--status Todo` on an item **this create added**:
+
+1. Intake does not write right after the add. It waits (bounded, 30 s, polling the Project listing) for any Status.
+2. Backlog appears: a fresh re-read still shows exactly one item with Backlog, then Todo is written **once** (`applied` has `status:Todo:override-built-in-backlog`, the note says the built-in Backlog was overridden).
+3. Status is still empty after the wait: Todo is written directly (`status:Todo`).
+4. After the write, intake waits for Todo to read back, pauses (3 s) and re-reads once more (final settle). A Backlog that lands later makes the run `BLOCKED` with `initialStatusNote` "Todo override blocked"; it is never retried or overridden a second time. The usual combined final read-back must also show Todo.
+
+Preserved, never overwritten (no write, `initialStatusNote` says so):
+
+- an item that existed before this run (a human or an earlier run added it), including one with Backlog;
+- an item this create added whose Status is anything other than Backlog or empty (for example `In Progress`);
+- a Backlog whose `updatedAt` (`ProjectV2ItemFieldSingleSelectValue.updatedAt`, read with the Project listing as `statusUpdatedAt`) is older than the add by more than 60 s (clock-skew tolerance). When the API does not return `updatedAt`, this check is skipped.
+
+Persistence: the create checkpoint (`--state`) records `addedItemId` and `addedAt` right after the add mutation, and `todoWritten` after the Todo write. A resume after `pending-readback` (membership or Status not yet visible) reads them and still applies the override only to that item id, so the receipt reports `initialStatusApplied: true` instead of a human Backlog. A resume that finds `todoWritten` and Backlog does not override again: it is `BLOCKED`. A checkpoint written before #236 has no `addedItemId`; its item counts as not added by us and is never overridden. If the checkpoint cannot record the added item, the run is `BLOCKED` (the override would otherwise be silently lost on resume).
+
+Residual window: the API exposes when a Status value was set (`updatedAt`) but intake does not rely on who set it (`creator`), so a human who sets `Backlog` on the new item within the seconds between the add and the override is indistinguishable from the built-in workflow and is overridden to Todo. Backlog requested, and every non-Todo path, are unchanged.
+
+Plan versus apply: `plan create` returns `ready-to-create` with `initialStatus` before any GitHub write and does not simulate the built-in workflow, the wait or the override; those exist only in `apply create`. `reconcile` never overrides.
 
 Read-only reconcile example:
 

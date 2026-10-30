@@ -946,19 +946,6 @@ function createRun({ status = undefined, projects, issueSide = [], statusCalls, 
 
 const item = (status) => ({ id: 'ITEM', repository: 'ChipIn-one/chipin-frontend', number: 999, status });
 
-test('create --status Todo writes Todo once on the new item and the receipt reads it back', async () => {
-  const statusCalls = [];
-  const result = await createRun({ status: 'Todo', statusCalls, projects: [project(), project({ items: [item('Todo')] })] });
-  assert.equal(result.action, 'complete');
-  assert.deepEqual(result.blockers, []);
-  assert.deepEqual(statusCalls, [{ itemId: 'ITEM', value: 'Todo' }]);
-  assert.ok(result.applied.includes('status:Todo'));
-  assert.equal(result.initialStatus, 'Todo');
-  assert.equal(result.initialStatusApplied, true);
-  assert.equal('initialStatusNote' in result, false);
-  assert.equal(result.receipt.project.status, 'Todo');
-});
-
 test('create without --status keeps the Backlog default', async () => {
   const statusCalls = [];
   const result = await createRun({ statusCalls, projects: [project(), project({ items: [item('Backlog')] })] });
@@ -1028,4 +1015,178 @@ test('a legacy create checkpoint without initialStatus resumes only as Backlog',
   assert.equal(backlog.action, 'complete');
   assert.ok(backlog.applied.includes('resume-existing-issue'));
   assert.equal(backlog.initialStatusApplied, false);
+});
+
+// ---- Todo vs the Project #5 built-in "Item added to project" Backlog (.github#236) ----
+
+const T0 = Date.parse('2026-10-30T00:00:00Z');
+const TODO_STATE = { issueRef: 'ChipIn-one/chipin-frontend#999', classification, title: 'Approved plan sub-task', initialStatus: 'Todo' };
+
+// A fake Project board with a clock: sleep() advances it, the built-in workflow sets Backlog when the clock reaches
+// `builtinAt` (ms after the add, null = never) and overwrites whatever Status is there, like the real one.
+function board({ builtinAt = null, humanStatus = null, added = false, status = null, updatedAt = null, listingLagReads = 0 } = {}) {
+  const b = {
+    clock: T0, addedAt: added ? T0 : null, status, updatedAt, writes: [], adds: 0, lag: listingLagReads,
+    tick() {
+      if (b.addedAt !== null && builtinAt !== null && b.builtinFired !== true && b.clock >= b.addedAt + builtinAt) {
+        b.builtinFired = true; b.status = 'Backlog'; b.updatedAt = new Date(b.clock).toISOString();
+      }
+    },
+    overrides: {
+      now: () => b.clock,
+      sleep: async (ms) => { b.clock += ms; },
+      addProjectMembership: async () => {
+        b.adds += 1; b.addedAt = b.clock;
+        if (humanStatus) { b.status = humanStatus; b.updatedAt = new Date(b.clock).toISOString(); }
+        return 'ITEM';
+      },
+      readProjectSnapshot: async () => {
+        b.tick();
+        if (b.addedAt === null) return project();
+        if (b.lag > 0) { b.lag -= 1; return project(); }
+        return project({ items: [{ ...item(b.status), statusUpdatedAt: b.updatedAt }] });
+      },
+      readIssueProjectItems: async () => (b.addedAt === null ? [] : [item(b.status)]),
+      initializeProjectStatus: async (_c, _cfg, _p, itemId, value) => {
+        b.writes.push({ itemId, value }); b.status = value; b.updatedAt = new Date(b.clock).toISOString();
+      },
+    },
+  };
+  return b;
+}
+
+function todoRun(b, { state = null, extra = {}, checkpoints = [] } = {}) {
+  return createRun({
+    status: 'Todo', statusCalls: [], projects: [project()], state,
+    extra: { projectMembershipReadDelayMs: 2000, ...b.overrides, writeCreateState: async (_path, value) => { checkpoints.push(value); }, ...extra },
+  });
+}
+
+test('Todo, built-in Backlog lands before any write: waited for, then overridden once and settled', async () => {
+  const b = board({ builtinAt: 4000 });
+  const checkpoints = [];
+  const result = await todoRun(b, { checkpoints });
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(result.blockers, []);
+  assert.deepEqual(b.writes, [{ itemId: 'ITEM', value: 'Todo' }], 'nothing written right after the add; one override after the Backlog');
+  assert.ok(result.applied.includes('status:Todo:override-built-in-backlog'));
+  assert.equal(result.initialStatusApplied, true);
+  assert.match(result.initialStatusNote, /overridden to the requested Todo/);
+  assert.equal(result.receipt.project.status, 'Todo');
+  assert.equal(checkpoints.at(-1).addedItemId, 'ITEM');
+  assert.equal(checkpoints.at(-1).todoWritten, true);
+});
+
+test('Todo, built-in never fires: Todo is written directly only after the wait, and settles', async () => {
+  const b = board();
+  const result = await todoRun(b);
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(b.writes, [{ itemId: 'ITEM', value: 'Todo' }]);
+  assert.ok(b.clock - T0 >= 28000, 'waited the bounded budget before writing');
+  assert.ok(result.applied.includes('status:Todo'));
+  assert.equal(result.applied.includes('status:Todo:override-built-in-backlog'), false);
+  assert.equal(result.initialStatusApplied, true);
+  assert.equal(result.receipt.project.status, 'Todo');
+});
+
+test('Todo, built-in Backlog lands after the direct write (inside the settle): BLOCKED, never retried', async () => {
+  const b = board({ builtinAt: 31000 });
+  const result = await todoRun(b, { extra: { todoOverrideWaitBudgetMs: 30000 } });
+  assert.equal(result.action, 'incomplete');
+  assert.equal(b.writes.length, 1, 'one write only, no override loop');
+  assert.match(result.blockers.join('\n'), /Project Status is Backlog after the Todo write and settle re-read/);
+  assert.match(result.initialStatusNote, /Todo override blocked/);
+  assert.equal(result.initialStatusApplied, true);
+});
+
+test('Todo, resume after pending-readback still overrides the item this create added', async () => {
+  const b = board({ builtinAt: 1000, listingLagReads: 200 });
+  const checkpoints = [];
+  const first = await todoRun(b, { checkpoints, extra: { projectMembershipReadAttempts: 3 } });
+  assert.equal(first.action, 'pending-readback');
+  assert.deepEqual(b.writes, []);
+  assert.equal(checkpoints.at(-1).addedItemId, 'ITEM');
+  b.lag = 0; b.clock += 5000;
+  const second = await todoRun(b, { state: checkpoints.at(-1) });
+  assert.equal(second.action, 'complete');
+  assert.deepEqual(b.writes, [{ itemId: 'ITEM', value: 'Todo' }]);
+  assert.ok(second.applied.includes('resume-existing-issue'));
+  assert.ok(second.applied.includes('status:Todo:override-built-in-backlog'));
+  assert.equal(second.initialStatusApplied, true);
+  assert.equal(b.adds, 1);
+  assert.equal(second.receipt.project.status, 'Todo');
+});
+
+test('Todo, resume after our own Todo write that the built-in then reverted is blocked, not overridden twice', async () => {
+  const b = board({ added: true, status: 'Backlog', updatedAt: new Date(T0 + 5000).toISOString() });
+  const result = await todoRun(b, { state: { ...TODO_STATE, addedItemId: 'ITEM', addedAt: new Date(T0).toISOString(), todoWritten: true } });
+  assert.equal(result.action, 'incomplete');
+  assert.deepEqual(b.writes, []);
+  assert.match(result.blockers.join('\n'), /not overridden twice/);
+  assert.match(result.initialStatusNote, /not overridden twice/);
+});
+
+test('Todo, resume after our Todo write that stayed Todo is complete and not misreported', async () => {
+  const b = board({ added: true, status: 'Todo', updatedAt: new Date(T0 + 5000).toISOString() });
+  const result = await todoRun(b, { state: { ...TODO_STATE, addedItemId: 'ITEM', addedAt: new Date(T0).toISOString(), todoWritten: true } });
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(b.writes, []);
+  assert.equal(result.initialStatusApplied, false);
+  assert.equal('initialStatusNote' in result, false);
+});
+
+test('Todo never overwrites a human Backlog on an item that existed before this run', async () => {
+  const b = board({ added: true, status: 'Backlog', updatedAt: new Date(T0 - 86400000).toISOString() });
+  const result = await todoRun(b);
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(b.writes, []);
+  assert.equal(b.adds, 0);
+  assert.equal(result.receipt.project.status, 'Backlog');
+  assert.equal(result.initialStatusApplied, false);
+  assert.match(result.initialStatusNote, /already had Status Backlog, which is preserved/);
+});
+
+test('Todo preserves a non-Backlog Status a human set right after the add (built-in never fires)', async () => {
+  const b = board({ humanStatus: 'In Progress' });
+  const result = await todoRun(b);
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(b.writes, []);
+  assert.equal(result.receipt.project.status, 'In Progress');
+  assert.equal(result.initialStatusApplied, false);
+  assert.match(result.initialStatusNote, /already had Status In Progress, which is preserved/);
+});
+
+test('Todo ignores a Backlog whose updatedAt is older than the add of the item this create added', async () => {
+  const b = board({ humanStatus: 'Backlog' });
+  const stale = b.overrides.addProjectMembership;
+  b.overrides.addProjectMembership = async () => { const id = await stale(); b.updatedAt = new Date(T0 - 3600000).toISOString(); return id; };
+  const result = await todoRun(b);
+  assert.deepEqual(b.writes, []);
+  assert.equal(result.action, 'complete');
+  assert.match(result.initialStatusNote, /Backlog set before this run added it, which is preserved/);
+});
+
+test('Todo with an old checkpoint (no addedItemId) never overrides a Backlog', async () => {
+  const b = board({ added: true, status: 'Backlog', updatedAt: new Date(T0 + 1000).toISOString() });
+  const result = await todoRun(b, { state: TODO_STATE });
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(b.writes, []);
+  assert.equal(result.receipt.project.status, 'Backlog');
+  assert.equal(result.initialStatusApplied, false);
+  assert.match(result.initialStatusNote, /already had Status Backlog, which is preserved/);
+});
+
+test('Backlog requested is unchanged by the Todo override logic', async () => {
+  const b = board({ builtinAt: 4000 });
+  const result = await createRun({ statusCalls: [], projects: [project()], extra: { ...b.overrides } });
+  assert.equal(result.action, 'complete');
+  assert.deepEqual(b.writes, [{ itemId: 'ITEM', value: 'Backlog' }]);
+  assert.equal(result.receipt.project.status, 'Backlog');
+});
+
+test('a checkpoint that cannot record the added item blocks instead of silently dropping the override', async () => {
+  const b = board();
+  const result = await todoRun(b, { extra: { writeCreateState: async (_p, value) => { if (value.addedItemId) throw new Error('disk full'); } } });
+  assert.equal(result.action, 'incomplete');
+  assert.match(result.blockers.join('\n'), /Create checkpoint could not record the added Project item ITEM: disk full/);
 });
