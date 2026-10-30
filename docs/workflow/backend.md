@@ -19,14 +19,16 @@ Production already promotes an exact, immutable image, `olegbal/chipin-backend:<
 
 The receipt must carry the **deployed image SHA**. The `production` Deployment that the job's `environment:` key creates implicitly is not valid evidence: its `sha` is the `develop` head at dispatch time, so a rollback (`image_tag` = an older SHA) or a failed newest staging deploy would attest commits that are not in production.
 
-Valid evidence, once implemented in [chipin-backend#184](https://github.com/ChipIn-one/chipin-backend/issues/184):
+Valid evidence:
 
-- a Deployment created by a post-success step of `deploy-production` with `sha` = the resolved image tag and creator `github-actions[bot]` (which also separates it from the implicit Deployments created by whoever dispatched); or
+- a Deployment created by the post-success job `record-receipt` of `deploy-production` ([chipin-backend#213](https://github.com/ChipIn-one/chipin-backend/issues/213)): `environment: production-receipt` (the `production` branch policy rejects a raw-SHA ref), `task: deploy:image-receipt`, `sha` = the resolved image tag, payload `run_id`; or
 - the production tag from [#173](https://github.com/ChipIn-one/.github/issues/173) on the deployed SHA.
+
+The record alone is not trusted: anyone with write access can create an identical Deployment. The engine must verify that `run_id` is a successful `workflow_dispatch` run of `.github/workflows/deploy-production.yml` on `develop` whose `record-receipt` outputs name this `deployment.id` and `sha`, reject a `run_id` cited twice, and treat the **latest** valid receipt as what runs in production (a rollback creates a newer receipt for an older SHA). Details: [chipin-backend#184](https://github.com/ChipIn-one/chipin-backend/issues/184#issuecomment-6522374443).
 
 ### Rollout
 
 1. **Now:** `completion: manual` stays in `workflow-registry.yaml`. A human closes a backend Issue only after its Development-linked PR is merged, never before.
-2. [chipin-backend#184](https://github.com/ChipIn-one/chipin-backend/issues/184): the evidence step in `deploy-production`, reviewed and merged by olegbal.
+2. [chipin-backend#213](https://github.com/ChipIn-one/chipin-backend/issues/213): the evidence step in `deploy-production`, reviewed and merged by olegbal.
 3. Before the engine is turned on, olegbal disables "Auto-close issues with merged linked pull requests" in chipin-backend.
 4. Registry switch to `completion: deployment-receipt` with `productionEvidence`, plus a completion caller using the same fail-closed read-back model as `frontend-production-completion`, as a separate PR merged by olegbal.
