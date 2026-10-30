@@ -6,7 +6,7 @@ name: Relationships reconcile
 # CHIPIN_ISSUE_WRITE_TOKEN. The workflow never closes Issues and never changes Project Status.
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '23 * * * *'
   workflow_dispatch:
     inputs:
       apply:

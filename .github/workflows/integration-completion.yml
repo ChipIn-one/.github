@@ -11,7 +11,7 @@ on:
     branches:
       - master
   schedule:
-    - cron: "11,41 * * * *"
+    - cron: "17 * * * *"
 
 permissions:
   contents: read

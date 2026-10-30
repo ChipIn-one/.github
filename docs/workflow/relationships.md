@@ -47,7 +47,7 @@ Flags are repeatable: `--blocked-by`, `--blocks`, `--relates-to`, `--parent`. `i
 
 ## Reconciler
 
-`automation/relationships.mjs`, run by the org workflow `relationships-reconcile.yml` (`schedule */30` and `workflow_dispatch`, token `CHIPIN_ISSUE_WRITE_TOKEN`):
+`automation/relationships.mjs`, run by the org workflow `relationships-reconcile.yml` (`schedule` hourly and `workflow_dispatch`, token `CHIPIN_ISSUE_WRITE_TOKEN`):
 
 - reads open Issues of registry repositories whose `relationships` capability is not `off`, parses the declarations and compares them with the native state;
 - **only adds** missing edges. Native edges without a declaration are kept and appended to `## Dependencies` as lines (read-back → text, never the other way). The body is re-read right before the edit and left alone (`STALE_TEXT`, retried next run) if a human changed it meanwhile. After edges were added, the other endpoints are mirrored in the same run (`mirror` in the receipt) so an immediate rerun writes nothing;
