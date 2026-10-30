@@ -45,7 +45,7 @@ repositories:
     owner: olegbal
     branches: { default: develop, integration: develop }
     deploymentProfile: production
-    completion: manual                  # until the backend completion decision (#156)
+    completion: manual                  # deployment-receipt decided (#156); manual until the evidence step (chipin-backend#184), see docs/workflow/backend.md
     protection: unavailable             # until the Team upgrade (#161)
     requiredChecks: [Unit and integration tests]
     release: { strategy: deploy-tag, trigger: production-deploy, tagPrefix: v }       # tag + GitHub Release after every successful Deploy Production
