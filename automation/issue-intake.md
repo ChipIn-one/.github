@@ -110,7 +110,27 @@ node automation/issue-intake.mjs apply create ChipIn-one/chipin-frontend \
 - The create checkpoint (`--state`) records `initialStatus`; a retry with a different `--status` fails closed. A checkpoint written before #218 has no `initialStatus` and counts as `Backlog`.
 - `initialStatusApplied` describes this run only: when a resume follows a `pending-readback` run that already wrote the Status, it is `false` (the Status is then visible and preserved, with no `initialStatusNote` when it equals the requested value).
 - The UI finalizer, the connector bridge and the drain run `reconcile`, so they keep `Backlog`; they do not accept a Status input.
-- With the Project #5 built-in workflow `Item added to project` on (Issues only, sets `Status: Backlog`, [docs/workflow/README.md](../docs/workflow/README.md#project-5-built-in-workflows)), a requested `--status Todo` can be overtaken: the built-in `Backlog` may land before this run's write (the receipt then reports `initialStatusApplied: false` with the preserved `Backlog`) or after it (the final read-back blocks, or the item ends at `Backlog` after the receipt). A fix is tracked separately; until then check the Status after a `--status Todo` create.
+- `Todo` versus the Project #5 built-in workflow: see the next subsection.
+
+#### `--status Todo` versus the built-in `Item added to project` Backlog (#236)
+
+Project #5 has the built-in workflow `Item added to project` on (Issues only, sets `Status: Backlog`; [docs/workflow/README.md](../docs/workflow/README.md#project-5-built-in-workflows)). It runs asynchronously after the add, so it can land before or after any Todo intake writes. For `--status Todo` on an item **this create added**:
+
+1. Intake does not write right after the add. It waits (bounded, 30 s, polling the Project listing) for any Status. An item briefly missing from the listing is tolerated while polling; if it is still missing at the end, the run is `pending-readback`.
+2. Backlog appears: a fresh re-read still shows exactly one item with Backlog, then Todo is written **once** (`applied` has `status:Todo:override-built-in-backlog`, the note says the built-in Backlog was overridden).
+3. Status is still empty after the wait: Todo is written directly (`status:Todo`).
+4. After the write, intake waits for Todo to read back, pauses (3 s) and re-reads once more (final settle). A Backlog that lands later makes the run `BLOCKED` with `initialStatusNote` "Todo override blocked"; it is never retried or overridden a second time. The usual combined final read-back must also show Todo.
+
+Preserved, never overwritten (no write, `initialStatusNote` says so):
+
+- an item that existed before this run (a human or an earlier run added it), including one with Backlog;
+- an item this create added whose Status is anything other than Backlog or empty (for example `In Progress`);
+
+Persistence: the create checkpoint (`--state`) records `addRequestedAt` before the add mutation, `addedItemId` right after it, and `todoWritten` after the Todo write. A resume after `pending-readback` (membership or Status not yet visible) reads them and still applies the override only to that item id, so the receipt reports `initialStatusApplied: true` instead of a human Backlog. If the process died between the add and the id checkpoint (`addRequestedAt` set, `addedItemId` missing), the resume adopts the single Project item of the Issue as ours and records its id. A resume that finds `todoWritten` and Backlog does not override again: it is `BLOCKED`; with `todoWritten` and no Status visible yet it is `pending-readback` again. A checkpoint written before #236 has neither field; its item counts as not added by us and is never overridden. If the checkpoint cannot record the add request, the added item or the Todo write, the run is `BLOCKED` (the Todo write is still reported in `applied` and `initialStatusApplied`). If the listing keeps showing Backlog after the override write, the run is `BLOCKED` and the note says the Todo was not confirmed.
+
+Residual window: intake does not use who or when a Status was set (`creator`/`updatedAt`; a local-clock comparison is unreliable), so a human who sets `Backlog` on the new item within the seconds between the add and the override is indistinguishable from the built-in workflow and is overridden to Todo. Adoption after a kill assumes nobody else added the item in that gap. Backlog requested, and every non-Todo path, are unchanged.
+
+Plan versus apply: `plan create` returns `ready-to-create` with `initialStatus` before any GitHub write and does not simulate the built-in workflow, the wait or the override; those exist only in `apply create`. `reconcile` never overrides.
 
 Read-only reconcile example:
 

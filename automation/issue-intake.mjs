@@ -20,12 +20,17 @@ const INITIAL_STATUS = 'Backlog';
 // `apply create --status` (#218): new work lands in Backlog for triage; Todo is only for an Issue inside a
 // scope the owner already approved (for example a sub-task of an approved plan). Reconcile, the finalizer
 // and the connector bridge keep Backlog. Every other value is rejected; the Status is written only on an
-// item that has none, so an existing human-set Status is never overwritten.
+// item that has none, so an existing human-set Status is never overwritten. One exception (.github#236):
+// for Todo, the Backlog that the Project #5 built-in `Item added to project` workflow sets on an item THIS
+// create added is overridden once, after a bounded wait (see the Todo override block in run()).
 export const INITIAL_STATUS_VALUES = Object.freeze(['Backlog', 'Todo']);
 // The membership wait is governed by the time budget; the read cap only bounds a pathological
 // zero-latency loop (120 reads x 2 s delay > 4 min, so the budget always ends first in practice).
 const MEMBERSHIP_READ_ATTEMPTS = 120;
 const MEMBERSHIP_READ_BUDGET_MS = 240000;
+// Todo override (#236): how long to wait for the built-in Backlog and the pause before the final settle re-read.
+const TODO_OVERRIDE_WAIT_BUDGET_MS = 30000;
+const TODO_SETTLE_DELAY_MS = 3000;
 export const PENDING_READBACK_CODE = 'PROJECT_MEMBERSHIP_READBACK_PENDING';
 export const PENDING_STATUS_READBACK_CODE = 'PROJECT_STATUS_READBACK_PENDING';
 // Intake scope is the admission scope of the registry (#183): FE, BE, KB and .github today.
@@ -425,6 +430,9 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
   }
 
   let target = null;
+  // Create checkpoint (--state) content, kept so the added Project item id can be persisted later (#236).
+  let checkpoint = null;
+  const writeState = overrides.writeCreateState || atomicWriteJson;
   if (!result.blockers.length && args.operation === 'reconcile') target = parseIssueRef(args.target);
 
   if (!result.blockers.length && args.operation === 'create') {
@@ -458,6 +466,7 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
           if (state.bodySha256 && state.bodySha256 !== createHash('sha256').update(suppliedBody).digest('hex')) throw new Error('State body differs from this retry.');
           // A checkpoint written before #218 has no initialStatus: it was a Backlog create.
           if ((state.initialStatus ?? INITIAL_STATUS) !== args.initialStatus) throw new Error('State initial Status differs from this retry.');
+          checkpoint = state;
           result.applied.push('resume-existing-issue');
         } else if (state) {
           throw new Error('Create checkpoint exists without issue identity; creation outcome is uncertain. Recover the issue manually before retrying to avoid a duplicate.');
@@ -466,7 +475,6 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
           const owner = requiredOwner(args.target, args.owner);
           const bodySha256 = createHash('sha256').update(body).digest('hex');
           const reserveState = overrides.reserveCreateState || reserveCreateState;
-          const writeState = overrides.writeCreateState || atomicWriteJson;
           await reserveState(args.state, {
             schemaVersion: 1,
             repository: args.target,
@@ -480,11 +488,12 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
           const created = await (overrides.createIssue || createIssue)(client, config, args.target, checked.classification, { title: args.title, body, selectedOwner: args.owner });
           if (!Number.isInteger(created?.number)) throw new Error('Create API did not return an issue number.');
           target = { repository: args.target, number: created.number };
-          await writeState(args.state, {
+          checkpoint = {
             schemaVersion: 1, repository: args.target, issueRef: key(args.target, created.number),
             issueUrl: created.html_url || created.url || null, classification: checked.classification,
             title: args.title, owner, bodySha256, initialStatus: args.initialStatus, createdAt: new Date().toISOString(),
-          });
+          };
+          await writeState(args.state, checkpoint);
           result.applied.push('issue-created-and-identity-persisted');
         }
       } catch (error) { result.blockers.push('Create/resume failed: ' + error.message); }
@@ -541,6 +550,31 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             const readIssueItems = overrides.readIssueProjectItems || readIssueProjectItems;
             let statusInitialized = false;
             let knownStatus = null; // Status already visible on the Issue side (human-owned, never re-initialised)
+            // Todo override (#236). The item id this create added comes from the checkpoint (a resume) or the add
+            // below; an older checkpoint has none, so such an item is never treated as ours and never overridden.
+            let ourItemId = args.operation === 'create' ? checkpoint?.addedItemId || null : null;
+            // Adopt the single item found after an add that was requested (addRequestedAt persisted before the
+            // mutation) but whose id was never recorded, for example after a process kill between the two.
+            const adoptRequestedAdd = async (itemId) => {
+              if (args.operation !== 'create' || ourItemId || !checkpoint?.addRequestedAt || !itemId) return;
+              try { await persistCheckpoint({ addedItemId: itemId }); }
+              catch (error) { throw new Error('Create checkpoint could not record the added Project item ' + itemId + ': ' + error.message); }
+              ourItemId = itemId;
+            };
+            // The one Todo write (override or direct): flags first so the receipt is accurate, then the checkpoint.
+            const writeTodo = async (itemId, appliedEntry) => {
+              await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, itemId, 'Todo');
+              result.applied.push(appliedEntry);
+              statusInitialized = true;
+              statusWritten = true;
+              try { await persistCheckpoint({ todoWritten: true }); }
+              catch (error) { throw new Error('Create checkpoint could not record the Todo write on Project item ' + itemId + ': ' + error.message); }
+            };
+            const persistCheckpoint = async (fields) => {
+              if (args.operation !== 'create' || !checkpoint) return;
+              checkpoint = { ...checkpoint, ...fields };
+              await writeState(args.state, checkpoint);
+            };
 
             const pendingReturn = async (code, detail) => {
               // Retryable, not a blocker: the next drain re-runs the same idempotent reconcile.
@@ -558,16 +592,31 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
               if (issueSide.length > 1) throw new Error('Project #' + config.project.number + ' has duplicate membership (' + issueSide.length + ' items on the Issue).');
               let knownItemId = null;
               if (!issueSide.length) {
+                if (args.operation === 'create') {
+                  // Persisted BEFORE the add: a kill between the add and the id checkpoint must not lose "we added it".
+                  try { await persistCheckpoint({ addRequestedAt: new Date(now()).toISOString() }); }
+                  catch (error) { throw new Error('Create checkpoint could not record the Project add request: ' + error.message); }
+                }
                 knownItemId = (await (overrides.addProjectMembership || addProjectMembership)(client, project, snapshot)) || null;
                 result.applied.push('project-membership');
+                if (knownItemId && args.operation === 'create') {
+                  // Persisted before anything else so a resume can still tell this create added the item.
+                  try {
+                    await persistCheckpoint({ addedItemId: knownItemId });
+                  } catch (error) { throw new Error('Create checkpoint could not record the added Project item ' + knownItemId + ': ' + error.message); }
+                  ourItemId = knownItemId;
+                }
               } else {
                 knownItemId = issueSide[0].id || null;
+                await adoptRequestedAdd(knownItemId);
                 knownStatus = issueSide[0].status || null;
                 result.applied.push('project-membership:already-present');
               }
               // Status is initialised on the item id we already know, so a lagging listing cannot turn
               // the Status step into a blocker later; the listing wait below only confirms visibility.
-              if (knownItemId && !knownStatus) {
+              // A Todo on an item this create added is written later, after the built-in Backlog was awaited.
+              const deferTodo = args.initialStatus === 'Todo' && ourItemId && knownItemId === ourItemId;
+              if (knownItemId && !knownStatus && !deferTodo) {
                 await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, knownItemId, args.initialStatus);
                 result.applied.push('status:' + args.initialStatus);
                 statusInitialized = true;
@@ -597,7 +646,51 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
             }
 
             if (memberships.length > 1) throw new Error('Project #' + config.project.number + ' has duplicate membership (' + memberships.length + ' items).');
-            if (memberships.length === 1 && !memberships[0].status && !statusInitialized && !knownStatus) {
+            if (memberships.length === 1) await adoptRequestedAdd(memberships[0].id);
+            const ours = args.initialStatus === 'Todo' && memberships.length === 1 && ourItemId !== null && memberships[0].id === ourItemId;
+            const todoWrittenBefore = ours && checkpoint?.todoWritten === true;
+            let overrideNote = null; // success note, set on the result only after the settle confirms Todo
+            let todoSettle = todoWrittenBefore; // re-read once more after the pause before trusting a Todo we wrote
+            if (ours && !todoWrittenBefore && !memberships[0].status) {
+              // The built-in Backlog normally lands within seconds of the add: wait for any Status (bounded).
+              const waitBudgetMs = overrides.todoOverrideWaitBudgetMs ?? TODO_OVERRIDE_WAIT_BUDGET_MS;
+              const waitStartedAt = now();
+              for (let waits = 0; !memberships[0]?.status && waits < MEMBERSHIP_READ_ATTEMPTS && now() - waitStartedAt + delayMs <= waitBudgetMs; waits += 1) {
+                await sleep(delayMs);
+                project = await readProject(client, config);
+                memberships = projectItemsFor(project, target.repository, target.number);
+                if (memberships.length > 1) throw new Error('Project membership changed while waiting for the built-in Status (' + memberships.length + ' items).');
+                // An item briefly missing from the listing is tolerated: keep polling within the budget.
+              }
+              if (!memberships.length) {
+                return pendingReturn(PENDING_READBACK_CODE,
+                  'Project #' + config.project.number + ' item ' + ourItemId + ' for ' + key(target.repository, target.number)
+                    + ' is missing from the Project items listing after waiting for the built-in Status. Retry the same intake later; nothing is re-added while the Issue shows the item.');
+              }
+            }
+            if (ours && !memberships[0].status && !statusInitialized && !knownStatus && !todoWrittenBefore) {
+              // Still empty after the wait: the built-in did not (yet) fire, so Todo is written directly.
+              todoSettle = true;
+              await writeTodo(memberships[0].id, 'status:Todo');
+            } else if (ours && memberships[0].status === 'Backlog' && !statusWritten) {
+              if (todoWrittenBefore) {
+                result.initialStatusNote = 'Todo override blocked: the item is Backlog again after this intake wrote Todo; it is not overridden twice.';
+                throw new Error('Project Status is Backlog after this intake already wrote Todo on item ' + ourItemId + '; the built-in workflow landed again and is not overridden twice. Set the Status manually.');
+              }
+              {
+                // Stale guard: the listing may lag, so confirm on a fresh read right before the one override write.
+                project = await readProject(client, config);
+                const fresh = projectItemsFor(project, target.repository, target.number);
+                if (fresh.length !== 1) throw new Error('Project membership changed before the Backlog -> Todo override (' + fresh.length + ' items).');
+                memberships = fresh;
+                if (fresh[0].status === 'Backlog') {
+                  todoSettle = true;
+                  overrideNote = 'The Project #5 built-in workflow "Item added to project" set Backlog on the item this run added; it was overridden to the requested Todo (.github#236).';
+                  await writeTodo(fresh[0].id, 'status:Todo:override-built-in-backlog');
+                }
+              }
+            }
+            if (memberships.length === 1 && !memberships[0].status && !statusInitialized && !knownStatus && !ours) {
               await (overrides.initializeProjectStatus || initializeProjectStatus)(client, config, project, memberships[0].id, args.initialStatus);
               result.applied.push('status:' + args.initialStatus);
               statusInitialized = true;
@@ -609,14 +702,31 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
                 project = await readProject(client, config);
                 memberships = projectItemsFor(project, target.repository, target.number);
                 if (memberships.length > 1) break;
-                if (memberships.length === 1 && memberships[0].status) break;
+                // After an override the listing can still show the old Backlog: wait for the written value.
+                if (memberships.length === 1 && memberships[0].status && (!todoSettle || memberships[0].status === 'Todo')) break;
                 if (attempt + 1 < statusAttempts) await sleep(delayMs);
               }
+            }
+            if (todoSettle && memberships.length === 1 && memberships[0].status && memberships[0].status !== 'Todo' && statusWritten) {
+              // The listing kept showing the old value for every read-back attempt after this run's write.
+              result.initialStatusNote = 'Todo override blocked: this run wrote Todo but the read-back still shows ' + memberships[0].status + '; it is not overridden twice.';
+              throw new Error('Project Status is ' + memberships[0].status + ' after the Todo write; the Todo was not confirmed and is not overridden twice.');
+            }
+            if (todoSettle && memberships.length === 1 && memberships[0].status === 'Todo') {
+              // Final settle: the built-in may still land late, so pause and confirm Todo once more. No retry loop.
+              await sleep(overrides.todoSettleDelayMs ?? TODO_SETTLE_DELAY_MS);
+              project = await readProject(client, config);
+              memberships = projectItemsFor(project, target.repository, target.number);
+              if (memberships.length === 1 && memberships[0].status !== 'Todo' && (statusWritten || memberships[0].status === 'Backlog')) {
+                result.initialStatusNote = 'Todo override blocked: the item is ' + (memberships[0].status || 'empty') + ' after this intake wrote Todo; it is not overridden twice.';
+                throw new Error('Project Status is ' + (memberships[0].status || 'empty') + ' after the Todo write and settle re-read; the built-in workflow landed again and is not overridden twice.');
+              }
+              if (overrideNote && memberships.length === 1 && memberships[0].status === 'Todo') result.initialStatusNote = overrideNote;
             }
 
             if (memberships.length !== 1) throw new Error('Project membership read-back count is ' + memberships.length + ', expected exactly 1.');
             if (!memberships[0].status) {
-              if (!statusInitialized && !knownStatus) throw new Error('Project Status read-back is missing after mutation.');
+              if (!statusInitialized && !knownStatus && !todoWrittenBefore) throw new Error('Project Status read-back is missing after mutation.');
               return pendingReturn(PENDING_STATUS_READBACK_CODE,
                 'Project #' + config.project.number + ' Status ' + (knownStatus ?? args.initialStatus) + ' is ' + (knownStatus ? 'visible on the Issue side' : 'set on item ' + memberships[0].id)
                   + ' but the Project listing does not show it yet. Retry the same intake later; Status is initialised only when still absent.');
@@ -681,8 +791,11 @@ export async function run(argv = process.argv.slice(2), env = process.env, overr
         // Receipt-level answer to "did this run set the initial Status?" (.github#218).
         result.initialStatusApplied = statusWritten;
         const observedStatus = result.receipt?.project?.status ?? null;
-        if (!statusWritten && observedStatus && observedStatus !== args.initialStatus) {
+        if (!statusWritten && !result.initialStatusNote && observedStatus && observedStatus !== args.initialStatus) {
           result.initialStatusNote = 'Requested initial Status ' + args.initialStatus + ' was not written: the item already had Status ' + observedStatus + ', which is preserved.';
+        }
+        if (statusWritten && !result.initialStatusNote && observedStatus !== args.initialStatus) {
+          result.initialStatusNote = 'Requested initial Status ' + args.initialStatus + ' was written but the final read-back shows ' + (observedStatus || 'no Status') + '; the receipt is BLOCKED.';
         }
         result.action = result.blockers.length ? 'incomplete' : 'complete';
       }
