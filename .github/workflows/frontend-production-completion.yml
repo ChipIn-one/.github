@@ -8,8 +8,8 @@
 # `Awaiting release` for merged but not yet promoted work (the repository GITHUB_TOKEN cannot write the org Project).
 # Latency (.github#228): within minutes of the Promote when chipin-frontend forwards its successful vercel[bot]
 # Production deployment as repository_dispatch `frontend-production-deployed` (chipin-frontend#559); otherwise on the
-# next push to master here or the next schedule run, which GitHub throttles (observed every ~5-6 hours, not the 15
-# minutes the cron asks for). Conformance checks that this workflow keeps covering the repository
+# next push to master here or the next schedule run, which GitHub throttles (observed every ~5-6 hours, not the hourly
+# cadence the cron asks for). Conformance checks that this workflow keeps covering the repository
 # (COMPLETION_SWEEP_MISSING). Emergency switch-off: set `capabilities.completion: manual` AND drop `completionRunner`
 # in the frontend record (validation rejects org-sweep with manual); CHIPIN_COMPLETION_SKIP_MANUAL=1 then makes this run
 # a green no-op (harmless while the record is automatic). Rollback to the dev/main record needs no change here.
@@ -26,7 +26,7 @@ on:
   repository_dispatch:
     types: [frontend-production-deployed]
   schedule:
-    - cron: "7,22,37,52 * * * *"
+    - cron: "7 * * * *"
 
 permissions:
   contents: read
