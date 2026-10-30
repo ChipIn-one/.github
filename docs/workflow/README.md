@@ -218,5 +218,5 @@ An external service or GitHub App for cross-repository events; shadow relationsh
 ## 10. Open owner decisions
 
 - [#161](https://github.com/ChipIn-one/.github/issues/161): upgrade the organization to GitHub Team for rulesets on private BE/KB (2 seats).
-- [#156](https://github.com/ChipIn-one/.github/issues/156): backend completion contract (what closes a backend Issue) — with olegbal.
+- ~~[#156](https://github.com/ChipIn-one/.github/issues/156): backend completion contract~~ decided 2026-10-30: `deployment-receipt`, no promotion branch ([backend.md](backend.md)).
 - Pin policy for `actions/*` in backend (SHA, as in frontend) — part of [#155](https://github.com/ChipIn-one/.github/issues/155), confirmed by olegbal.
