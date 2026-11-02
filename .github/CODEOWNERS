@@ -1,0 +1,6 @@
+# Org AI workflow canon (.github#250). A merge here steers agents in every registry repository,
+# so these paths need code-owner review once the master ruleset requires it.
+/docs/workflow/ @syllik
+/AGENTS.md @syllik
+/workflow-registry.yaml @syllik
+/.github/CODEOWNERS @syllik

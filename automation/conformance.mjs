@@ -263,13 +263,42 @@ export function checkDependabot(profile, text) {
   return [];
 }
 
-export function checkRouting(profile, agents, context) {
+const ROUTING_START = '<!-- ai-workflow:agents-routing:start -->';
+const ROUTING_END = '<!-- ai-workflow:agents-routing:end -->';
+// links to the retired personal canon (github.com/syllik/…, raw.githubusercontent.com/syllik/…)
+const PERSONAL_CANON = /https?:\/\/(?:www\.)?(?:github\.com|raw\.githubusercontent\.com)\/syllik\//gi;
+
+// The managed block from the start marker through the end marker, inclusive, exactly as written.
+export function extractRoutingBlock(text) {
+  const start = text == null ? -1 : String(text).indexOf(ROUTING_START);
+  if (start < 0) return { state: 'missing' };
+  const end = String(text).indexOf(ROUTING_END, start);
+  if (end < 0) return { state: 'unterminated' };
+  return { state: 'ok', block: String(text).slice(start, end + ROUTING_END.length) };
+}
+
+// canon: extractRoutingBlock() of .github AGENTS.md on its integration branch, or { state: 'unreadable', error }.
+export function checkRouting(profile, agents, context, canon) {
   if (profile.capabilities.agentRouting !== 'required') return [];
   const findings = [];
-  if (agents === null || !/ai-workflow:agents-routing:start/.test(agents)) {
-    findings.push(finding('ROUTING_BLOCK_MISSING', 'drift', `AGENTS.md on ${profile.branches.integration} has no ai-workflow:agents-routing block.`, 'Add the managed routing block (docs/workflow/onboarding.md step 5).'));
+  const own = extractRoutingBlock(agents);
+  const branch = profile.branches.integration;
+  if (own.state === 'missing') {
+    findings.push(finding('ROUTING_BLOCK_MISSING', 'drift', `AGENTS.md on ${branch} has no ai-workflow:agents-routing block.`, 'Add the managed routing block (docs/workflow/onboarding.md step 5).'));
+  } else if (own.state === 'unterminated') {
+    findings.push(finding('ROUTING_BLOCK_UNTERMINATED', 'drift', `AGENTS.md on ${branch} has the ai-workflow:agents-routing start marker but no end marker.`, 'Replace the block with the one from ChipIn-one/.github AGENTS.md, markers included.'));
+  } else if (canon?.state === 'ok' && own.block !== canon.block) {
+    findings.push(finding('ROUTING_BLOCK_STALE', 'drift', `The ai-workflow:agents-routing block in AGENTS.md on ${branch} differs from the block in ChipIn-one/.github AGENTS.md.`, 'Copy the block byte-for-byte from ChipIn-one/.github AGENTS.md (docs/workflow/onboarding.md step 5).'));
   }
-  if (context === null) findings.push(finding('AI_CONTEXT_MISSING', 'drift', `.ai/context.md is missing on ${profile.branches.integration}.`, 'Add .ai/context.md (docs/workflow/onboarding.md step 5).'));
+  const personal = agents == null ? [] : String(agents).match(PERSONAL_CANON) ?? [];
+  if (personal.length) {
+    findings.push(finding('ROUTING_PERSONAL_CANON', 'drift', `AGENTS.md on ${branch} has ${personal.length} link${personal.length === 1 ? '' : 's'} to the retired personal canon (syllik/).`, 'Remove them; the canon is ChipIn-one/.github docs/workflow (#15).'));
+  }
+  if (canon?.state !== 'ok') {
+    const why = canon?.state === 'unreadable' ? `unreadable: ${canon.error ?? 'unknown error'}` : canon ? `${canon.state} block` : 'not read';
+    findings.push(finding('ROUTING_CANON_UNREADABLE', 'note', `The canon routing block in ChipIn-one/.github AGENTS.md is ${why}, so the block could not be compared.`, 'Fix the block in ChipIn-one/.github AGENTS.md or rerun the audit.'));
+  }
+  if (context === null) findings.push(finding('AI_CONTEXT_MISSING', 'drift', `.ai/context.md is missing on ${branch}.`, 'Add .ai/context.md (docs/workflow/onboarding.md step 5).'));
   return findings;
 }
 
@@ -348,7 +377,7 @@ export async function auditRepository(profile, source, shared) {
       ...checkCompletionSweep(profile, shared.workflows),
       ...await checkPins(profile, pins, source, shared.tags),
       ...checkDependabot(profile, profile.capabilities.dependabot === 'required' ? await source.repoFile(profile.repository, '.github/dependabot.yml', ref) ?? await source.repoFile(profile.repository, '.github/dependabot.yaml', ref) : null),
-      ...checkRouting(profile, profile.capabilities.agentRouting === 'required' ? await source.repoFile(profile.repository, 'AGENTS.md', ref) : null, profile.capabilities.agentRouting === 'required' ? await source.repoFile(profile.repository, '.ai/context.md', ref) : null),
+      ...checkRouting(profile, profile.capabilities.agentRouting === 'required' ? await source.repoFile(profile.repository, 'AGENTS.md', ref) : null, profile.capabilities.agentRouting === 'required' ? await source.repoFile(profile.repository, '.ai/context.md', ref) : null, shared.routingCanon),
       ...checkProtection(profile, await source.branchRules(profile.repository, ref), await source.classicProtection(profile.repository, ref)),
       ...checkProjectPullRequests(profile, shared.projectPullRequests),
       ...checkIntake(profile, await source.openIssues(profile.repository)),
@@ -400,6 +429,13 @@ export async function audit({ source, registry = loadRegistry(), repositories = 
     try {
       shared.workflows = await source.workflowFiles(SHARED, getRepositoryProfile(SHARED, registry)?.branches.integration ?? 'master');
     } catch (error) { shared.workflowsError = String(error.message ?? error).slice(0, 200); }
+  }
+  // the managed routing block every record copies byte-for-byte (checkRouting): read once, only when a record needs it;
+  // a failed read is a note on those records, never drift
+  if (profiles.some(p => p.capabilities.agentRouting === 'required')) {
+    try {
+      shared.routingCanon = extractRoutingBlock(await source.repoFile(SHARED, 'AGENTS.md', getRepositoryProfile(SHARED, registry)?.branches.integration ?? 'master'));
+    } catch (error) { shared.routingCanon = { state: 'unreadable', error: String(error.message ?? error).slice(0, 200) }; }
   }
   for (const profile of profiles) {
     if (shared.workflowsError && profile.completionRunner === 'org-sweep') {

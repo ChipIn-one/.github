@@ -4,7 +4,7 @@ import test from 'node:test';
 
 import {
   GitHubConformanceSource, GitHubConformanceStore, audit, checkCallers, checkCompletionCaller, checkCompletionSweep, checkDependabot, checkIntake, checkMergedPastRed,
-  checkPins, checkProjectPullRequests, checkProtection, checkRouting, extractPins, main, parseMarker, renderIssue,
+  checkPins, checkProjectPullRequests, checkProtection, checkRouting, extractPins, extractRoutingBlock, main, parseMarker, renderIssue,
   completionSweepCovers, renderSummary, sortTags, touchesCapability, upsertIssues, workflowTriggers,
 } from './conformance.mjs';
 import { getRepositoryProfile, loadRegistry, validateRegistry } from './registry.mjs';
@@ -20,6 +20,9 @@ const profile = name => getRepositoryProfile(name);
 const uses = (name, sha, comment = '') => `        uses: ChipIn-one/.github/automation/${name}@${sha}${comment ? ` # ${comment}` : ''}`;
 const workflow = (...lines) => ({ path: '.github/workflows/x.yml', text: lines.join('\n') });
 const checks = findings => findings.map(f => f.check);
+const ROUTING_START = '<!-- ai-workflow:agents-routing:start -->';
+const ROUTING = `${ROUTING_START}\nChipIn AI routing: start at the organization canon [FLOW.md](https://github.com/ChipIn-one/.github/blob/master/docs/workflow/FLOW.md). If the canon cannot be read, stop.\n<!-- ai-workflow:agents-routing:end -->`;
+const CANON = { state: 'ok', block: ROUTING };
 // the frontend dev/main record from before the canonical-master cutover (.github#216), rollback target of chipin-frontend#497
 const legacyFrontend = () => ({ ...profile(FE), branches: Object.freeze({ default: 'main', integration: 'dev', promotion: 'main' }),
   completion: 'production-merge', completionRunner: 'repository', capabilities: Object.freeze({ ...profile(FE).capabilities, completion: 'automatic' }) });
@@ -237,9 +240,46 @@ test('dependabot: missing, no github-actions, wrong target, correct', () => {
 });
 
 test('routing block and .ai/context.md', () => {
-  assert.deepEqual(checks(checkRouting(profile(BE), 'plain', null)), ['ROUTING_BLOCK_MISSING', 'AI_CONTEXT_MISSING']);
-  assert.deepEqual(checks(checkRouting(profile(BE), null, 'x')), ['ROUTING_BLOCK_MISSING']);
-  assert.deepEqual(checkRouting(profile(FE), '<!-- ai-workflow:agents-routing:start -->', '# ctx'), []);
+  assert.deepEqual(checks(checkRouting(profile(BE), 'plain', null, CANON)), ['ROUTING_BLOCK_MISSING', 'AI_CONTEXT_MISSING']);
+  assert.deepEqual(checks(checkRouting(profile(BE), null, 'x', CANON)), ['ROUTING_BLOCK_MISSING']);
+  assert.deepEqual(checkRouting(profile(FE), `# FE\n\n${ROUTING}\nlocal rules\n`, '# ctx', CANON), []);
+  assert.deepEqual(checkRouting(profile(NOTIF), null, null, CANON), [], 'agentRouting: off');
+});
+
+test('routing block: compared byte-for-byte with the .github@master block (.github#250)', () => {
+  assert.deepEqual(extractRoutingBlock(`x\n${ROUTING}\ny`), { state: 'ok', block: ROUTING });
+  assert.deepEqual(extractRoutingBlock('no block'), { state: 'missing' });
+  assert.deepEqual(extractRoutingBlock(`${ROUTING_START}\ntext`), { state: 'unterminated' });
+  assert.deepEqual(extractRoutingBlock(null), { state: 'missing' });
+  // a block copied before a canon change
+  const stale = checkRouting(profile(FE), ROUTING.replace('FLOW.md)', 'FLOW.md) and README.md'), 'c', CANON);
+  assert.deepEqual(checks(stale), ['ROUTING_BLOCK_STALE']);
+  assert.equal(stale[0].severity, 'drift');
+  // byte-for-byte: CRLF line endings or trailing spaces are drift too
+  assert.deepEqual(checks(checkRouting(profile(FE), ROUTING.replace(/\n/g, '\r\n'), 'c', CANON)), ['ROUTING_BLOCK_STALE']);
+  assert.deepEqual(checks(checkRouting(profile(FE), ROUTING.replace('stop.', 'stop. '), 'c', CANON)), ['ROUTING_BLOCK_STALE']);
+  // start marker without end marker
+  assert.deepEqual(checks(checkRouting(profile(FE), `${ROUTING_START}\nChipIn AI routing`, 'c', CANON)), ['ROUTING_BLOCK_UNTERMINATED']);
+});
+
+test('routing: links to the personal syllik/ canon anywhere in AGENTS.md are drift', () => {
+  const personal = `${ROUTING}\n1. Read https://github.com/syllik/ai-workflow/blob/HEAD/FLOW.md.\n`;
+  const found = checkRouting(profile(BE), personal, 'c', CANON);
+  assert.deepEqual(checks(found), ['ROUTING_PERSONAL_CANON']);
+  assert.match(found[0].message, /1 link/);
+  const inBlock = ROUTING.replace('https://github.com/ChipIn-one/.github/blob/master/docs/workflow/FLOW.md)', 'https://raw.githubusercontent.com/syllik/ai-workflow/HEAD/FLOW.md)');
+  assert.deepEqual(checks(checkRouting(profile(BE), inBlock, 'c', CANON)), ['ROUTING_BLOCK_STALE', 'ROUTING_PERSONAL_CANON']);
+  // a mention of the login that is not a link is fine
+  assert.deepEqual(checkRouting(profile(BE), `${ROUTING}\nOwner: syllik/olegbal\n`, 'c', CANON), []);
+});
+
+test('routing: an unreadable canon block is a note, never drift', () => {
+  for (const canon of [{ state: 'unreadable', error: '502' }, { state: 'missing' }, { state: 'unterminated' }, undefined]) {
+    const found = checkRouting(profile(FE), ROUTING.replace('stop.', 'halt.'), 'c', canon);
+    assert.deepEqual(found.map(f => [f.check, f.severity]), [['ROUTING_CANON_UNREADABLE', 'note']]);
+  }
+  // other routing findings still apply
+  assert.deepEqual(checks(checkRouting(profile(FE), null, 'c', { state: 'unreadable' })), ['ROUTING_BLOCK_MISSING', 'ROUTING_CANON_UNREADABLE']);
 });
 
 test('protection: unavailable is a note, stale registry is drift, checks must be enforced', () => {
@@ -295,8 +335,8 @@ test('project pull requests, intake gaps (note only), closed with open PRs, merg
 // --- full audit over a fake source ----------------------------------------------------------------------
 function fakeSource(over = {}) {
   const files = {
-    [`${META}:AGENTS.md`]: '<!-- ai-workflow:agents-routing:start -->', [`${META}:.ai/context.md`]: 'c', [`${META}:.github/dependabot.yml`]: "updates:\n  - package-ecosystem: 'github-actions'\n",
-    [`${FE}:AGENTS.md`]: '<!-- ai-workflow:agents-routing:start -->', [`${FE}:.ai/context.md`]: 'c',
+    [`${META}:AGENTS.md`]: `${ROUTING}\nmeta rules\n`, [`${META}:.ai/context.md`]: 'c', [`${META}:.github/dependabot.yml`]: "updates:\n  - package-ecosystem: 'github-actions'\n",
+    [`${FE}:AGENTS.md`]: `# FE\n${ROUTING}\n`, [`${FE}:.ai/context.md`]: 'c',
     [`${FE}:.github/dependabot.yml`]: "updates:\n  - package-ecosystem: 'github-actions'\n    target-branch: 'master'\n",
   };
   const wf = {
@@ -323,6 +363,34 @@ function fakeSource(over = {}) {
     ...over,
   };
 }
+
+test('audit: the canon routing block is read once from .github on its integration branch (.github#250)', async () => {
+  const reads = [];
+  const base = fakeSource();
+  const report = await audit({ source: fakeSource({ repoFile: async (repo, path, ref) => { reads.push(`${repo}:${path}@${ref}`); return base.repoFile(repo, path, ref); } }) });
+  assert.equal(reads.filter(r => r === `${META}:AGENTS.md@master`).length, 2, 'once as the canon, once as the .github record');
+  assert.equal(report.repositories.find(r => r.repository === FE).status, 'CONFORMANT');
+  const stale = await audit({ source: fakeSource({ repoFile: async (repo, path, ref) => (repo === FE && path === 'AGENTS.md' ? ROUTING.replace('stop.', 'halt.') : base.repoFile(repo, path, ref)) }), repositories: [FE] });
+  assert.equal(stale.repositories[0].status, 'DRIFT');
+  assert.deepEqual(checks(stale.repositories[0].findings), ['ROUTING_BLOCK_STALE']);
+  const audited = await audit({ source: fakeSource({ repoFile: async () => { throw new Error('unused'); } }), repositories: [NOTIF] });
+  assert.equal(audited.repositories[0].status, 'CONFORMANT', 'no routing record audited: the canon is not read');
+});
+
+test('audit: a canon without a readable routing block is a note on every routing record, not drift or UNREADABLE', async () => {
+  const base = fakeSource();
+  const noBlock = await audit({ source: fakeSource({ repoFile: async (repo, path, ref) => (repo === META && path === 'AGENTS.md' ? 'no block' : base.repoFile(repo, path, ref)) }), repositories: [FE] });
+  assert.equal(noBlock.repositories[0].status, 'CONFORMANT');
+  assert.ok(checks(noBlock.repositories[0].notes).includes('ROUTING_CANON_UNREADABLE'));
+  let first = true;
+  const failing = await audit({ source: fakeSource({ repoFile: async (repo, path, ref) => {
+    if (repo === META && path === 'AGENTS.md' && first) { first = false; throw new Error('GET x -> 502'); }
+    return base.repoFile(repo, path, ref);
+  } }), repositories: [FE] });
+  assert.equal(failing.repositories[0].status, 'CONFORMANT');
+  const note = failing.repositories[0].notes.find(n => n.check === 'ROUTING_CANON_UNREADABLE');
+  assert.match(note.message, /502/);
+});
 
 test('audit: .github and FE conform; BE and KB show the expected drift; unregistered repos are listed only', async () => {
   const report = await audit({ source: fakeSource() });
