@@ -214,7 +214,7 @@ A weekly org workflow reports one `conformance-<repo>.json` artifact per registr
 `knowledge-base.md` describe repository-specific differences and link to local rules (added by [#160](https://github.com/ChipIn-one/.github/issues/160)).
 `github-issue-schema.md` and `automation/*.md` stay and link here.
 
-Routing: the managed `ai-workflow:agents-routing` block in each registry repository's `AGENTS.md` starts with this README and then follows the organization-owned canon above.
+Routing: the managed `ai-workflow:agents-routing` block in each registry repository's `AGENTS.md` links this README, then follows the organization-owned order: [FLOW.md](FLOW.md), [workspace.yaml](workspace.yaml), [project index](projects/index.md), and the [role index](roles/workflow.md). This is the shared routing template for registry repositories.
 Backend gets `.ai/context.md` and the routing block; in `workspace.yaml` the backend stays `read-only` for the owner's managed agents, which does not prevent coordinator PRs (olegbal merges them).
 The workspace records keep the backend `read-only` for target agents; authorized coordination and publication remain separate from that access policy.
 
@@ -224,7 +224,7 @@ See [onboarding.md](onboarding.md).
 
 ## 9. Out of scope for v1
 
-An external service or GitHub App for cross-repository events; shadow relationship databases; automatic merge; replacing the role canon; product CI/deploy; Trello.
+An external service or GitHub App for cross-repository events; shadow relationship databases; automatic merge; product CI/deploy; Trello.
 
 ## 10. Open owner decisions
 
