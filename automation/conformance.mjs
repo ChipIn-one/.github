@@ -265,38 +265,60 @@ export function checkDependabot(profile, text) {
 
 const ROUTING_START = '<!-- ai-workflow:agents-routing:start -->';
 const ROUTING_END = '<!-- ai-workflow:agents-routing:end -->';
-// links to the retired personal canon (github.com/syllik/…, raw.githubusercontent.com/syllik/…)
-const PERSONAL_CANON = /https?:\/\/(?:www\.)?(?:github\.com|raw\.githubusercontent\.com)\/syllik\//gi;
+// links to the retired personal canon, any case: github.com/syllik (www., gist., raw.githubusercontent.com, git@github.com:),
+// api.github.com/repos|users/syllik, syllik.github.io
+const PERSONAL_CANON = /(?<![\w.-])(?:(?:www|gist|raw)\.)?github(?:usercontent)?\.com[/:]syllik(?![\w-])|(?<![\w.-])api\.github\.com\/(?:repos|users)\/syllik(?![\w-])|(?<![\w.-])syllik\.github\.io(?![\w-])/gi;
+// zero-width and bidi controls: invisible to a reviewer, readable to an agent
+const HIDDEN = /[​-‏‪-‮⁠-⁤﻿]/;
+// URLs in the managed block: any scheme, git@host:path, or a bare host/path
+const URLS = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>()[\]"'`]+|\bgit@[^\s:]+:[^\s<>()[\]"'`]+|(?<![\w./:@-])(?:[a-z0-9-]+\.)+[a-z]{2,}\/[^\s<>()[\]"'`]*/gi;
+const ALLOWED_URL = /^https:\/\/(?:github\.com|raw\.githubusercontent\.com)\/ChipIn-one\//;
 
 // The managed block from the start marker through the end marker, inclusive, exactly as written.
+// Exactly one start and one end marker, the end after the start.
 export function extractRoutingBlock(text) {
-  const start = text == null ? -1 : String(text).indexOf(ROUTING_START);
-  if (start < 0) return { state: 'missing' };
-  const end = String(text).indexOf(ROUTING_END, start);
+  const value = text == null ? '' : String(text);
+  const starts = value.split(ROUTING_START).length - 1;
+  const ends = value.split(ROUTING_END).length - 1;
+  if (!starts) return { state: 'missing' };
+  if (starts > 1 || ends > 1) return { state: 'duplicated' };
+  const start = value.indexOf(ROUTING_START);
+  const end = value.indexOf(ROUTING_END, start);
   if (end < 0) return { state: 'unterminated' };
-  return { state: 'ok', block: String(text).slice(start, end + ROUTING_END.length) };
+  return { state: 'ok', block: value.slice(start, end + ROUTING_END.length) };
 }
 
-// canon: extractRoutingBlock() of .github AGENTS.md on its integration branch, or { state: 'unreadable', error }.
+// A drift detector, not a security control: text outside the block is guarded only by review in the consumer repository.
+// canon: extractRoutingBlock() of .github AGENTS.md on its integration branch (audit() makes a failed read UNREADABLE).
 export function checkRouting(profile, agents, context, canon) {
   if (profile.capabilities.agentRouting !== 'required') return [];
   const findings = [];
   const own = extractRoutingBlock(agents);
   const branch = profile.branches.integration;
+  const copy = 'Copy the block byte-for-byte from ChipIn-one/.github AGENTS.md, markers included (docs/workflow/onboarding.md step 5).';
   if (own.state === 'missing') {
     findings.push(finding('ROUTING_BLOCK_MISSING', 'drift', `AGENTS.md on ${branch} has no ai-workflow:agents-routing block.`, 'Add the managed routing block (docs/workflow/onboarding.md step 5).'));
+  } else if (own.state === 'duplicated') {
+    findings.push(finding('ROUTING_BLOCK_DUPLICATED', 'drift', `AGENTS.md on ${branch} has more than one ai-workflow:agents-routing start or end marker.`, `Keep exactly one block. ${copy}`));
   } else if (own.state === 'unterminated') {
-    findings.push(finding('ROUTING_BLOCK_UNTERMINATED', 'drift', `AGENTS.md on ${branch} has the ai-workflow:agents-routing start marker but no end marker.`, 'Replace the block with the one from ChipIn-one/.github AGENTS.md, markers included.'));
+    findings.push(finding('ROUTING_BLOCK_UNTERMINATED', 'drift', `AGENTS.md on ${branch} has the ai-workflow:agents-routing start marker but no end marker after it.`, copy));
   } else if (canon?.state === 'ok' && own.block !== canon.block) {
-    findings.push(finding('ROUTING_BLOCK_STALE', 'drift', `The ai-workflow:agents-routing block in AGENTS.md on ${branch} differs from the block in ChipIn-one/.github AGENTS.md.`, 'Copy the block byte-for-byte from ChipIn-one/.github AGENTS.md (docs/workflow/onboarding.md step 5).'));
+    findings.push(finding('ROUTING_BLOCK_STALE', 'drift', `The ai-workflow:agents-routing block in AGENTS.md on ${branch} differs from the block in ChipIn-one/.github AGENTS.md.`, copy));
   }
-  const personal = agents == null ? [] : String(agents).match(PERSONAL_CANON) ?? [];
+  const foreign = own.state === 'ok' ? (own.block.match(URLS) ?? []).map(url => url.replace(/[.,;:!?]+$/, '')).filter(url => !ALLOWED_URL.test(url)) : [];
+  if (foreign.length) {
+    findings.push(finding('ROUTING_BLOCK_FOREIGN_URL', 'drift', `The ai-workflow:agents-routing block in AGENTS.md on ${branch} links outside https://github.com/ChipIn-one and https://raw.githubusercontent.com/ChipIn-one: ${foreign.slice(0, 3).join(', ')}${foreign.length > 3 ? ', …' : ''}.`, 'Link only ChipIn-one on github.com or raw.githubusercontent.com over https.'));
+  }
+  if (agents != null && HIDDEN.test(String(agents))) {
+    findings.push(finding('ROUTING_HIDDEN_CHARACTERS', 'drift', `AGENTS.md on ${branch} contains zero-width or bidi control characters.`, 'Remove them (U+200B–U+200F, U+202A–U+202E, U+2060–U+2064, U+FEFF).'));
+  }
+  const personal = [['AGENTS.md', agents], ['.ai/context.md', context]]
+    .map(([path, text]) => [path, text == null ? 0 : (String(text).match(PERSONAL_CANON) ?? []).length]).filter(([, n]) => n);
   if (personal.length) {
-    findings.push(finding('ROUTING_PERSONAL_CANON', 'drift', `AGENTS.md on ${branch} has ${personal.length} link${personal.length === 1 ? '' : 's'} to the retired personal canon (syllik/).`, 'Remove them; the canon is ChipIn-one/.github docs/workflow (#15).'));
+    findings.push(finding('ROUTING_PERSONAL_CANON', 'drift', `Links to the retired personal canon (syllik) on ${branch}: ${personal.map(([path, n]) => `${path}: ${n}`).join(', ')}.`, 'Remove them; the canon is ChipIn-one/.github docs/workflow (#15).'));
   }
   if (canon?.state !== 'ok') {
-    const why = canon?.state === 'unreadable' ? `unreadable: ${canon.error ?? 'unknown error'}` : canon ? `${canon.state} block` : 'not read';
-    findings.push(finding('ROUTING_CANON_UNREADABLE', 'note', `The canon routing block in ChipIn-one/.github AGENTS.md is ${why}, so the block could not be compared.`, 'Fix the block in ChipIn-one/.github AGENTS.md or rerun the audit.'));
+    findings.push(finding('ROUTING_CANON_UNREADABLE', 'note', `ChipIn-one/.github AGENTS.md has ${canon ? `a ${canon.state} routing block` : 'not been read'}, so the block could not be compared.`, 'Fix the block in ChipIn-one/.github AGENTS.md (exactly one, both markers).'));
   }
   if (context === null) findings.push(finding('AI_CONTEXT_MISSING', 'drift', `.ai/context.md is missing on ${branch}.`, 'Add .ai/context.md (docs/workflow/onboarding.md step 5).'));
   return findings;
@@ -431,15 +453,20 @@ export async function audit({ source, registry = loadRegistry(), repositories = 
     } catch (error) { shared.workflowsError = String(error.message ?? error).slice(0, 200); }
   }
   // the managed routing block every record copies byte-for-byte (checkRouting): read once, only when a record needs it;
-  // a failed read is a note on those records, never drift
-  if (profiles.some(p => p.capabilities.agentRouting === 'required')) {
+  // a failed read makes only those records UNREADABLE (a missing block there is a note: the .github record shows the drift)
+  const routing = p => p.capabilities.agentRouting === 'required';
+  if (profiles.some(routing)) {
     try {
       shared.routingCanon = extractRoutingBlock(await source.repoFile(SHARED, 'AGENTS.md', getRepositoryProfile(SHARED, registry)?.branches.integration ?? 'master'));
-    } catch (error) { shared.routingCanon = { state: 'unreadable', error: String(error.message ?? error).slice(0, 200) }; }
+    } catch (error) { shared.routingCanonError = String(error.message ?? error).slice(0, 200); }
   }
   for (const profile of profiles) {
     if (shared.workflowsError && profile.completionRunner === 'org-sweep') {
       report.repositories.push({ repository: profile.repository, kind: profile.kind, status: 'UNREADABLE', findings: [], notes: [], error: `org sweep workflows unreadable: ${shared.workflowsError}` });
+      continue;
+    }
+    if (shared.routingCanonError && routing(profile)) {
+      report.repositories.push({ repository: profile.repository, kind: profile.kind, status: 'UNREADABLE', findings: [], notes: [], error: `routing canon unreadable: ${shared.routingCanonError}` });
       continue;
     }
     report.repositories.push(await auditRepository(profile, source, shared));

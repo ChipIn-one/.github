@@ -1,6 +1,3 @@
-# Org AI workflow canon (.github#250). A merge here steers agents in every registry repository,
-# so these paths need code-owner review once the master ruleset requires it.
-/docs/workflow/ @syllik
-/AGENTS.md @syllik
-/workflow-registry.yaml @syllik
-/.github/CODEOWNERS @syllik
+# Org AI workflow canon (.github#250). Code-owner review becomes mandatory only together with the master ruleset change,
+# after agents have their own identity (see PR #251).
+* @syllik @olegbal
