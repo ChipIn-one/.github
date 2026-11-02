@@ -1,7 +1,7 @@
 # ChipIn Workflow Standard v1
 
 Approved by the owner on 2026-10-21 (epic [#149](https://github.com/ChipIn-one/.github/issues/149)).
-Owned by `ChipIn-one/.github`; this directory is the first entry point for every ChipIn repository.
+Owned by `ChipIn-one/.github`. The entry point for every ChipIn repository and agent is [FLOW.md](FLOW.md); this README is the reference standard.
 
 ## How to read
 

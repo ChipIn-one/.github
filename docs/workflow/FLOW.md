@@ -6,7 +6,7 @@ This file is the entry point for every ChipIn AI agent. The [workflow standard R
 
 1. Read this `FLOW.md`.
 2. Select exactly one repository record from [`workspace.yaml`](workspace.yaml). Never discover projects by scanning repositories.
-3. Read the shared [core invariants](roles/core.md) (`roles/core.md`) and only the role file selected in [Roles and publication](#roles-and-publication).
+3. Read the shared [core invariants](roles/core.md) (`roles/core.md`) and only the role file selected in [Roles and publication](#roles-and-publication). For an Issue-backed task, also read the target's record in [`workflow-registry.yaml`](../../workflow-registry.yaml) for its admission capability.
 4. On that record's `integrationBranch`, read the target repository's `AGENTS.md`, then `.ai/context.md` when the record declares it.
 5. Read only relevant local decisions and tasks, then the declared `contextDependencies` the task needs, on their own integration branches.
 
@@ -17,7 +17,7 @@ Legacy/pre-canon contexts are migration-only and never authoritative; this organ
 - The canon wins for roles, gates and routing.
 - The repository's own docs win for product, engineering, build and deploy rules.
 - On a real conflict between the two, stop and report it; do not pick a side silently.
-- If the canon cannot be read, stop: fail closed. This covers this file, `workspace.yaml`, `roles/core.md`, and the selected role. Do not fall back to local copies, caches, or legacy contexts. Unavailable required context blocks work in the same way.
+- If the canon cannot be read, stop: fail closed. This covers this file, `workspace.yaml`, `roles/core.md`, the selected role, and `workflow-registry.yaml` for Issue-backed tasks. Do not fall back to local copies, caches, or legacy contexts. Unavailable required context blocks work in the same way.
 
 ## Repository access
 
@@ -33,7 +33,7 @@ Issue admission (`required` / `advisory` / `off` from `workflow-registry.yaml`) 
 | --- | --- | --- | --- |
 | No role assigned, triage, scoping, acceptance | [Planner](roles/planner.md) (read-only) | `standard`; `deep` when orchestrating | not applicable |
 | New interface, architecture, security, or release risk | [Architect](roles/architect.md) (read-only) | `deep` | not applicable |
-| Implement and validate an approved task | [Executor](roles/executor.md) | `standard` | human, naming the Trusted Publisher |
+| Implement and validate an approved task | [Executor](roles/executor.md) | `standard` | n/a (hands off to Trusted Publisher) |
 | Review a pinned current-head diff | [Reviewer](roles/reviewer.md) (read-only) | `standard`; `deep` for high risk | not applicable |
 | Policy, process, or evidence audit | [Auditor](roles/auditor.md) (read-only) | `standard` | not applicable |
 | Commit, push, open or update a PR | [Trusted Publisher](roles/publisher.md) | `standard` | human, explicitly |
