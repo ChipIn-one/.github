@@ -1,0 +1,56 @@
+schemaVersion: 1
+# Normative ChipIn workspace records. Every record is `access: managed` (it may receive approved work);
+# `read-only` is a property of `contextDependencies` entries only. Repository names and integration
+# branches must match workflow-registry.yaml (checked by automation/workflow-canon.test.mjs).
+projects:
+  - id: ChipIn-one/.github
+    repository: ChipIn-one/.github
+    group: products/chipin
+    access: managed
+    status: active
+    integrationBranch: master
+    contextPath: .ai/context.md
+  - id: ChipIn-one/chipin-frontend
+    repository: ChipIn-one/chipin-frontend
+    group: products/chipin
+    access: managed
+    status: active
+    integrationBranch: master
+    contextPath: .ai/context.md
+    contextDependencies:
+      - repository: ChipIn-one/chipin-knowledge-base
+        integrationBranch: master
+        access: read-only
+        purpose: shared product specification
+      - repository: ChipIn-one/.github
+        integrationBranch: master
+        access: read-only
+        purpose: Issue admission tooling and the AI workflow canon
+  - id: ChipIn-one/chipin-backend
+    repository: ChipIn-one/chipin-backend
+    group: products/chipin
+    access: managed
+    status: active
+    integrationBranch: develop
+    contextPath: .ai/context.md
+    contextDependencies:
+      - repository: ChipIn-one/chipin-knowledge-base
+        integrationBranch: master
+        access: read-only
+        purpose: shared product specification
+      - repository: ChipIn-one/.github
+        integrationBranch: master
+        access: read-only
+        purpose: Issue admission tooling and the AI workflow canon
+  - id: ChipIn-one/chipin-knowledge-base
+    repository: ChipIn-one/chipin-knowledge-base
+    group: products/chipin
+    access: managed
+    status: active
+    integrationBranch: master
+    contextPath: .ai/context.md
+    contextDependencies:
+      - repository: ChipIn-one/.github
+        integrationBranch: master
+        access: read-only
+        purpose: Issue admission tooling and the AI workflow canon

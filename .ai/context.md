@@ -4,7 +4,8 @@
 - Purpose: shared GitHub issue schema/forms and organization-level Project coordination mechanics.
 - This repository hosts read-only automated validation of the current knowledge-base documentation revision; validator logic and KB content remain owned by `ChipIn-one/chipin-knowledge-base`.
 - Integration branch: `master`.
-- This repository does not own frontend/backend executors, agent roles, code review, build/test/deploy workflows, product behavior, API semantics, or repository-specific technical rules.
+- This repository owns the shared ChipIn AI workflow canon in `docs/workflow/` (entry point `FLOW.md`; roles, routing, Issue admission semantics, `workspace.yaml`) and the managed `ai-workflow:agents-routing` block that FE/BE/KB copy into their `AGENTS.md`.
+- This repository does not own repository-specific code review, build/test/deploy workflows, product behavior, API semantics, or repository-specific technical rules.
 - Repository-specific code/AI review policy stays local to `chipin-frontend` and `chipin-backend`; shared organization coordination does not choose or require a review agent for either repository.
 - `ChipIn-one/chipin-knowledge-base` owns shared product/domain semantics and contract-change rules; HTTP wire shape remains code-first in backend runtime OpenAPI.
 - The knowledge base contains shared product specification only. Frontend/backend implementation specifications, execution plans, architecture notes, and repository-specific engineering documentation stay in their implementation repositories.

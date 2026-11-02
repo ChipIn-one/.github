@@ -14,7 +14,7 @@ existing caller workflows of `chipin-frontend` (on its canonical `master` since 
    [#217](https://github.com/ChipIn-one/.github/issues/217)); with `manual` none is required.
 3. **Dependabot.** Add `.github/dependabot.yml` with ecosystem `github-actions` (weekly, target = integration branch) plus the repository's package ecosystem.
 4. **Secret.** Add the read-only org token as `CHIPIN_DEV_READ_TOKEN` in the repository.
-5. **Agent context.** Add the routing block to `AGENTS.md` and a `.ai/context.md` following `templates/ai-context.md`.
+5. **Agent context.** Copy the managed `ai-workflow:agents-routing` block byte-for-byte from [`AGENTS.md`](../../AGENTS.md); it sends agents to [FLOW.md](https://github.com/ChipIn-one/.github/blob/master/docs/workflow/FLOW.md), which holds the reading order. Add a record to [`workspace.yaml`](workspace.yaml) (with `ChipIn-one/.github` as a read-only context dependency) and add `.ai/context.md` on the integration branch: a short bullet list of repository facts, as in this repository's [`.ai/context.md`](../../.ai/context.md) — repository, purpose, integration branch, what it owns and does not own, where product/engineering rules live, and the merge policy. Keep shared workflow rules out of it; link the canon instead.
 6. **Verify.** Dispatch `conformance-audit` for the repository and expect `CONFORMANT`.
 
 Do not change build/deploy workflows as part of onboarding. Branch protection for private repositories is available only after the Team plan upgrade
