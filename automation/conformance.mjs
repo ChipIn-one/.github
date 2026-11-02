@@ -267,12 +267,15 @@ const ROUTING_START = '<!-- ai-workflow:agents-routing:start -->';
 const ROUTING_END = '<!-- ai-workflow:agents-routing:end -->';
 // links to the retired personal canon, any case: github.com/syllik (www., gist., raw.githubusercontent.com, git@github.com:),
 // api.github.com/repos|users/syllik, syllik.github.io
-const PERSONAL_CANON = /(?<![\w.-])(?:(?:www|gist|raw)\.)?github(?:usercontent)?\.com[/:]syllik(?![\w-])|(?<![\w.-])api\.github\.com\/(?:repos|users)\/syllik(?![\w-])|(?<![\w.-])syllik\.github\.io(?![\w-])/gi;
-// zero-width and bidi controls: invisible to a reviewer, readable to an agent
-const HIDDEN = /[​-‏‪-‮⁠-⁤﻿]/;
+const PERSONAL_CANON = /(?<![\w.-])(?:(?:www|gist|raw)\.)?github(?:usercontent)?\.com[/:]syllik(?![\w-])|(?<![\w.-])api\.github\.com\/(?:repos|users)\/syllik(?![\w-])|(?<![\w.-])syllik\.github\.io/gi;
+// zero-width and bidi controls (incl. isolates and the Arabic letter mark): invisible to a reviewer, readable to an agent
+const HIDDEN = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\u061C\uFEFF]/;
 // URLs in the managed block: any scheme, git@host:path, or a bare host/path
-const URLS = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>()[\]"'`]+|\bgit@[^\s:]+:[^\s<>()[\]"'`]+|(?<![\w./:@-])(?:[a-z0-9-]+\.)+[a-z]{2,}\/[^\s<>()[\]"'`]*/gi;
+const URLS = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>()[\]"'`]+|\bgit@[^\s:]+:[^\s<>()[\]"'`]+|(?<![\w:/])\/\/[^\s<>()[\]"'`]+|(?<![\w./:@-])(?:[a-z0-9-]+\.)+[a-z]{2,}\/[^\s<>()[\]"'`]*/gi;
 const ALLOWED_URL = /^https:\/\/(?:github\.com|raw\.githubusercontent\.com)\/ChipIn-one\//;
+// dot segments (plain or percent-encoded) and encoded separators could leave the ChipIn-one prefix once resolved
+const UNSAFE_PATH = /\/\.{1,2}(?:[/?#]|$)|%2e|%2f|%5c|\\/i;
+const allowedUrl = url => ALLOWED_URL.test(url) && !UNSAFE_PATH.test(url);
 
 // The managed block from the start marker through the end marker, inclusive, exactly as written.
 // Exactly one start and one end marker, the end after the start.
@@ -305,12 +308,14 @@ export function checkRouting(profile, agents, context, canon) {
   } else if (canon?.state === 'ok' && own.block !== canon.block) {
     findings.push(finding('ROUTING_BLOCK_STALE', 'drift', `The ai-workflow:agents-routing block in AGENTS.md on ${branch} differs from the block in ChipIn-one/.github AGENTS.md.`, copy));
   }
-  const foreign = own.state === 'ok' ? (own.block.match(URLS) ?? []).map(url => url.replace(/[.,;:!?]+$/, '')).filter(url => !ALLOWED_URL.test(url)) : [];
+  // one trailing sentence mark belongs to the prose, not to the URL
+  const foreign = own.state === 'ok' ? (own.block.match(URLS) ?? []).map(url => url.replace(/[.,;:!?]$/, '')).filter(url => !allowedUrl(url)) : [];
   if (foreign.length) {
     findings.push(finding('ROUTING_BLOCK_FOREIGN_URL', 'drift', `The ai-workflow:agents-routing block in AGENTS.md on ${branch} links outside https://github.com/ChipIn-one and https://raw.githubusercontent.com/ChipIn-one: ${foreign.slice(0, 3).join(', ')}${foreign.length > 3 ? ', …' : ''}.`, 'Link only ChipIn-one on github.com or raw.githubusercontent.com over https.'));
   }
-  if (agents != null && HIDDEN.test(String(agents))) {
-    findings.push(finding('ROUTING_HIDDEN_CHARACTERS', 'drift', `AGENTS.md on ${branch} contains zero-width or bidi control characters.`, 'Remove them (U+200B–U+200F, U+202A–U+202E, U+2060–U+2064, U+FEFF).'));
+  const hidden = [['AGENTS.md', agents], ['.ai/context.md', context]].filter(([, text]) => text != null && HIDDEN.test(String(text))).map(([path]) => path);
+  if (hidden.length) {
+    findings.push(finding('ROUTING_HIDDEN_CHARACTERS', 'drift', `Zero-width or bidi control characters on ${branch} in ${hidden.join(', ')}.`, 'Remove them (U+061C, U+200B–U+200F, U+202A–U+202E, U+2060–U+2064, U+2066–U+2069, U+FEFF).'));
   }
   const personal = [['AGENTS.md', agents], ['.ai/context.md', context]]
     .map(([path, text]) => [path, text == null ? 0 : (String(text).match(PERSONAL_CANON) ?? []).length]).filter(([, n]) => n);

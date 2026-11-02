@@ -273,25 +273,39 @@ test('routing block: compared byte-for-byte with the .github@master block (.gith
   assert.deepEqual(checks(checkRouting(profile(FE), `${ROUTING_START}\nChipIn AI routing`, 'c', CANON)), ['ROUTING_BLOCK_UNTERMINATED']);
 });
 
-test('routing: zero-width and bidi characters anywhere in AGENTS.md are drift', () => {
-  for (const ch of ['​', '‍', '‏', '‪', '‮', '⁠', '⁤', '﻿']) {
+test('routing: zero-width and bidi characters in AGENTS.md or .ai/context.md are drift', () => {
+  const hidden = ['\u200B', '\u200D', '\u200F', '\u202A', '\u202E', '\u2060', '\u2064', '\u2066', '\u2067', '\u2068', '\u2069', '\u061C', '\uFEFF'];
+  const name = ch => `U+${ch.codePointAt(0).toString(16).toUpperCase()}`;
+  for (const ch of hidden) {
     const found = checkRouting(profile(FE), `${ROUTING}\nlocal${ch} rules\n`, 'c', CANON);
-    assert.deepEqual(found.map(f => [f.check, f.severity]), [['ROUTING_HIDDEN_CHARACTERS', 'drift']], `U+${ch.codePointAt(0).toString(16).toUpperCase()}`);
+    assert.deepEqual(found.map(f => [f.check, f.severity]), [['ROUTING_HIDDEN_CHARACTERS', 'drift']], `AGENTS.md ${name(ch)}`);
+    assert.deepEqual(checks(checkRouting(profile(FE), ROUTING, `- repo${ch}\n`, CANON)), ['ROUTING_HIDDEN_CHARACTERS'], `.ai/context.md ${name(ch)}`);
   }
-  assert.deepEqual(checks(checkRouting(profile(FE), ROUTING.replace('stop.', 'stop.‮'), 'c', CANON)), ['ROUTING_BLOCK_STALE', 'ROUTING_HIDDEN_CHARACTERS']);
+  assert.match(checkRouting(profile(FE), `${ROUTING}\n\u2066x`, 'y\u061C', CANON)[0].message, /AGENTS\.md, \.ai\/context\.md/);
+  assert.deepEqual(checks(checkRouting(profile(FE), ROUTING.replace('stop.', 'stop.\u202E'), 'c', CANON)), ['ROUTING_BLOCK_STALE', 'ROUTING_HIDDEN_CHARACTERS']);
+  // neighbours of the ranges and ordinary non-ASCII text are fine
+  for (const ch of ['\u200A', '\u2010', '\u2029', '\u202F', '\u2065', '\u206A', '\u061B', '\u061D', '\uFEFE']) {
+    assert.deepEqual(checkRouting(profile(FE), `${ROUTING}\nx${ch}\n`, `y${ch}`, CANON), [], name(ch));
+  }
   assert.deepEqual(checkRouting(profile(FE), `${ROUTING}\nкириллица — тире\n`, 'c', CANON), [], 'ordinary non-ASCII text is fine');
 });
 
 test('routing: URLs inside the managed block must be ChipIn-one on github.com or raw.githubusercontent.com', () => {
   const withUrl = url => ROUTING.replace('If the canon', `See ${url}. If the canon`);
-  for (const url of ['https://github.com/ChipIn-one/.github/blob/master/AGENTS.md', 'https://raw.githubusercontent.com/ChipIn-one/.github/master/AGENTS.md']) {
+  for (const url of ['https://github.com/ChipIn-one/.github/blob/master/AGENTS.md', 'https://raw.githubusercontent.com/ChipIn-one/.github/master/AGENTS.md',
+    'https://github.com/ChipIn-one/.github/blob/master/docs/workflow/FLOW.md#precedence-and-availability']) {
     assert.deepEqual(checkRouting(profile(FE), withUrl(url), 'c', { state: 'ok', block: withUrl(url) }), [], url);
   }
   for (const url of ['https://example.com/FLOW.md', 'http://github.com/ChipIn-one/.github', 'https://github.com/other-org/x', 'github.com/ChipIn-one/.github',
-    'https://gist.github.com/ChipIn-one/x', 'ftp://ChipIn-one.example/x', 'https://github.com.evil.example/ChipIn-one/x']) {
+    'https://gist.github.com/ChipIn-one/x', 'ftp://ChipIn-one.example/x', 'https://github.com.evil.example/ChipIn-one/x', 'git@evil.example:x',
+    // dot segments leave the ChipIn-one prefix once resolved
+    'https://github.com/ChipIn-one/../syllik/x', 'https://github.com/ChipIn-one/.github/../../syllik/x', 'https://github.com/ChipIn-one/./x',
+    'https://github.com/ChipIn-one/%2e%2e/syllik/x', 'https://github.com/ChipIn-one/..', 'https://raw.githubusercontent.com/ChipIn-one/..%2Fsyllik/x',
+    // protocol-relative
+    '//evil.example/x', '//github.com/ChipIn-one/.github']) {
     // the canon itself carries the URL: the .github record (and every copy) is drift
     const found = checkRouting(profile(FE), withUrl(url), 'c', { state: 'ok', block: withUrl(url) });
-    assert.deepEqual(checks(found), ['ROUTING_BLOCK_FOREIGN_URL'], url);
+    assert.deepEqual(checks(found).filter(c => c !== 'ROUTING_PERSONAL_CANON'), ['ROUTING_BLOCK_FOREIGN_URL'], url);
   }
 });
 
@@ -308,7 +322,8 @@ test('routing: links to the personal syllik canon in AGENTS.md or .ai/context.md
   const inBlock = ROUTING.replace('https://github.com/ChipIn-one/.github/blob/master/docs/workflow/FLOW.md)', 'https://raw.githubusercontent.com/syllik/ai-workflow/HEAD/FLOW.md)');
   assert.deepEqual(checks(checkRouting(profile(BE), inBlock, 'c', CANON)), ['ROUTING_BLOCK_STALE', 'ROUTING_BLOCK_FOREIGN_URL', 'ROUTING_PERSONAL_CANON']);
   // the login alone, or a longer name, is not a link to the personal canon
-  for (const text of ['Owner: syllik/olegbal', 'https://github.com/syllikov/x', 'https://github.com/ChipIn-one/syllik', 'mysyllik.github.io']) {
+  for (const text of ['Owner: syllik/olegbal', 'https://github.com/syllikov/x', 'https://github.com/ChipIn-one/syllik', 'mysyllik.github.io',
+    'https://github.com/notsyllik/x', 'github.com/notsyllik/', 'syllik-x', 'https://github.com/syllik-x/y', 'syllik-x.github.io', 'git@github.com:a-syllik/x']) {
     assert.deepEqual(checkRouting(profile(BE), `${ROUTING}\n${text}\n`, text, CANON), [], text);
   }
 });

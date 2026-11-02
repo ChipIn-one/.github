@@ -35,13 +35,10 @@ Repositories are audited on their **integration branch** (`branches.integration`
 | `DEPENDABOT_MISSING`, `DEPENDABOT_NO_ACTIONS`, `DEPENDABOT_TARGET` | drift | no `dependabot.yml`, no `github-actions` ecosystem, or updates do not target the integration branch | add/fix it (weekly, `target-branch` = integration) |
 | `ROUTING_BLOCK_MISSING`, `AI_CONTEXT_MISSING` | drift | no `ai-workflow:agents-routing` block in `AGENTS.md` / no `.ai/context.md` (when `agentRouting: required`) | add both ([onboarding](onboarding.md) step 5) |
 | `ROUTING_BLOCK_STALE`, `ROUTING_BLOCK_UNTERMINATED`, `ROUTING_BLOCK_DUPLICATED` | drift | the managed block (start marker through end marker, inclusive) is not byte-for-byte the block in `ChipIn-one/.github` `AGENTS.md` on its integration branch, has no end marker after the start marker, or `AGENTS.md` has more than one start or end marker ([#250](https://github.com/ChipIn-one/.github/issues/250)) | keep exactly one block, copied byte-for-byte ([onboarding](onboarding.md) step 5) |
-| `ROUTING_BLOCK_FOREIGN_URL` | drift | a URL inside the managed block (any scheme, `git@host:`, or a bare `host/path`) is not under `https://github.com/ChipIn-one/` or `https://raw.githubusercontent.com/ChipIn-one/`. When the canon block itself has one, the `.github` record shows it | link only those prefixes |
-| `ROUTING_HIDDEN_CHARACTERS` | drift | `AGENTS.md` contains zero-width or bidi control characters (U+200B–U+200F, U+202A–U+202E, U+2060–U+2064, U+FEFF) | remove them |
+| `ROUTING_BLOCK_FOREIGN_URL` | drift | a URL inside the managed block (any scheme, `git@host:`, or a bare `host/path`) is not under `https://github.com/ChipIn-one/` or `https://raw.githubusercontent.com/ChipIn-one/`, or has a `.`/`..` segment or a percent-encoded `.`, `/` or `\` (protocol-relative `//host/…` is not allowed either). When the canon block itself has one, the `.github` record shows it | link only those prefixes |
+| `ROUTING_HIDDEN_CHARACTERS` | drift | `AGENTS.md` or `.ai/context.md` contains zero-width or bidi control characters (U+061C, U+200B–U+200F, U+202A–U+202E, U+2060–U+2064, U+2066–U+2069, U+FEFF) | remove them |
 | `ROUTING_PERSONAL_CANON` | drift | `AGENTS.md` or `.ai/context.md` links the retired personal canon, in any case: `github.com/syllik` (with or without scheme, `www.`, `gist.`, `raw.githubusercontent.com`, `git@github.com:syllik/`), `api.github.com/repos/syllik/`, `syllik.github.io` | remove the links; the canon is `ChipIn-one/.github` `docs/workflow` (#15) |
 | `ROUTING_CANON_UNREADABLE` | note | the canon `AGENTS.md` was read but has no single complete block (none, no end marker, duplicated markers), so blocks were not compared; the other routing checks still apply. A failed **read** of the canon makes every `agentRouting: required` record `UNREADABLE` instead, so their drift Issues are not touched | fix the canon block |
-
-The routing checks are a **drift detector, not a security control**. They compare the managed block and look for a few known bad patterns; they do not prove that an `AGENTS.md` is safe. Text outside the managed block is protected only by review in the consumer repository.
-
 | `REQUIRED_CHECKS_MISSING` | drift | registry `requiredChecks` are not enforced by a ruleset or classic branch protection on the integration branch | add them or fix the registry |
 | `RULESET_NO_PULL_REQUEST` | drift | `protection: ruleset` but the ruleset has no `pull_request` rule | add the rule |
 | `PROTECTION_MISSING` | drift | registry says `ruleset`/`protection` but nothing applies, or the plan forbids it | create it, or record `unavailable` |
@@ -54,6 +51,8 @@ The routing checks are a **drift detector, not a security control**. They compar
 | `CLOSED_WITH_OPEN_PR` | drift | among the 100 most recently updated closed Issues, one has an open Development-linked PR | reopen the Issue or merge/close the PR; close only after the PR merged |
 | `MERGED_PAST_RED_CHECK` | drift | for `protection: unavailable` with `requiredChecks`: a PR merged into the integration branch in the last 14 days had a failed/cancelled required check on its head | fix forward; enforce the check after the plan upgrade |
 | `INTAKE_GAPS` | note | counts of open Issues without Type, Priority or Project #5 (or with duplicate items) | repair through the canonical intake writer with owner-approved values (#159) |
+
+The routing checks are a **drift detector, not a security control**. They compare the managed block and look for a few known bad patterns; they do not prove that an `AGENTS.md` is safe. Text outside the managed block is protected only by review in the consumer repository.
 
 ## Drift Issues
 
