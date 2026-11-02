@@ -4,6 +4,7 @@ import test from 'node:test';
 
 const workflowRoot = new URL('../docs/workflow/', import.meta.url);
 const workspaceUrl = new URL('workspace.yaml', workflowRoot);
+const projectIndexUrl = new URL('projects/index.md', workflowRoot);
 const roleIndexUrl = new URL('roles/workflow.md', workflowRoot);
 const readmeUrl = new URL('README.md', workflowRoot);
 const agentsUrl = new URL('../AGENTS.md', import.meta.url);
@@ -109,6 +110,7 @@ test('ChipIn records preserve integration access and context dependency policy',
     assert.ok(record, `workspace record ${policy.id} must exist`);
     assert.match(record, new RegExp(`^\\s+integrationBranch:\\s*${policy.branch}\\s*$`, 'm'));
     assert.match(record, new RegExp(`^\\s+access:\\s*${policy.access}\\s*$`, 'm'));
+    assert.match(record, /^\s+contextPath:\s*\.ai\/context\.md\s*$/m);
 
     if (policy.dependsOnKnowledgeBase) {
       assert.match(
@@ -118,6 +120,25 @@ test('ChipIn records preserve integration access and context dependency policy',
     } else {
       assert.doesNotMatch(record, /^\s{4}contextDependencies\s*:/m);
     }
+  }
+});
+
+test('project index links the context file for all four repositories', () => {
+  const projectIndex = readText(projectIndexUrl, 'project index');
+  const expected = [
+    { id: 'ChipIn-one/.github', branch: 'master' },
+    { id: 'ChipIn-one/chipin-frontend', branch: 'master' },
+    { id: 'ChipIn-one/chipin-backend', branch: 'develop' },
+    { id: 'ChipIn-one/chipin-knowledge-base', branch: 'master' },
+  ];
+
+  for (const { id, branch } of expected) {
+    const row = projectIndex.split(/\r?\n/).find(line => line.startsWith(`| [${id}](`));
+    assert.ok(row, `project index must include ${id}`);
+    assert.ok(
+      row.includes(`[.ai/context.md](https://github.com/${id}/blob/${branch}/.ai/context.md)`),
+      `${id} must link its .ai/context.md on ${branch}`,
+    );
   }
 });
 
