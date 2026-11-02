@@ -16,6 +16,8 @@ const agentsUrl = new URL('../AGENTS.md', import.meta.url);
 const automationReadmeUrl = new URL('README.md', import.meta.url);
 const onboardingUrl = new URL('onboarding.md', workflowRoot);
 const flowUrl = new URL('FLOW.md', workflowRoot);
+const publisherUrl = new URL('roles/publisher.md', workflowRoot);
+const contextUrl = new URL('../.ai/context.md', import.meta.url);
 
 const canonBase = 'https://github.com/ChipIn-one/.github/blob/master/';
 const flowCanonUrl = `${canonBase}docs/workflow/FLOW.md`;
@@ -205,7 +207,7 @@ test('canon contains no personal workflow, path, or workspace script dependency'
 test('FLOW.md alone spells out the mandatory reading order', () => {
   const flow = readText(flowUrl, 'canonical workflow FLOW.md');
   const order = section(flow, 'Reading order');
-  const items = ['FLOW.md', 'workspace.yaml', 'roles/core.md', 'AGENTS.md', '.ai/context.md', 'decisions', 'tasks', 'contextDependencies'];
+  const items = ['FLOW.md', 'workspace.yaml', 'roles/core.md', 'workflow-registry.yaml', 'AGENTS.md', '.ai/context.md', 'decisions', 'tasks', 'contextDependencies'];
   let previousIndex = -1;
   for (const item of items) {
     const index = order.indexOf(item, previousIndex + 1);
@@ -229,6 +231,7 @@ test('FLOW.md states precedence and fails closed when the canon is unavailable',
   assert.match(precedence, /repository's own docs win for product, engineering, build(,)? and deploy/i);
   assert.match(precedence, /real conflict[^.]*stop and report/i);
   assert.match(precedence, /cannot be read[^.]*stop/i);
+  assert.match(precedence, /This covers [^\n]*`workflow-registry\.yaml`/);
   assert.match(precedence, /do not fall back to local copies/i);
 });
 
@@ -238,6 +241,16 @@ test('FLOW.md maps task types to roles, tiers and publication authority and defa
   for (const role of ['Planner', 'Architect', 'Executor', 'Reviewer', 'Auditor', 'Trusted Publisher']) {
     assert.match(roles, new RegExp(`\\| [^|\\n]*\\| \\[?${role}`), `role table must include ${role}`);
   }
+  const rows = roles.split(/\r?\n/)
+    .filter(line => line.startsWith('| ') && !/^\| (?:Task type|---)/.test(line))
+    .map(line => line.split('|').slice(1, -1).map(cell => cell.trim()));
+  const byRole = new Map(rows.map(cells => [/\[([^\]]+)\]/.exec(cells[1])?.[1], cells[3]]));
+  assert.equal(byRole.size, 6, 'role table must have exactly six role rows');
+  for (const role of ['Planner', 'Architect', 'Reviewer', 'Auditor']) {
+    assert.equal(byRole.get(role), 'not applicable', `${role} is read-only and never publishes`);
+  }
+  assert.equal(byRole.get('Executor'), 'n/a (hands off to Trusted Publisher)', 'Executor row must not name a publication authorizer');
+  assert.match(byRole.get('Trusted Publisher'), /^human\b/, 'only a human authorizes the Trusted Publisher');
   assert.match(roles, /no role is assigned[^.]*Planner[^.]*read-only/i);
   assert.match(roles, /explicit human authorization naming the Trusted Publisher/i);
   assert.match(roles, /Only a human merges\./);
@@ -246,8 +259,11 @@ test('FLOW.md maps task types to roles, tiers and publication authority and defa
 test('subagent rules are consistent between model tiers and Executor', () => {
   const models = readText(modelsUrl, 'models.md');
   const executor = readText(executorUrl, 'executor.md');
-  assert.match(models, /Executor does not start subagents/);
-  assert.match(executor, /does not start subagents/);
+  assert.match(models, /Only an orchestrating session \(Planner at `deep` tier, started by a human\) may start subagents\./);
+  assert.match(models, /Executor does not start subagents, and no subagent inherits Trusted Publisher authority\./);
+  assert.doesNotMatch(models, /any role may start subagents|(?<!no )subagents? (?:may )?inherits?/i);
+  assert.match(executor, /Executor does not start subagents/);
+  assert.match(readText(publisherUrl, 'publisher.md'), /a subagent or Reviewer never holds it\./);
   assert.ok(relativeMarkdownLinks(executor).some(({ target }) => target === 'models.md'), 'executor.md must link models.md');
 });
 
@@ -328,4 +344,51 @@ test('onboarding routes through FLOW.md and has no dead template link', () => {
 test('canonical FLOW keeps legacy and pre-canon contexts non-authoritative', () => {
   const flow = readText(flowUrl, 'canonical workflow FLOW.md');
   assert.match(flow, /legacy\/pre-canon contexts are migration-only and never authoritative/i);
+});
+
+const restatementScope = () => [
+  ...filesUnder(workflowRoot).filter(url => url.pathname.endsWith('.md')),
+  agentsUrl,
+  automationReadmeUrl,
+];
+
+test('no file outside the canon keeps the old read-only access wording for BE/KB', () => {
+  const oldWording = /(?:\bBE\b|\bKB\b|backend|knowledge base)[^.\n]*\bread-only`?\s+(?:for|target|workspace|access)|(?:stays|remains)\s+`?read-only/i;
+  for (const url of [...filesUnder(workflowRoot), agentsUrl, automationReadmeUrl]) {
+    assert.doesNotMatch(fs.readFileSync(url, 'utf8'), oldWording, `${url.pathname} restates read-only repository access`);
+  }
+});
+
+test('every relative link and heading anchor in the canon and AGENTS.md resolves', () => {
+  for (const url of [...filesUnder(workflowRoot).filter(file => file.pathname.endsWith('.md')), agentsUrl]) {
+    const text = fs.readFileSync(url, 'utf8').replace(/```[\s\S]*?```/g, '');
+    for (const { target: raw } of markdownLinks(text)) {
+      if (/^(?:[a-z][a-z\d+.-]*:|\/)/i.test(raw)) continue;
+      const [path, anchor] = raw.split('#');
+      const targetUrl = path ? new URL(path, url) : url;
+      assert.ok(fs.existsSync(targetUrl), `${url.pathname}: link ${raw} must resolve`);
+      if (anchor && targetUrl.pathname.endsWith('.md')) {
+        assert.ok(headingAnchors(fs.readFileSync(targetUrl, 'utf8')).has(anchor), `${url.pathname}: anchor ${raw} must exist`);
+      }
+    }
+  }
+});
+
+test('.github context records canon ownership and keeps review policy local', () => {
+  const context = readText(contextUrl, '.ai/context.md');
+  assert.match(context, /^- This repository owns the shared ChipIn AI workflow canon in `docs\/workflow\/`[^\n]*roles, routing, Issue admission semantics/m);
+  assert.match(context, /^- Repository-specific code\/AI review policy stays local to `chipin-frontend` and `chipin-backend`/m);
+});
+
+test('only core.md states admission mode semantics', () => {
+  for (const url of restatementScope()) {
+    if (url.href === coreUrl.href) continue;
+    const sentences = fs.readFileSync(url, 'utf8').split(/(?<=[.!?])\s+|\n/);
+    for (const sentence of sentences) {
+      if (/`advisory`|advisory (?:admission|preflight)|admission[^.]*\badvisory\b/i.test(sentence)) {
+        assert.doesNotMatch(sentence, /\b(?:block\w*|proceed\w*|warn\w*|INTAKE_COMPLETE|report\w*)\b/i,
+          `${url.pathname} restates admission semantics: ${sentence}`);
+      }
+    }
+  }
 });
