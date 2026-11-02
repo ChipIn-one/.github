@@ -10,6 +10,8 @@ The organization-owned workflow canon is authoritative for shared routing. Follo
 4. On that record's `integrationBranch`, read the target repository's `AGENTS.md`, then `.ai/context.md` when the record declares it.
 5. Read only relevant local decisions, task files, and declared `contextDependencies`. Treat dependencies as read-only; unavailable required context blocks work.
 
+Legacy/pre-canon contexts are migration-only and never authoritative; this organization-owned canon is the source of truth for shared routing.
+
 Repository ownership, integration branches, access, and context dependencies come from the selected record. Active `managed` records may receive normal work. `read-only` records are context sources only. Product behavior, repository engineering rules, build, deployment, and completion policy remain in their owning repositories and the organization workflow documentation.
 
 ## ChipIn Issue admission

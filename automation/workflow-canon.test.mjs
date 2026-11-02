@@ -9,6 +9,32 @@ const readmeUrl = new URL('README.md', workflowRoot);
 const agentsUrl = new URL('../AGENTS.md', import.meta.url);
 const automationReadmeUrl = new URL('README.md', import.meta.url);
 const onboardingUrl = new URL('onboarding.md', workflowRoot);
+const flowUrl = new URL('FLOW.md', workflowRoot);
+
+const organizationRoutingLinks = [
+  {
+    url: 'https://github.com/ChipIn-one/.github/blob/master/docs/workflow/README.md',
+    localPath: 'docs/workflow/README.md',
+  },
+  {
+    url: 'https://github.com/ChipIn-one/.github/blob/master/docs/workflow/FLOW.md',
+    localPath: 'docs/workflow/FLOW.md',
+  },
+  {
+    url: 'https://github.com/ChipIn-one/.github/blob/master/docs/workflow/workspace.yaml',
+    localPath: 'docs/workflow/workspace.yaml',
+  },
+  {
+    url: 'https://github.com/ChipIn-one/.github/blob/master/docs/workflow/projects/index.md',
+    localPath: 'docs/workflow/projects/index.md',
+  },
+  {
+    url: 'https://github.com/ChipIn-one/.github/blob/master/docs/workflow/roles/workflow.md',
+    localPath: 'docs/workflow/roles/workflow.md',
+  },
+];
+
+const forbiddenWorkflowReferences = /(?:github\.com\/)?syllik\/ai-workflow|~\/Desktop|scripts\/workspace\//i;
 
 const repositories = [
   'ChipIn-one/.github',
@@ -41,9 +67,15 @@ function workspaceRecords(text) {
   return records;
 }
 
-function relativeMarkdownLinks(text) {
+function markdownLinks(text) {
   return [...text.matchAll(/\[([^\]]+)\]\(([^)]+)\)/g)]
-    .map(([, label, target]) => ({ label, target: target.split('#', 1)[0] }))
+    .map(([, label, target]) => ({ label, target }))
+    .filter(({ target }) => target);
+}
+
+function relativeMarkdownLinks(text) {
+  return markdownLinks(text)
+    .map(({ label, target }) => ({ label, target: target.split('#', 1)[0] }))
     .filter(({ target }) => target && !/^(?:[a-z][a-z\d+.-]*:|\/|#)/i.test(target));
 }
 
@@ -101,10 +133,13 @@ test('role index resolves every required role file', () => {
 
 test('canon contains no personal workflow or personal workspace script dependency', () => {
   assert.ok(fs.existsSync(workflowRoot), 'canonical workflow directory must exist');
-  const forbidden = /(?:github\.com\/)?syllik\/ai-workflow|scripts\/workspace\//i;
 
   for (const fileUrl of filesUnder(workflowRoot)) {
-    assert.doesNotMatch(fs.readFileSync(fileUrl, 'utf8'), forbidden, `${fileUrl.href} has a personal dependency`);
+    assert.doesNotMatch(
+      fs.readFileSync(fileUrl, 'utf8'),
+      forbiddenWorkflowReferences,
+      `${fileUrl.href} has a personal canon, workspace-root, or workspace-script dependency`,
+    );
   }
 });
 
@@ -166,18 +201,23 @@ test('.github managed routing block starts at the organization canon', () => {
   assert.ok(end > start, 'AGENTS.md must have a managed routing block end marker');
 
   const block = agents.slice(start + startMarker.length, end);
-  const targets = relativeMarkdownLinks(block).map(({ target }) => target.replace(/^\.\//, ''));
-  const expected = [
-    'docs/workflow/README.md',
-    'docs/workflow/FLOW.md',
-    'docs/workflow/workspace.yaml',
-    'docs/workflow/projects/index.md',
-    'docs/workflow/roles/workflow.md',
-  ];
+  const targets = markdownLinks(block).map(({ target }) => target);
+  assert.deepEqual(
+    targets,
+    organizationRoutingLinks.map(({ url }) => url),
+    'managed routing must contain exactly the five ordered absolute organization canon links',
+  );
 
-  assert.equal(targets[0], expected[0], 'managed routing must start at the organization workflow README');
-  for (const target of expected) {
-    assert.ok(targets.includes(target), `managed routing must link ${target}`);
+  for (const { url, localPath } of organizationRoutingLinks) {
+    assert.equal(
+      new URL(url).pathname,
+      `/ChipIn-one/.github/blob/master/${localPath}`,
+      `${url} must map to ${localPath}`,
+    );
+    assert.ok(
+      fs.existsSync(new URL(`../${localPath}`, import.meta.url)),
+      `${url} must map to existing local ${localPath}`,
+    );
   }
 });
 
@@ -190,19 +230,27 @@ test('.github operational workflow documentation has no personal canon dependenc
   ];
 
   for (const [fileUrl, description] of operationalFiles) {
-    assert.doesNotMatch(readText(fileUrl, description), /syllik\/ai-workflow/i, `${description} must use the organization canon`);
+    assert.doesNotMatch(
+      readText(fileUrl, description),
+      forbiddenWorkflowReferences,
+      `${description} must not depend on a personal canon, desktop root, or workspace script`,
+    );
   }
 });
 
 test('onboarding publishes the exact organization routing order', () => {
   const onboarding = readText(onboardingUrl, 'workflow onboarding guide');
-  const targets = relativeMarkdownLinks(onboarding).map(({ target }) => target.replace(/^\.\//, ''));
-  const expected = ['README.md', 'FLOW.md', 'workspace.yaml', 'projects/index.md', 'roles/workflow.md'];
+  const targets = markdownLinks(onboarding).map(({ target }) => target);
   let previousIndex = -1;
 
-  for (const target of expected) {
+  for (const { url: target } of organizationRoutingLinks) {
     const index = targets.indexOf(target, previousIndex + 1);
     assert.ok(index > previousIndex, `${target} must follow the organization routing order in onboarding`);
     previousIndex = index;
   }
+});
+
+test('canonical FLOW keeps legacy and pre-canon contexts non-authoritative', () => {
+  const flow = readText(flowUrl, 'canonical workflow FLOW.md');
+  assert.match(flow, /legacy\/pre-canon contexts are migration-only and never authoritative/i);
 });

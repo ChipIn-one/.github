@@ -1,8 +1,8 @@
 <!-- ai-workflow:agents-routing:start -->
 Canonical AI routing:
-1. Read the organization-owned [workflow standard](docs/workflow/README.md), then its [canonical FLOW.md](docs/workflow/FLOW.md).
-2. Select exactly one repository record from [workspace.yaml](docs/workflow/workspace.yaml), using the [project index](docs/workflow/projects/index.md) as a human-readable aid.
-3. Read the [role index](docs/workflow/roles/workflow.md), shared core invariants, and only the role selected for the task.
+1. Read the organization-owned [workflow standard](https://github.com/ChipIn-one/.github/blob/master/docs/workflow/README.md), then its [canonical FLOW.md](https://github.com/ChipIn-one/.github/blob/master/docs/workflow/FLOW.md).
+2. Select exactly one repository record from [workspace.yaml](https://github.com/ChipIn-one/.github/blob/master/docs/workflow/workspace.yaml), using the [project index](https://github.com/ChipIn-one/.github/blob/master/docs/workflow/projects/index.md) as a human-readable aid.
+3. Read the [role index](https://github.com/ChipIn-one/.github/blob/master/docs/workflow/roles/workflow.md), shared core invariants, and only the role selected for the task.
 4. On that record's `integrationBranch`, read the target repository's `AGENTS.md`, then `.ai/context.md` when declared.
 5. Read relevant local decisions and tasks, then declared `contextDependencies`; block if required context is unavailable.
 <!-- ai-workflow:agents-routing:end -->
