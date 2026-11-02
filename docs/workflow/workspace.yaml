@@ -1,0 +1,36 @@
+schemaVersion: 1
+projects:
+  - id: ChipIn-one/.github
+    repository: ChipIn-one/.github
+    group: products/chipin
+    access: managed
+    status: active
+    integrationBranch: master
+    contextPath: .ai/context.md
+  - id: ChipIn-one/chipin-frontend
+    repository: ChipIn-one/chipin-frontend
+    group: products/chipin
+    access: managed
+    status: active
+    integrationBranch: master
+    contextPath: .ai/context.md
+    contextDependencies:
+      - repository: ChipIn-one/chipin-knowledge-base
+        integrationBranch: master
+        access: read-only
+  - id: ChipIn-one/chipin-backend
+    repository: ChipIn-one/chipin-backend
+    group: products/chipin
+    access: read-only
+    status: active
+    integrationBranch: develop
+    contextDependencies:
+      - repository: ChipIn-one/chipin-knowledge-base
+        integrationBranch: master
+        access: read-only
+  - id: ChipIn-one/chipin-knowledge-base
+    repository: ChipIn-one/chipin-knowledge-base
+    group: products/chipin
+    access: read-only
+    status: active
+    integrationBranch: master

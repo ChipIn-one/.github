@@ -3,6 +3,18 @@
 Approved by the owner on 2026-10-21 (epic [#149](https://github.com/ChipIn-one/.github/issues/149)).
 Owned by `ChipIn-one/.github`; this directory is the first entry point for every ChipIn repository.
 
+## How to read
+
+Follow this order for ChipIn work:
+
+1. Read this README and the organization-owned [FLOW.md](FLOW.md).
+2. Select exactly one repository record from [workspace.yaml](workspace.yaml), using the [project index](projects/index.md) as a human-readable aid.
+3. Read the [role index](roles/workflow.md), shared [core invariants](roles/core.md), and only the role selected for the task.
+4. On that record's `integrationBranch`, read the target repository's `AGENTS.md`, then `.ai/context.md` when declared.
+5. Read relevant local decisions and tasks, then declared `contextDependencies`; unavailable required context blocks work.
+
+Canonical files: [FLOW](FLOW.md), [workspace](workspace.yaml), [project index](projects/index.md), [role index](roles/workflow.md), [core](roles/core.md), [planner](roles/planner.md), [architect](roles/architect.md), [executor](roles/executor.md), [reviewer](roles/reviewer.md), [auditor](roles/auditor.md), [publisher](roles/publisher.md), [model tiers](roles/models.md), [documentation contract](roles/documentation.md), and [context policy](roles/context.md).
+
 | Page | Purpose |
 | --- | --- |
 | this page | the standard: principles, registry, reusable workflows, pins, relationships, conformance, routing |
@@ -202,10 +214,9 @@ A weekly org workflow reports one `conformance-<repo>.json` artifact per registr
 `knowledge-base.md` describe repository-specific differences and link to local rules (added by [#160](https://github.com/ChipIn-one/.github/issues/160)).
 `github-issue-schema.md` and `automation/*.md` stay and link here.
 
-Routing: the managed `ai-workflow:agents-routing` block in each registry repository's `AGENTS.md` will start with a link to this README and then point to the role canon.
-Until [#15](https://github.com/ChipIn-one/.github/issues/15) is done the role canon stays `syllik/ai-workflow`; afterwards its copy lives in `docs/workflow/roles/`.
+Routing: the managed `ai-workflow:agents-routing` block in each registry repository's `AGENTS.md` starts with this README and then follows the organization-owned canon above.
 Backend gets `.ai/context.md` and the routing block; in `workspace.yaml` the backend stays `read-only` for the owner's managed agents, which does not prevent coordinator PRs (olegbal merges them).
-Reading order: this standard → role canon → repository `AGENTS.md` → `.ai/context.md`.
+The workspace records keep the backend `read-only` for target agents; authorized coordination and publication remain separate from that access policy.
 
 ## 8. Onboarding a repository
 
