@@ -1,0 +1,3 @@
+# Org AI workflow canon (.github#250). Code-owner review becomes mandatory only together with the master ruleset change,
+# after agents have their own identity (see PR #251).
+* @syllik @olegbal
