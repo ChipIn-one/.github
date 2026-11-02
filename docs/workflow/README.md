@@ -5,13 +5,7 @@ Owned by `ChipIn-one/.github`; this directory is the first entry point for every
 
 ## How to read
 
-Follow this order for ChipIn work:
-
-1. Read this README and the organization-owned [FLOW.md](FLOW.md).
-2. Select exactly one repository record from [workspace.yaml](workspace.yaml), using the [project index](projects/index.md) as a human-readable aid.
-3. Read the [role index](roles/workflow.md), shared [core invariants](roles/core.md), and only the role selected for the task.
-4. On that record's `integrationBranch`, read the target repository's `AGENTS.md`, then `.ai/context.md` when declared.
-5. Read relevant local decisions and tasks, then declared `contextDependencies`; unavailable required context blocks work.
+AI agents start at [FLOW.md](FLOW.md); it is the entry point and the only place that spells out the reading order, precedence, and role selection. This README is reference material for the standard: read the section a task needs, on demand.
 
 Canonical files: [FLOW](FLOW.md), [workspace](workspace.yaml), [project index](projects/index.md), [role index](roles/workflow.md), [core](roles/core.md), [planner](roles/planner.md), [architect](roles/architect.md), [executor](roles/executor.md), [reviewer](roles/reviewer.md), [auditor](roles/auditor.md), [publisher](roles/publisher.md), [model tiers](roles/models.md), [documentation contract](roles/documentation.md), and [context policy](roles/context.md).
 
@@ -214,9 +208,8 @@ A weekly org workflow reports one `conformance-<repo>.json` artifact per registr
 `knowledge-base.md` describe repository-specific differences and link to local rules (added by [#160](https://github.com/ChipIn-one/.github/issues/160)).
 `github-issue-schema.md` and `automation/*.md` stay and link here.
 
-Routing: the managed `ai-workflow:agents-routing` block in each registry repository's `AGENTS.md` links this README, then follows the organization-owned order: [FLOW.md](FLOW.md), [workspace.yaml](workspace.yaml), [project index](projects/index.md), and the [role index](roles/workflow.md). This is the shared routing template for registry repositories.
-Backend gets `.ai/context.md` and the routing block; in `workspace.yaml` the backend stays `read-only` for the owner's managed agents, which does not prevent coordinator PRs (olegbal merges them).
-The workspace records keep the backend `read-only` for target agents; authorized coordination and publication remain separate from that access policy.
+Routing: the managed `ai-workflow:agents-routing` block in each registry repository's `AGENTS.md` is copied byte-for-byte from this repository's [`AGENTS.md`](../../AGENTS.md) and points agents at [FLOW.md](FLOW.md).
+Every repository in [`workspace.yaml`](workspace.yaml) is `access: managed`, including backend and knowledge base; `read-only` applies only to declared context dependencies. Publication still needs explicit human authorization and only a human merges ([FLOW.md](FLOW.md#roles-and-publication)).
 
 ## 8. Onboarding a repository
 

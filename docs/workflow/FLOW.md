@@ -1,27 +1,43 @@
 # ChipIn canonical workflow
 
-## Authority and reading order
+This file is the entry point for every ChipIn AI agent. The [workflow standard README](README.md), the [role index](roles/workflow.md), and the [project index](projects/index.md) are reference material: read them on demand, not as part of the mandatory path.
 
-The organization-owned workflow canon is authoritative for shared routing. Follow this order:
+## Reading order
 
-1. Read the organization workflow [README](README.md) and this `FLOW.md`.
-2. Select exactly one repository record from [`workspace.yaml`](workspace.yaml), using the human-readable [project index](projects/index.md) as an aid. Never discover projects by scanning repositories.
-3. Read the [role index](roles/workflow.md), the shared [core invariants](roles/core.md), and only the role selected for the task.
+1. Read this `FLOW.md`.
+2. Select exactly one repository record from [`workspace.yaml`](workspace.yaml). Never discover projects by scanning repositories.
+3. Read the shared [core invariants](roles/core.md) (`roles/core.md`) and only the role file selected in [Roles and publication](#roles-and-publication).
 4. On that record's `integrationBranch`, read the target repository's `AGENTS.md`, then `.ai/context.md` when the record declares it.
-5. Read only relevant local decisions, task files, and declared `contextDependencies`. Treat dependencies as read-only; unavailable required context blocks work.
+5. Read only relevant local decisions and tasks, then the declared `contextDependencies` the task needs, on their own integration branches.
 
 Legacy/pre-canon contexts are migration-only and never authoritative; this organization-owned canon is the source of truth for shared routing.
 
-Repository ownership, integration branches, access, and context dependencies come from the selected record. Active `managed` records may receive normal work. `read-only` records are context sources only. Product behavior, repository engineering rules, build, deployment, and completion policy remain in their owning repositories and the organization workflow documentation.
+## Precedence and availability
 
-## ChipIn Issue admission
+- The canon wins for roles, gates and routing.
+- The repository's own docs win for product, engineering, build and deploy rules.
+- On a real conflict between the two, stop and report it; do not pick a side silently.
+- If the canon cannot be read, stop: fail closed. This covers this file, `workspace.yaml`, `roles/core.md`, and the selected role. Do not fall back to local copies, caches, or legacy contexts. Unavailable required context blocks work in the same way.
 
-For an Issue-backed task in a registered repository whose admission capability is enabled, require a fresh, read-only `INTAKE_COMPLETE` result for the exact Issue and current revision before executable planning, execution, publication, or review. Use `automation/issue-admission-preflight.mjs --issue ChipIn-one/<repository>#<number>` from the `.github` checkout; knowledge-base checks require an explicit `--owner`. Refresh admission at each controlled boundary. Missing or stale Organization Issue Fields, Project #5 membership, permissions, owner, or revision blocks work; do not repair metadata as an Executor.
+## Repository access
 
-`automation/issue-intake.mjs` is the canonical metadata writer. See [`automation/issue-intake.md`](../../automation/issue-intake.md) for the intake and read-back contract. Issue content specifies the task, structured Organization Issue Fields carry metadata, and Project #5 Status is workflow state rather than execution authority. A raw Issue URL, queued request, PR, or Project Status is not admission or approval.
+Repository ownership, integration branches, and context dependencies come from the selected record. Every record is `access: managed` and may receive approved work. `read-only` is a property of `contextDependencies` entries only: a dependency is read for context and never written as part of the task. `ChipIn-one/.github` is a declared dependency of the other repositories because it holds the Issue admission tooling and this canon.
 
-## Role and publication boundaries
+## Issue admission
 
-Roles are provider-independent. Planner scopes, Architect handles triggered risk, Executor implements and validates, Reviewer independently reviews a pinned diff, and Auditor evaluates evidence. Trusted Publisher is a separate capability; role names do not grant it. Executors do not review or publish their own work. Review requires the repository's required checks to be green for the current head. Only a human merges.
+Issue admission (`required` / `advisory` / `off` from `workflow-registry.yaml`) is defined once in [core invariants](roles/core.md#issue-admission).
 
-Human approval, Issue admission, and required context are independent gates. Missing approval or required context blocks the relevant work. Keep repository-specific decisions in the target repository and do not broaden the selected task's scope.
+## Roles and publication
+
+| Task type | Role | Capability tier | Publication authorized by |
+| --- | --- | --- | --- |
+| No role assigned, triage, scoping, acceptance | [Planner](roles/planner.md) (read-only) | `standard`; `deep` when orchestrating | not applicable |
+| New interface, architecture, security, or release risk | [Architect](roles/architect.md) (read-only) | `deep` | not applicable |
+| Implement and validate an approved task | [Executor](roles/executor.md) | `standard` | human, naming the Trusted Publisher |
+| Review a pinned current-head diff | [Reviewer](roles/reviewer.md) (read-only) | `standard`; `deep` for high risk | not applicable |
+| Policy, process, or evidence audit | [Auditor](roles/auditor.md) (read-only) | `standard` | not applicable |
+| Commit, push, open or update a PR | [Trusted Publisher](roles/publisher.md) | `standard` | human, explicitly |
+
+Tiers are defined in [model tiers](roles/models.md); `fast` is only for search, reading, and summarizing evidence. If no role is assigned, default to Planner, read-only (fail closed). Publication (commit, push, PR) requires explicit human authorization naming the Trusted Publisher; a role or model name never grants it. Executors do not review or publish their own work. Review requires the repository's required checks to be green for the current head. Only a human merges.
+
+Human approval, Issue admission, and required context are independent gates. Keep repository-specific decisions in the target repository and do not broaden the selected task's scope.

@@ -269,7 +269,7 @@ export function checkRouting(profile, agents, context) {
   if (agents === null || !/ai-workflow:agents-routing:start/.test(agents)) {
     findings.push(finding('ROUTING_BLOCK_MISSING', 'drift', `AGENTS.md on ${profile.branches.integration} has no ai-workflow:agents-routing block.`, 'Add the managed routing block (docs/workflow/onboarding.md step 5).'));
   }
-  if (context === null) findings.push(finding('AI_CONTEXT_MISSING', 'drift', `.ai/context.md is missing on ${profile.branches.integration}.`, 'Add .ai/context.md from templates/ai-context.md.'));
+  if (context === null) findings.push(finding('AI_CONTEXT_MISSING', 'drift', `.ai/context.md is missing on ${profile.branches.integration}.`, 'Add .ai/context.md (docs/workflow/onboarding.md step 5).'));
   return findings;
 }
 
