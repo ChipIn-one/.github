@@ -585,9 +585,9 @@ export async function applyRelease(store, plan) {
 
   let release = await store.readRelease(plan.tag);
   if (!release) {
-    // "Latest" only for the highest semver among the repository's version tags (the new tag is already read back)
-    const highest = sortedVersionTags(await store.listVersionTags(plan.tagPrefix), plan.tagPrefix)[0] ?? null;
-    const latest = !highest || highest.name === plan.tag;
+    // "Latest" unless a higher version tag exists (compared by version, so a listing that lags behind the new tag still works)
+    const tags = sortedVersionTags(await store.listVersionTags(plan.tagPrefix), plan.tagPrefix);
+    const latest = !tags.some((tag) => compareSemVer(tag.version, plan.version) > 0);
     await store.createRelease({ tag: plan.tag, sha: plan.sha, body: formatIncludedIssuesBlock(plan.includedPullRequests), latest });
     release = await store.readRelease(plan.tag);
     if (!release || release.tagName !== plan.tag || release.draft) {

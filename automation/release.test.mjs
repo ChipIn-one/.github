@@ -370,6 +370,15 @@ test("apply: a Release backfilled for a lower version is not marked Latest", asy
     "v1.0.10 outranks v1.0.8 by semver, not by creation order");
 });
 
+test("apply: Latest is decided by version even when the tag listing lags behind the new tag", async () => {
+  const store = fakeStore(frontendHistory());
+  const plan = await planRelease(store, { repository: FE, profile: feProfile, ref: "main" });
+  const listVersionTags = store.listVersionTags.bind(store);
+  store.listVersionTags = async (prefix) => (await listVersionTags(prefix)).filter((tag) => tag.name !== plan.tag);
+  await applyRelease(store, plan);
+  assert.deepEqual(store.writes.map((write) => [write.kind, write.tag, write.latest]), [["tag", "v1.0.9", undefined], ["release", "v1.0.9", true]]);
+});
+
 test("apply: creates the tag on the exact commit, reads it back, then the Release with the Included Issues block", async () => {
   const store = fakeStore(frontendHistory());
   const plan = await planRelease(store, { repository: FE, profile: feProfile, ref: "main" });
