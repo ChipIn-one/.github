@@ -18,7 +18,7 @@ Validate locally with `node automation/registry.mjs --validate`; `automation-tes
 
 ## Conformance audit
 
-`conformance.mjs audit` compares every `workflow-registry.yaml` repository (integration branch) with its record: callers, pins against `ChipIn-one/.github` tags, Dependabot `github-actions`, routing block and `.ai/context.md`, protection and required checks, pull requests in Project #5, closed Issues with open PRs, merges past a red required check. `upsert` keeps one drift Issue per repository. Run weekly by `.github/workflows/conformance-audit.yml`; see [docs/workflow/conformance.md](../docs/workflow/conformance.md).
+`conformance.mjs audit` compares every `workflow-registry.yaml` repository (integration branch) with its record: callers, pins against `ChipIn-one/.github` tags, Dependabot `github-actions`, routing block and the `contextPath` file when the workspace record declares one, protection and required checks, pull requests in Project #5, closed Issues with open PRs, merges past a red required check. `upsert` keeps one drift Issue per repository. Run weekly by `.github/workflows/conformance-audit.yml`; see [docs/workflow/conformance.md](../docs/workflow/conformance.md).
 
 ## Release
 

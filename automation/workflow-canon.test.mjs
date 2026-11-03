@@ -126,7 +126,7 @@ test('every workspace record is managed; read-only exists only on context depend
   for (const record of workspace().projects) {
     assert.equal(record.access, 'managed', `${record.id} must be managed`);
     assert.equal(record.status, 'active');
-    assert.equal(record.contextPath, '.ai/context.md');
+    if ('contextPath' in record) assert.equal(record.contextPath, '.ai/context.md', `${record.id} contextPath is optional; when set it is .ai/context.md`);
     for (const dependency of record.contextDependencies ?? []) {
       assert.equal(dependency.access, 'read-only', `${record.id} dependency ${dependency.repository} must be read-only`);
     }
@@ -165,9 +165,10 @@ test('project index is for humans and its access, branch and dependency columns 
     assert.equal(cells[1], record.access, `${record.id} access column`);
     assert.equal(cells[2], record.status, `${record.id} status column`);
     assert.equal(cells[3], `\`${record.integrationBranch}\``, `${record.id} branch column`);
+    const contextFile = record.contextPath ?? 'AGENTS.md';
     assert.ok(
-      cells[4].includes(`[.ai/context.md](https://github.com/${record.id}/blob/${record.integrationBranch}/.ai/context.md)`),
-      `${record.id} must link its .ai/context.md on ${record.integrationBranch}`,
+      cells[4].includes(`[${contextFile}](https://github.com/${record.id}/blob/${record.integrationBranch}/${contextFile})`),
+      `${record.id} must link its ${contextFile} on ${record.integrationBranch}`,
     );
     const dependencies = record.contextDependencies ?? [];
     if (dependencies.length === 0) assert.equal(cells[5], '—', `${record.id} has no dependencies`);

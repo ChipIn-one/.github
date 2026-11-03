@@ -1,7 +1,8 @@
 schemaVersion: 1
 # Normative ChipIn workspace records. Every record is `access: managed` (it may receive approved work);
 # `read-only` is a property of `contextDependencies` entries only. Repository names and integration
-# branches must match workflow-registry.yaml (checked by automation/workflow-canon.test.mjs).
+# branches must match workflow-registry.yaml (checked by automation/workflow-canon.test.mjs). `contextPath` is optional:
+# without it AGENTS.md is the repository's only context file (.github#252).
 projects:
   - id: ChipIn-one/.github
     repository: ChipIn-one/.github
@@ -16,7 +17,6 @@ projects:
     access: managed
     status: active
     integrationBranch: master
-    contextPath: .ai/context.md
     contextDependencies:
       - repository: ChipIn-one/chipin-knowledge-base
         integrationBranch: master
