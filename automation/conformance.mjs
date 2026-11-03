@@ -3,11 +3,12 @@
 // `audit` is read-only. `upsert` is the only step that writes: one drift Issue per non-conformant
 // repository in ChipIn-one/.github, closed as completed when drift reaches zero. An unreadable
 // repository never opens, updates or closes anything.
+import { readFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import process from 'node:process';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { GitHubClient, projectReadBudget, readProjectItemsPage } from './github-metadata.mjs';
-import { getRepositoryProfile, loadRegistry } from './registry.mjs';
+import { getRepositoryProfile, loadRegistry, parseYamlSubset } from './registry.mjs';
 
 export const CONFORMANCE_CONTRACT = 'chipin-conformance/v1';
 export const ISSUE_MARKER = 'Conformance: ';
@@ -16,6 +17,15 @@ const SHARED = 'ChipIn-one/.github';
 const PERIOD_DAYS = 14;
 const TAG = /^v(\d+)\.(\d+)\.(\d+)$/;
 const SHA = /^[0-9a-f]{40}$/;
+
+export const WORKSPACE_PATH = fileURLToPath(new URL('../docs/workflow/workspace.yaml', import.meta.url));
+
+// Declared context file per repository (docs/workflow/workspace.yaml `contextPath`, optional): repository -> path.
+// A record without contextPath has AGENTS.md as its only context file.
+export function loadContextPaths({ path = WORKSPACE_PATH, text = null } = {}) {
+  const document = parseYamlSubset(text ?? readFileSync(path, 'utf8'));
+  return new Map((document.projects ?? []).filter(record => record.contextPath).map(record => [record.repository, record.contextPath]));
+}
 
 export const finding = (check, severity, message, remediation) => ({ check, severity, message, remediation });
 
@@ -293,7 +303,8 @@ export function extractRoutingBlock(text) {
 
 // A drift detector, not a security control: text outside the block is guarded only by review in the consumer repository.
 // canon: extractRoutingBlock() of .github AGENTS.md on its integration branch (audit() makes a failed read UNREADABLE).
-export function checkRouting(profile, agents, context, canon) {
+// contextPath: the workspace record's optional contextPath; without it `context` is not read and not required.
+export function checkRouting(profile, agents, context, canon, contextPath = null) {
   if (profile.capabilities.agentRouting !== 'required') return [];
   const findings = [];
   const own = extractRoutingBlock(agents);
@@ -313,11 +324,12 @@ export function checkRouting(profile, agents, context, canon) {
   if (foreign.length) {
     findings.push(finding('ROUTING_BLOCK_FOREIGN_URL', 'drift', `The ai-workflow:agents-routing block in AGENTS.md on ${branch} links outside https://github.com/ChipIn-one and https://raw.githubusercontent.com/ChipIn-one: ${foreign.slice(0, 3).join(', ')}${foreign.length > 3 ? ', …' : ''}.`, 'Link only ChipIn-one on github.com or raw.githubusercontent.com over https.'));
   }
-  const hidden = [['AGENTS.md', agents], ['.ai/context.md', context]].filter(([, text]) => text != null && HIDDEN.test(String(text))).map(([path]) => path);
+  const files = [['AGENTS.md', agents], ...(contextPath ? [[contextPath, context]] : [])];
+  const hidden = files.filter(([, text]) => text != null && HIDDEN.test(String(text))).map(([path]) => path);
   if (hidden.length) {
     findings.push(finding('ROUTING_HIDDEN_CHARACTERS', 'drift', `Zero-width or bidi control characters on ${branch} in ${hidden.join(', ')}.`, 'Remove them (U+061C, U+200B–U+200F, U+202A–U+202E, U+2060–U+2064, U+2066–U+2069, U+FEFF).'));
   }
-  const personal = [['AGENTS.md', agents], ['.ai/context.md', context]]
+  const personal = files
     .map(([path, text]) => [path, text == null ? 0 : (String(text).match(PERSONAL_CANON) ?? []).length]).filter(([, n]) => n);
   if (personal.length) {
     findings.push(finding('ROUTING_PERSONAL_CANON', 'drift', `Links to the retired personal canon (syllik) on ${branch}: ${personal.map(([path, n]) => `${path}: ${n}`).join(', ')}.`, 'Remove them; the canon is ChipIn-one/.github docs/workflow (#15).'));
@@ -325,7 +337,7 @@ export function checkRouting(profile, agents, context, canon) {
   if (canon?.state !== 'ok') {
     findings.push(finding('ROUTING_CANON_UNREADABLE', 'note', `ChipIn-one/.github AGENTS.md has ${canon ? `a ${canon.state} routing block` : 'not been read'}, so the block could not be compared.`, 'Fix the block in ChipIn-one/.github AGENTS.md (exactly one, both markers).'));
   }
-  if (context === null) findings.push(finding('AI_CONTEXT_MISSING', 'drift', `.ai/context.md is missing on ${branch}.`, 'Add .ai/context.md (docs/workflow/onboarding.md step 5).'));
+  if (contextPath && context == null) findings.push(finding('AI_CONTEXT_MISSING', 'drift', `${contextPath} is missing on ${branch}.`, `Add ${contextPath} or drop contextPath from the workspace.yaml record (docs/workflow/onboarding.md step 5).`));
   return findings;
 }
 
@@ -396,6 +408,8 @@ export async function auditRepository(profile, source, shared) {
   const result = { repository: profile.repository, kind: profile.kind, status: 'CONFORMANT', findings: [], notes: [], checkedAt: new Date().toISOString() };
   try {
     const ref = profile.branches.integration;
+    const routing = profile.capabilities.agentRouting === 'required';
+    const contextPath = shared.contextPaths?.get(profile.repository) ?? null;
     const workflows = await source.workflowFiles(profile.repository, ref);
     const pins = extractPins(workflows);
     const findings = [
@@ -404,7 +418,7 @@ export async function auditRepository(profile, source, shared) {
       ...checkCompletionSweep(profile, shared.workflows),
       ...await checkPins(profile, pins, source, shared.tags),
       ...checkDependabot(profile, profile.capabilities.dependabot === 'required' ? await source.repoFile(profile.repository, '.github/dependabot.yml', ref) ?? await source.repoFile(profile.repository, '.github/dependabot.yaml', ref) : null),
-      ...checkRouting(profile, profile.capabilities.agentRouting === 'required' ? await source.repoFile(profile.repository, 'AGENTS.md', ref) : null, profile.capabilities.agentRouting === 'required' ? await source.repoFile(profile.repository, '.ai/context.md', ref) : null, shared.routingCanon),
+      ...checkRouting(profile, routing ? await source.repoFile(profile.repository, 'AGENTS.md', ref) : null, routing && contextPath ? await source.repoFile(profile.repository, contextPath, ref) : null, shared.routingCanon, contextPath),
       ...checkProtection(profile, await source.branchRules(profile.repository, ref), await source.classicProtection(profile.repository, ref)),
       ...checkProjectPullRequests(profile, shared.projectPullRequests),
       ...checkIntake(profile, await source.openIssues(profile.repository)),
@@ -437,12 +451,12 @@ export async function auditRepository(profile, source, shared) {
   return result;
 }
 
-export async function audit({ source, registry = loadRegistry(), repositories = null }) {
+export async function audit({ source, registry = loadRegistry(), repositories = null, contextPaths = loadContextPaths() }) {
   const profiles = registry.repositories.filter(p => !repositories || repositories.includes(p.repository));
   const report = { schemaVersion: 1, contract: CONFORMANCE_CONTRACT, generatedAt: new Date().toISOString(), standardVersion: registry.standardVersion, repositories: [], unregistered: [], summary: {} };
   let shared;
   try {
-    shared = { tags: sortTags(await source.tags()), projectPullRequests: await source.projectPullRequests(), workflows: [], workflowsError: null };
+    shared = { tags: sortTags(await source.tags()), projectPullRequests: await source.projectPullRequests(), workflows: [], workflowsError: null, contextPaths };
   } catch (error) {
     report.repositories = profiles.map(p => ({ repository: p.repository, kind: p.kind, status: 'UNREADABLE', findings: [], notes: [], error: `shared read failed: ${String(error.message).slice(0, 200)}` }));
     report.summary = summarize(report);

@@ -38,7 +38,7 @@ repositories:
       completion: automatic     # automatic | manual; engine on since #217 (Promote evidence checked in cutover step 7)
       milestones: enabled
       dependabot: required
-      agentRouting: required    # AGENTS.md routing block + .ai/context.md
+      agentRouting: required    # AGENTS.md routing block; + the file named by contextPath in docs/workflow/workspace.yaml, when declared (optional)
   - repository: ChipIn-one/chipin-backend
     kind: code
     visibility: private
