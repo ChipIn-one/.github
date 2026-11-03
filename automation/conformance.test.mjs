@@ -3,9 +3,9 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
-  GitHubConformanceSource, GitHubConformanceStore, audit, checkCallers, checkCompletionCaller, checkCompletionSweep, checkDependabot, checkIntake, checkMergedPastRed,
+  GitHubConformanceSource, GitHubConformanceStore, RELEASE_TAGS_CHECKED, audit, checkCallers, checkRelease, checkCompletionCaller, checkCompletionSweep, checkDependabot, checkIntake, checkMergedPastRed,
   checkPins, checkProjectPullRequests, checkProtection, checkRouting, extractPins, extractRoutingBlock, loadContextPaths, main, parseMarker, renderIssue,
-  completionSweepCovers, renderSummary, sortTags, touchesCapability, upsertIssues, workflowTriggers,
+  completionSweepCovers, readReleaseFacts, releaseBranchOf, renderSummary, sortTags, touchesCapability, upsertIssues, workflowTriggers,
 } from './conformance.mjs';
 import { getRepositoryProfile, loadRegistry, validateRegistry } from './registry.mjs';
 
@@ -18,6 +18,7 @@ const V1 = 'a'.repeat(40);
 const V11 = 'b'.repeat(40);
 const profile = name => getRepositoryProfile(name);
 const uses = (name, sha, comment = '') => `        uses: ChipIn-one/.github/automation/${name}@${sha}${comment ? ` # ${comment}` : ''}`;
+const releaseUses = (sha, comment = '') => `    uses: ChipIn-one/.github/.github/workflows/release.yml@${sha}${comment ? ` # ${comment}` : ''}`;
 const workflow = (...lines) => ({ path: '.github/workflows/x.yml', text: lines.join('\n') });
 const checks = findings => findings.map(f => f.check);
 const ROUTING_START = '<!-- ai-workflow:agents-routing:start -->';
@@ -421,10 +422,10 @@ function fakeSource(over = {}) {
     [`${FE}:.github/dependabot.yml`]: "updates:\n  - package-ecosystem: 'github-actions'\n    target-branch: 'master'\n",
   };
   const wf = {
-    [FE]: [workflow(uses('issue-admission-action', V1, 'v1.0.0'), uses('development-link-action', V1, 'v1.0.0'), uses('pr-metadata-action', V1, 'v1.0.0'), uses('create-milestone-action', V1, 'v1.0.0'), uses('frontend-production-completion-action', V1, 'v1.0.0'))],
+    [FE]: [workflow(uses('issue-admission-action', V1, 'v1.0.0'), uses('development-link-action', V1, 'v1.0.0'), uses('pr-metadata-action', V1, 'v1.0.0'), uses('create-milestone-action', V1, 'v1.0.0'), uses('frontend-production-completion-action', V1, 'v1.0.0'), releaseUses(V1, 'v1.0.0'))],
     [BE]: [workflow(uses('issue-admission-action', 'f'.repeat(40)), uses('development-link-action', 'f'.repeat(40)), uses('create-milestone-action', 'f'.repeat(40)))],
     [KB]: [workflow(uses('development-link-action', 'f'.repeat(40)))],
-    [META]: [ORG_SWEEP],
+    [META]: [ORG_SWEEP, { path: '.github/workflows/release-on-master.yml', text: releaseUses(V1, 'v1.0.0') }],
     [NOTIF]: [],
   };
   const na = { state: 'unavailable' };
@@ -434,6 +435,10 @@ function fakeSource(over = {}) {
     workflowFiles: async repo => wf[repo],
     repoFile: async (repo, path) => files[`${repo}:${path}`] ?? null,
     compare: async () => ({ status: 'diverged', files: [] }),
+    // release flow: FE and .github are tagged with a Release on the branch history; BE has no tag yet
+    versionTags: async repo => (repo === BE ? [] : [{ name: 'v1.0.0', sha: V1 }]),
+    branchStatus: async () => 'ahead',
+    release: async () => ({ draft: false }),
     branchRules: async repo => (repo === META ? { state: 'ok', rules: ['pull_request', 'required_status_checks'], requiredChecks: ['evaluate-fixtures'] } : repo === FE ? { state: 'ok', rules: [], requiredChecks: [] } : na),
     classicProtection: async repo => (repo === FE ? { state: 'ok', requiredChecks: ['frontend-ci'] } : repo === META ? { state: 'unprotected' } : na),
     openIssues: async () => [],
@@ -499,6 +504,10 @@ test('audit: .github and FE conform; BE and KB show the expected drift; unregist
   assert.ok(checks(by(BE).findings).includes('ROUTING_BLOCK_MISSING'));
   assert.ok(checks(by(BE).findings).includes('CALLER_MISSING'));
   assert.ok(checks(by(BE).findings).includes('PIN_STALE'));
+  assert.ok(checks(by(BE).findings).includes('RELEASE_CALLER_MISSING'), 'deploy-tag without a release caller');
+  assert.ok(checks(by(BE).notes).includes('RELEASE_NO_TAGS'));
+  assert.deepEqual(by(KB).notes.map(n => n.check).filter(c => c.startsWith('RELEASE_')), ['RELEASE_UNVERSIONED']);
+  assert.ok(by(NOTIF).notes.some(n => n.check === 'RELEASE_UNVERSIONED'), 'none is a note, never drift');
   assert.equal(by(KB).status, 'DRIFT');
   assert.ok(checks(by(KB).findings).includes('DEPENDABOT_MISSING'));
   assert.deepEqual(report.unregistered, ['ChipIn-one/chipin-backend-python']);
@@ -537,6 +546,111 @@ test('audit: any read failure makes the repository UNREADABLE with no findings',
   assert.match(report.repositories[0].error, /403/);
   const shared = await audit({ source: fakeSource({ tags: async () => { throw new Error('boom'); } }) });
   assert.equal(shared.summary.unreadable, 5);
+});
+
+// --- release flow (.github#174) ---------------------------------------------------------------------------
+const releaseFacts = (tags, { status = 'ahead', released = tags.map(t => t.name) } = {}) => ({
+  tags, latestStatus: tags.length ? status : null, releases: new Map(tags.slice(0, RELEASE_TAGS_CHECKED).map(t => [t.name, released.includes(t.name) ? { draft: false } : null])),
+});
+const caller = extractPins([{ path: '.github/workflows/release-on-master.yml', text: releaseUses(V1, 'v1.0.0') }]);
+
+test('release: none is reported as intentionally unversioned, never drift, and reads nothing', async () => {
+  for (const name of [KB, NOTIF]) {
+    const result = checkRelease(profile(name), [], releaseFacts([]));
+    assert.deepEqual(result.map(f => [f.check, f.severity]), [['RELEASE_UNVERSIONED', 'note']]);
+  }
+  const unread = { versionTags: async () => { throw new Error('unused'); } };
+  assert.deepEqual((await readReleaseFacts(profile(KB), unread)).tags, []);
+});
+
+test('release: a strategy other than none needs a caller of the reusable release workflow (.github, FE, BE)', () => {
+  const tagged = releaseFacts([{ name: 'v1.9.2', sha: V1 }]);
+  assert.deepEqual(checkRelease(profile(META), caller, tagged), [], '.github: release-on-master.yml calls release.yml');
+  for (const name of [META, FE, BE]) {
+    const missing = checkRelease(profile(name), [], tagged);
+    assert.deepEqual(missing.map(f => [f.check, f.severity]), [['RELEASE_CALLER_MISSING', 'drift']], name);
+  }
+  assert.match(checkRelease(profile(META), [], tagged)[0].remediation, /caller-release-integration\.yml/);
+  assert.match(checkRelease(profile(BE), [], tagged)[0].remediation, /after the successful production deploy/);
+  // a shared action or another reusable workflow is not a release caller
+  const other = extractPins([workflow(uses('completion-action', V1, 'v1.0.0'), `    uses: ChipIn-one/.github/.github/workflows/pr-gate.yml@${V1} # v1.0.0`)]);
+  assert.deepEqual(checks(checkRelease(profile(FE), other, tagged)), ['RELEASE_CALLER_MISSING']);
+  assert.deepEqual(checkRelease(profile(FE), caller, tagged), []);
+});
+
+test('release: no tags is a note; the latest tag must be on the release branch history', () => {
+  assert.deepEqual(checkRelease(profile(BE), caller, releaseFacts([])).map(f => [f.check, f.severity]), [['RELEASE_NO_TAGS', 'note']]);
+  const tags = [{ name: 'v1.0.8', sha: V11 }, { name: 'v1.0.7', sha: V1 }];
+  assert.deepEqual(checkRelease(profile(FE), caller, releaseFacts(tags, { status: 'identical' })), []);
+  for (const status of ['diverged', 'behind']) {
+    const off = checkRelease(profile(FE), caller, releaseFacts(tags, { status }));
+    assert.deepEqual(off.map(f => [f.check, f.severity]), [['RELEASE_TAG_OFF_BRANCH', 'drift']]);
+    assert.match(off[0].message, new RegExp(`v1\\.0\\.8 \\(bbbbbbb\\) is not on the history of master \\(compare status ${status}\\)`));
+  }
+  assert.equal(releaseBranchOf(profile(BE)), 'develop');
+  assert.equal(releaseBranchOf(legacyFrontend()), 'dev', 'deploy-tag and integration-merge use the integration branch');
+  assert.equal(releaseBranchOf({ ...legacyFrontend(), release: { strategy: 'semver-by-impact', trigger: 'promotion-merge', tagPrefix: 'v' } }), 'main');
+});
+
+test('release: each of the newest tags needs a published GitHub Release', () => {
+  const tags = ['v1.0.6', 'v1.0.5', 'v1.0.4', 'v1.0.3', 'v1.0.2', 'v1.0.1'].map(name => ({ name, sha: V1 }));
+  const facts = releaseFacts(tags, { released: ['v1.0.6', 'v1.0.4', 'v1.0.3'] });
+  facts.releases.set('v1.0.3', { draft: true });
+  const missing = checkRelease(profile(META), caller, facts);
+  assert.deepEqual(checks(missing), ['RELEASE_MISSING']);
+  assert.match(missing[0].message, /: v1\.0\.5, v1\.0\.3, v1\.0\.2\.$/, 'a draft is not published; v1.0.1 is outside the newest five');
+});
+
+test('release facts: tags sorted by version with the registry prefix, one compare, Releases of the newest tags only', async () => {
+  const reads = [];
+  const names = ['v1.10.0', 'v1.9.0', 'v1.2.0', 'v1.1.0', 'v1.0.1', 'v1.0.0', 'vnext'];
+  const source = {
+    versionTags: async (repo, prefix) => { reads.push(['tags', repo, prefix]); return names.map((name, i) => ({ name, sha: String(i).repeat(40) })).reverse(); },
+    branchStatus: async (repo, sha, branch) => { reads.push(['compare', repo, sha.slice(0, 1), branch]); return 'ahead'; },
+    release: async (repo, tag) => { reads.push(['release', tag]); return { draft: false }; },
+  };
+  const facts = await readReleaseFacts(profile(META), source);
+  assert.deepEqual(facts.tags.map(t => t.name), names.slice(0, 6));
+  assert.deepEqual(reads.slice(0, 2), [['tags', META, 'v'], ['compare', META, '0', 'master']]);
+  assert.deepEqual(reads.slice(2).map(r => r[1]), names.slice(0, RELEASE_TAGS_CHECKED));
+});
+
+test('audit: release drift per repository from the registry release block', async () => {
+  const base = fakeSource();
+  const report = await audit({ source: fakeSource({
+    workflowFiles: async repo => (repo === FE ? [workflow(uses('issue-admission-action', V1, 'v1.0.0'), uses('development-link-action', V1, 'v1.0.0'), uses('pr-metadata-action', V1, 'v1.0.0'), uses('create-milestone-action', V1, 'v1.0.0'))] : base.workflowFiles(repo)),
+    branchStatus: async repo => (repo === FE ? 'diverged' : 'ahead'),
+    release: async (repo, tag) => (repo === META ? null : { draft: false, tag }),
+  }) });
+  const by = name => report.repositories.find(r => r.repository === name);
+  assert.deepEqual(checks(by(FE).findings), ['RELEASE_CALLER_MISSING', 'RELEASE_TAG_OFF_BRANCH']);
+  assert.deepEqual(checks(by(META).findings), ['RELEASE_MISSING']);
+  const failing = await audit({ source: fakeSource({ release: async () => { throw new Error('GET releases -> 502'); } }), repositories: [FE, KB] });
+  assert.equal(failing.repositories[0].status, 'UNREADABLE', 'a failed release read is never silent conformance');
+  assert.notEqual(failing.repositories[1].status, 'UNREADABLE', 'none reads no release state');
+});
+
+test('GitHubConformanceSource release reads: tags and Releases through the release engine store, compare status only', async () => {
+  const calls = [];
+  const client = {
+    request: async (path, options) => {
+      calls.push(path);
+      if (path.startsWith('/repos/R/x/compare/')) return { status: 'ahead', commits: [] };
+      if (path === '/repos/R/x/releases/tags/v1.0.0') return { id: 1, tag_name: 'v1.0.0', draft: false };
+      if (path === '/repos/R/x/git/tags/' + V11) return { object: { type: 'commit', sha: V1 } };
+      if (options?.allow404) return null;
+      throw new Error(`unexpected ${path}`);
+    },
+    listAll: async path => (calls.push(path), [{ ref: 'refs/tags/v1.0.0', object: { type: 'commit', sha: V1 } }, { ref: 'refs/tags/v1.0.1', object: { type: 'tag', sha: V11 } }]),
+  };
+  const src = new GitHubConformanceSource(client);
+  assert.deepEqual(await src.versionTags('R/x', 'v'), [{ name: 'v1.0.0', sha: V1 }, { name: 'v1.0.1', sha: V1 }], 'annotated tags are dereferenced');
+  assert.equal(await src.branchStatus('R/x', V1, 'master'), 'ahead');
+  assert.equal((await src.release('R/x', 'v1.0.0')).draft, false);
+  assert.equal(await src.release('R/x', 'v9.9.9'), null);
+  assert.ok(calls.includes('/repos/R/x/git/matching-refs/tags/v'));
+  assert.ok(calls.includes(`/repos/R/x/compare/${V1}...master?per_page=1`));
+  await assert.rejects(new GitHubConformanceSource({ request: async () => ({}) }).branchStatus('R/x', V1, 'master'), /unreadable/);
 });
 
 // --- drift Issues ------------------------------------------------------------------------------------------
