@@ -94,8 +94,8 @@ function fakeStore({ graph, branches = {}, tags = {}, pulls = [], releases = {} 
       tags[tag] = commit;
       return { sha: commit };
     },
-    async createRelease({ tag, sha: commit, body }) {
-      writes.push({ kind: "release", tag, sha: commit, body });
+    async createRelease({ tag, sha: commit, body, latest }) {
+      writes.push({ kind: "release", tag, sha: commit, body, latest });
       releases[tag] = { id: writes.length, url: "https://github.com/x/y/releases/tag/" + tag, tagName: tag, draft: false };
       return releases[tag];
     },
@@ -355,6 +355,28 @@ test("plan: idempotency — an already tagged commit is a no-op, a tag on anothe
   assert.deepEqual(completed.applied, { tag: false, release: true });
   assert.deepEqual(store.writes.map((write) => write.kind), ["release"]);
   assert.match(store.writes[0].body, /- ChipIn-one\/chipin-frontend#110 \(#10\)/u);
+  assert.equal(store.writes[0].latest, true, "the highest version tag becomes Latest");
+});
+
+test("apply: a Release backfilled for a lower version is not marked Latest", async () => {
+  const backfill = frontendHistory();
+  backfill.tags = { "v1.0.8": sha("0"), "v1.0.10": sha("3") };
+  const store = fakeStore(backfill);
+  const plan = await planRelease(store, { repository: FE, profile: feProfile, ref: sha("0") });
+  assert.equal(plan.outcome, "RELEASE_MISSING");
+  const result = await applyRelease(store, plan);
+  assert.equal(result.outcome, "RELEASED");
+  assert.deepEqual(store.writes.map((write) => [write.kind, write.tag, write.latest]), [["release", "v1.0.8", false]],
+    "v1.0.10 outranks v1.0.8 by semver, not by creation order");
+});
+
+test("apply: Latest is decided by version even when the tag listing lags behind the new tag", async () => {
+  const store = fakeStore(frontendHistory());
+  const plan = await planRelease(store, { repository: FE, profile: feProfile, ref: "main" });
+  const listVersionTags = store.listVersionTags.bind(store);
+  store.listVersionTags = async (prefix) => (await listVersionTags(prefix)).filter((tag) => tag.name !== plan.tag);
+  await applyRelease(store, plan);
+  assert.deepEqual(store.writes.map((write) => [write.kind, write.tag, write.latest]), [["tag", "v1.0.9", undefined], ["release", "v1.0.9", true]]);
 });
 
 test("apply: creates the tag on the exact commit, reads it back, then the Release with the Included Issues block", async () => {
@@ -368,6 +390,7 @@ test("apply: creates the tag on the exact commit, reads it back, then the Releas
     ["tag", "v1.0.9", sha("3")],
     ["release", "v1.0.9", sha("3")],
   ]);
+  assert.equal(store.writes[1].latest, true);
   assert.match(store.writes[1].body, /^## Included Issues\n\n- ChipIn-one\/chipin-frontend#110 \(#10\)\n- ChipIn-one\/chipin-frontend#111 \(#11\)\n$/u);
 
   const rerun = await applyRelease(store, await planRelease(store, { repository: FE, profile: feProfile, ref: "main" }));
@@ -611,6 +634,15 @@ test("GitHub store maps REST endpoints, paginates compare and resolves annotated
         return { status: "ahead", total_commits: 3, commits: [{ sha: sha("3") }] };
       }
       if (path.endsWith("/git/tags/" + sha("f"))) return { object: { type: "commit", sha: sha("0") } };
+      if (path.endsWith("/git/tags/" + sha("e"))) throw new Error("a non-semver ref must not be dereferenced");
+      if (path.endsWith("/git/matching-refs/tags/v")) {
+        assert.doesNotMatch(path, /per_page|page=/u, "matching-refs is one unpaginated request");
+        return [
+          { ref: "refs/tags/v1.0.8", object: { type: "tag", sha: sha("f") } },
+          { ref: "refs/tags/v1.0.7", object: { type: "commit", sha: sha("0") } },
+          { ref: "refs/tags/vendor-x", object: { type: "tag", sha: sha("e") } },
+        ];
+      }
       if (path.endsWith("/git/ref/tags/v1.0.9")) return null;
       if (path.endsWith("/releases/tags/v1.0.9")) return null;
       if (path.endsWith("/git/refs") && options.method === "POST") {
@@ -622,6 +654,7 @@ test("GitHub store maps REST endpoints, paginates compare and resolves annotated
         assert.equal(options.body.tag_name, "v1.0.9");
         assert.equal(options.body.target_commitish, sha("3"));
         assert.equal(options.body.draft, false);
+        assert.equal(options.body.make_latest, options.body.body === "old" ? "false" : "true");
         return { id: 7, html_url: "https://github.com/ChipIn-one/chipin-frontend/releases/tag/v1.0.9", tag_name: "v1.0.9" };
       }
       throw new Error("unexpected request " + path);
@@ -634,12 +667,6 @@ test("GitHub store maps REST endpoints, paginates compare and resolves annotated
     },
     listAll: async (path) => {
       calls.push({ path });
-      if (path.endsWith("/git/matching-refs/tags/v")) {
-        return [
-          { ref: "refs/tags/v1.0.8", object: { type: "tag", sha: sha("f") } },
-          { ref: "refs/tags/v1.0.7", object: { type: "commit", sha: sha("0") } },
-        ];
-      }
       if (path.endsWith("/commits/" + sha("1") + "/pulls")) {
         return [{ number: 10, title: "t", body: "b", html_url: "u", merged_at: "2026-10-01T10:00:00Z", base: { ref: "dev" }, user: { login: "dependabot[bot]" }, head: { ref: "dependabot/npm_and_yarn/dev/x" }, merge_commit_sha: sha("1") }];
       }
@@ -675,7 +702,8 @@ test("GitHub store maps REST endpoints, paginates compare and resolves annotated
   assert.equal(await store.readTagRef("v1.0.9"), null);
   assert.equal(await store.readRelease("v1.0.9"), null);
   assert.deepEqual(await store.createTagRef("v1.0.9", sha("3")), { sha: sha("3") });
-  assert.equal((await store.createRelease({ tag: "v1.0.9", sha: sha("3"), body: "x" })).id, 7);
+  assert.equal((await store.createRelease({ tag: "v1.0.9", sha: sha("3"), body: "x", latest: true })).id, 7);
+  assert.equal((await store.createRelease({ tag: "v1.0.9", sha: sha("3"), body: "old", latest: false })).id, 7);
   assert.throws(() => githubStore(client, "bad"), (error) => error.code === "INVALID_REPOSITORY");
 
   const truncated = githubStore({

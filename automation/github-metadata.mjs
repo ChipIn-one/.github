@@ -89,9 +89,14 @@ export class GitHubClient {
   async listAll(path) {
     const separator = path.includes("?") ? "&" : "?";
     const values = [];
+    let previousFirst = null;
     for (let page = 1; ; page += 1) {
       const batch = await this.request(`${path}${separator}per_page=100&page=${page}`);
       if (!Array.isArray(batch)) throw new Error(`Expected array from ${path}`);
+      // an endpoint that ignores page (e.g. git/matching-refs) repeats the same full page forever
+      const first = batch.length ? JSON.stringify(batch[0]) : null;
+      if (page > 1 && first !== null && first === previousFirst) throw new Error(`${path} ignores pagination: page ${page} repeats page ${page - 1}`);
+      previousFirst = first;
       values.push(...batch);
       if (batch.length < 100) return values;
     }

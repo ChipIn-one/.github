@@ -221,10 +221,15 @@ export function githubStore(client, repository) {
       return commit.sha;
     },
     async listVersionTags(tagPrefix) {
-      const refs = await client.listAll(root + "/git/matching-refs/tags/" + tagPrefix);
+      // matching-refs ignores per_page/page and always returns the full list: one request, never listAll
+      // (a paginated read of 100+ refs would repeat the same page forever).
+      const refs = await client.request(root + "/git/matching-refs/tags/" + tagPrefix);
+      if (!Array.isArray(refs)) throw blocked("UNREADABLE_TAG", "Tag refs with prefix " + tagPrefix + " are unreadable");
       const tags = [];
       for (const ref of refs) {
         const name = String(ref?.ref ?? "").replace(/^refs\/tags\//u, "");
+        // only <tagPrefix>X.Y.Z refs are dereferenced; any other ref under the prefix (vendor-x, vnext) is skipped
+        if (!name.startsWith(tagPrefix) || !SEMVER_PATTERN.test(name.slice(tagPrefix.length))) continue;
         let sha = ref?.object?.sha ?? null;
         if (ref?.object?.type === "tag") {
           const annotated = await client.request(root + "/git/tags/" + sha);
@@ -303,7 +308,7 @@ export function githubStore(client, repository) {
       const created = await client.request(root + "/git/refs", { method: "POST", body: { ref: "refs/tags/" + tag, sha } });
       return { sha: created?.object?.sha ?? null };
     },
-    async createRelease({ tag, sha, body }) {
+    async createRelease({ tag, sha, body, latest }) {
       const created = await client.request(root + "/releases", {
         method: "POST",
         body: {
@@ -314,6 +319,8 @@ export function githubStore(client, repository) {
           draft: false,
           prerelease: false,
           generate_release_notes: true,
+          // explicit, never GitHub's default (the newest created Release): a backfill must not take "Latest"
+          make_latest: latest ? "true" : "false",
         },
       });
       return { id: created?.id ?? null, url: created?.html_url ?? null, tagName: created?.tag_name ?? null };
@@ -578,7 +585,10 @@ export async function applyRelease(store, plan) {
 
   let release = await store.readRelease(plan.tag);
   if (!release) {
-    await store.createRelease({ tag: plan.tag, sha: plan.sha, body: formatIncludedIssuesBlock(plan.includedPullRequests) });
+    // "Latest" unless a higher version tag exists (compared by version, so a listing that lags behind the new tag still works)
+    const tags = sortedVersionTags(await store.listVersionTags(plan.tagPrefix), plan.tagPrefix);
+    const latest = !tags.some((tag) => compareSemVer(tag.version, plan.version) > 0);
+    await store.createRelease({ tag: plan.tag, sha: plan.sha, body: formatIncludedIssuesBlock(plan.includedPullRequests), latest });
     release = await store.readRelease(plan.tag);
     if (!release || release.tagName !== plan.tag || release.draft) {
       throw blocked("READBACK_MISMATCH", "Release " + plan.tag + " did not read back as a published release");

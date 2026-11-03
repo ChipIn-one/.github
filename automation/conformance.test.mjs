@@ -3,9 +3,9 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
-  GitHubConformanceSource, GitHubConformanceStore, audit, checkCallers, checkCompletionCaller, checkCompletionSweep, checkDependabot, checkIntake, checkMergedPastRed,
+  GitHubConformanceSource, GitHubConformanceStore, RELEASE_TAGS_CHECKED, audit, checkCallers, checkRelease, checkCompletionCaller, checkCompletionSweep, checkDependabot, checkIntake, checkMergedPastRed,
   checkPins, checkProjectPullRequests, checkProtection, checkRouting, extractPins, extractRoutingBlock, loadContextPaths, main, parseMarker, renderIssue,
-  completionSweepCovers, renderSummary, sortTags, touchesCapability, upsertIssues, workflowTriggers,
+  completionSweepCovers, readReleaseFacts, releaseBranchOf, renderSummary, sortTags, touchesCapability, upsertIssues, workflowTriggers,
 } from './conformance.mjs';
 import { getRepositoryProfile, loadRegistry, validateRegistry } from './registry.mjs';
 
@@ -18,6 +18,7 @@ const V1 = 'a'.repeat(40);
 const V11 = 'b'.repeat(40);
 const profile = name => getRepositoryProfile(name);
 const uses = (name, sha, comment = '') => `        uses: ChipIn-one/.github/automation/${name}@${sha}${comment ? ` # ${comment}` : ''}`;
+const releaseUses = (sha, comment = '') => `    uses: ChipIn-one/.github/.github/workflows/release.yml@${sha}${comment ? ` # ${comment}` : ''}`;
 const workflow = (...lines) => ({ path: '.github/workflows/x.yml', text: lines.join('\n') });
 const checks = findings => findings.map(f => f.check);
 const ROUTING_START = '<!-- ai-workflow:agents-routing:start -->';
@@ -199,6 +200,11 @@ test('capability-aware change filter ignores tests and docs', () => {
   assert.equal(touchesCapability('completion-action', ['workflow-registry.yaml']), true);
   assert.equal(touchesCapability('completion-action', ['automation/completion.test.mjs', 'docs/workflow/completion.md']), false);
   assert.equal(touchesCapability('completion-action', ['automation/release.mjs']), false);
+  // the reusable release workflow (pin name `release`) has its own entry, not the automation/ fallback
+  assert.equal(touchesCapability('release', ['automation/conformance.mjs']), false);
+  for (const file of ['.github/workflows/release.yml', 'automation/release.mjs', 'automation/release-action/action.yml', 'automation/github-metadata.mjs', 'automation/registry.mjs', 'workflow-registry.yaml']) {
+    assert.equal(touchesCapability('release', [file]), true, file);
+  }
 });
 
 const source = (over = {}) => ({
@@ -225,6 +231,14 @@ test('pin freshness: current, stale, not-affecting, unpinned, no comment, mismat
   assert.deepEqual(checks(await run([uses('issue-admission-action', 'e'.repeat(40))], source({ compare: async () => ({ status: 'behind', files: [] }) }))), ['PIN_NO_VERSION', 'PIN_AHEAD_OF_TAG']);
   const dup = await run([uses('issue-admission-action', V1, 'v1.0.0'), uses('issue-admission-action', V1, 'v1.0.0')]);
   assert.equal(dup.length, 1, 'the same stale pin is reported once');
+});
+
+test('pin freshness: a release.yml pin is stale only when the newer tag changes the release engine or workflow', async () => {
+  const latest = tags.slice(1);
+  const run = files => checkPins(profile(META), extractPins([workflow(releaseUses(V1, 'v1.0.0'))]), source({ compare: async () => ({ status: 'ahead', files }) }), latest);
+  assert.deepEqual(checks(await run(['automation/conformance.mjs', 'docs/workflow/release.md'])), ['PIN_BEHIND'], 'an automation release that does not touch the engine');
+  assert.deepEqual(checks(await run(['.github/workflows/release.yml'])), ['PIN_STALE']);
+  assert.deepEqual(checks(await run(['automation/release.mjs'])), ['PIN_STALE']);
 });
 
 test('dependabot: missing, no github-actions, wrong target, correct', () => {
@@ -421,10 +435,10 @@ function fakeSource(over = {}) {
     [`${FE}:.github/dependabot.yml`]: "updates:\n  - package-ecosystem: 'github-actions'\n    target-branch: 'master'\n",
   };
   const wf = {
-    [FE]: [workflow(uses('issue-admission-action', V1, 'v1.0.0'), uses('development-link-action', V1, 'v1.0.0'), uses('pr-metadata-action', V1, 'v1.0.0'), uses('create-milestone-action', V1, 'v1.0.0'), uses('frontend-production-completion-action', V1, 'v1.0.0'))],
+    [FE]: [workflow('on: [deployment_status]', uses('issue-admission-action', V1, 'v1.0.0'), uses('development-link-action', V1, 'v1.0.0'), uses('pr-metadata-action', V1, 'v1.0.0'), uses('create-milestone-action', V1, 'v1.0.0'), uses('frontend-production-completion-action', V1, 'v1.0.0'), releaseUses(V1, 'v1.0.0'))],
     [BE]: [workflow(uses('issue-admission-action', 'f'.repeat(40)), uses('development-link-action', 'f'.repeat(40)), uses('create-milestone-action', 'f'.repeat(40)))],
     [KB]: [workflow(uses('development-link-action', 'f'.repeat(40)))],
-    [META]: [ORG_SWEEP],
+    [META]: [ORG_SWEEP, { path: '.github/workflows/release-on-master.yml', text: `on:\n  push:\n    branches: [master]\n${releaseUses(V1, 'v1.0.0')}` }],
     [NOTIF]: [],
   };
   const na = { state: 'unavailable' };
@@ -434,6 +448,10 @@ function fakeSource(over = {}) {
     workflowFiles: async repo => wf[repo],
     repoFile: async (repo, path) => files[`${repo}:${path}`] ?? null,
     compare: async () => ({ status: 'diverged', files: [] }),
+    // release flow: FE and .github are tagged with a Release on the branch history; BE has no tag yet
+    versionTags: async repo => (repo === BE ? [] : [{ name: 'v1.0.0', sha: V1 }]),
+    branchStatus: async () => 'ahead',
+    release: async () => ({ draft: false }),
     branchRules: async repo => (repo === META ? { state: 'ok', rules: ['pull_request', 'required_status_checks'], requiredChecks: ['evaluate-fixtures'] } : repo === FE ? { state: 'ok', rules: [], requiredChecks: [] } : na),
     classicProtection: async repo => (repo === FE ? { state: 'ok', requiredChecks: ['frontend-ci'] } : repo === META ? { state: 'unprotected' } : na),
     openIssues: async () => [],
@@ -499,6 +517,10 @@ test('audit: .github and FE conform; BE and KB show the expected drift; unregist
   assert.ok(checks(by(BE).findings).includes('ROUTING_BLOCK_MISSING'));
   assert.ok(checks(by(BE).findings).includes('CALLER_MISSING'));
   assert.ok(checks(by(BE).findings).includes('PIN_STALE'));
+  assert.ok(checks(by(BE).findings).includes('RELEASE_CALLER_MISSING'), 'deploy-tag without a release caller');
+  assert.ok(checks(by(BE).notes).includes('RELEASE_NO_TAGS'));
+  assert.deepEqual(by(KB).notes.map(n => n.check).filter(c => c.startsWith('RELEASE_')), ['RELEASE_UNVERSIONED']);
+  assert.ok(by(NOTIF).notes.some(n => n.check === 'RELEASE_UNVERSIONED'), 'none is a note, never drift');
   assert.equal(by(KB).status, 'DRIFT');
   assert.ok(checks(by(KB).findings).includes('DEPENDABOT_MISSING'));
   assert.deepEqual(report.unregistered, ['ChipIn-one/chipin-backend-python']);
@@ -537,6 +559,152 @@ test('audit: any read failure makes the repository UNREADABLE with no findings',
   assert.match(report.repositories[0].error, /403/);
   const shared = await audit({ source: fakeSource({ tags: async () => { throw new Error('boom'); } }) });
   assert.equal(shared.summary.unreadable, 5);
+});
+
+// --- release flow (.github#174) ---------------------------------------------------------------------------
+const releaseFacts = (tags, { status = 'ahead', released = tags.map(t => t.name) } = {}) => ({
+  tags, latestStatus: tags.length ? status : null, releases: new Map(tags.slice(0, RELEASE_TAGS_CHECKED).map(t => [t.name, released.includes(t.name) ? { draft: false } : null])),
+});
+// .github: push to master; FE: deployment_status (release-on-production.yml); the test helper passes the caller files
+const pushCaller = { path: '.github/workflows/release-on-master.yml', text: `on:\n  push:\n    branches: [master]\njobs:\n  release:\n${releaseUses(V1, 'v1.0.0')}` };
+const deployCaller = { path: '.github/workflows/release-on-production.yml', text: `on:\n  deployment_status:\njobs:\n  release:\n${releaseUses(V1, 'v1.0.0')}` };
+const callerFiles = [pushCaller, deployCaller];
+const caller = extractPins(callerFiles);
+
+test('release: none is reported as intentionally unversioned, never drift, and reads nothing', async () => {
+  for (const name of [KB, NOTIF]) {
+    const result = checkRelease(profile(name), [], releaseFacts([]));
+    assert.deepEqual(result.map(f => [f.check, f.severity]), [['RELEASE_UNVERSIONED', 'note']]);
+  }
+  const unread = { versionTags: async () => { throw new Error('unused'); } };
+  assert.deepEqual((await readReleaseFacts(profile(KB), unread)).tags, []);
+});
+
+test('release: a strategy other than none needs a caller of the reusable release workflow (.github, FE, BE)', () => {
+  const tagged = releaseFacts([{ name: 'v1.9.2', sha: V1 }]);
+  assert.deepEqual(checkRelease(profile(META), caller, tagged, callerFiles), [], '.github: release-on-master.yml calls release.yml');
+  for (const name of [META, FE, BE]) {
+    const missing = checkRelease(profile(name), [], tagged);
+    assert.deepEqual(missing.map(f => [f.check, f.severity]), [['RELEASE_CALLER_MISSING', 'drift']], name);
+  }
+  assert.match(checkRelease(profile(META), [], tagged)[0].remediation, /caller-release-integration\.yml/);
+  assert.match(checkRelease(profile(BE), [], tagged)[0].remediation, /deployment_status workflow .*release-on-production\.yml.* or a job after the successful deploy in the deploy workflow/);
+  // a shared action or another reusable workflow is not a release caller
+  const other = extractPins([workflow(uses('completion-action', V1, 'v1.0.0'), `    uses: ChipIn-one/.github/.github/workflows/pr-gate.yml@${V1} # v1.0.0`)]);
+  assert.deepEqual(checks(checkRelease(profile(FE), other, tagged)), ['RELEASE_CALLER_MISSING']);
+  assert.deepEqual(checkRelease(profile(FE), caller, tagged, callerFiles), []);
+});
+
+test('release: no tags is a note; the latest tag must be on the release branch history', () => {
+  assert.deepEqual(checkRelease(profile(BE), caller, releaseFacts([]), callerFiles).map(f => [f.check, f.severity]), [['RELEASE_NO_TAGS', 'note']]);
+  const tags = [{ name: 'v1.0.8', sha: V11 }, { name: 'v1.0.7', sha: V1 }];
+  assert.deepEqual(checkRelease(profile(FE), caller, releaseFacts(tags, { status: 'identical' }), callerFiles), []);
+  for (const status of ['diverged', 'behind']) {
+    const off = checkRelease(profile(FE), caller, releaseFacts(tags, { status }), callerFiles);
+    assert.deepEqual(off.map(f => [f.check, f.severity]), [['RELEASE_TAG_OFF_BRANCH', 'drift']]);
+    assert.match(off[0].message, new RegExp(`v1\\.0\\.8 \\(bbbbbbb\\) is not on the history of master \\(compare status ${status}\\)`));
+  }
+  assert.equal(releaseBranchOf(profile(BE)), 'develop');
+  assert.equal(releaseBranchOf(legacyFrontend()), 'dev', 'deploy-tag and integration-merge use the integration branch');
+  assert.equal(releaseBranchOf({ ...legacyFrontend(), release: { strategy: 'semver-by-impact', trigger: 'promotion-merge', tagPrefix: 'v' } }), 'main');
+});
+
+test('release: each of the newest tags needs a published GitHub Release', () => {
+  const tags = ['v1.0.6', 'v1.0.5', 'v1.0.4', 'v1.0.3', 'v1.0.2', 'v1.0.1'].map(name => ({ name, sha: V1 }));
+  const facts = releaseFacts(tags, { released: ['v1.0.6', 'v1.0.4', 'v1.0.3'] });
+  facts.releases.set('v1.0.3', { draft: true });
+  const missing = checkRelease(profile(META), caller, facts, callerFiles);
+  assert.deepEqual(checks(missing), ['RELEASE_MISSING']);
+  assert.match(missing[0].message, /: v1\.0\.5, v1\.0\.3, v1\.0\.2\.$/, 'a draft is not published; v1.0.1 is outside the newest five');
+});
+
+test('release facts: tags sorted by version with the registry prefix, one compare, Releases of the newest tags only', async () => {
+  const reads = [];
+  const names = ['v1.10.0', 'v1.9.0', 'v1.2.0', 'v1.1.0', 'v1.0.1', 'v1.0.0', 'vnext'];
+  const source = {
+    versionTags: async (repo, prefix) => { reads.push(['tags', repo, prefix]); return names.map((name, i) => ({ name, sha: String(i).repeat(40) })).reverse(); },
+    branchStatus: async (repo, sha, branch) => { reads.push(['compare', repo, sha.slice(0, 1), branch]); return 'ahead'; },
+    release: async (repo, tag) => { reads.push(['release', tag]); return { draft: false }; },
+  };
+  const facts = await readReleaseFacts(profile(META), source);
+  assert.deepEqual(facts.tags.map(t => t.name), names.slice(0, 6));
+  assert.deepEqual(reads.slice(0, 2), [['tags', META, 'v'], ['compare', META, '0', 'master']]);
+  assert.deepEqual(reads.slice(2).map(r => r[1]), names.slice(0, RELEASE_TAGS_CHECKED));
+});
+
+test('audit: release drift per repository from the registry release block', async () => {
+  const base = fakeSource();
+  const report = await audit({ source: fakeSource({
+    workflowFiles: async repo => (repo === FE ? [workflow(uses('issue-admission-action', V1, 'v1.0.0'), uses('development-link-action', V1, 'v1.0.0'), uses('pr-metadata-action', V1, 'v1.0.0'), uses('create-milestone-action', V1, 'v1.0.0'))] : base.workflowFiles(repo)),
+    branchStatus: async repo => (repo === FE ? 'diverged' : 'ahead'),
+    release: async (repo, tag) => (repo === META ? null : { draft: false, tag }),
+  }) });
+  const by = name => report.repositories.find(r => r.repository === name);
+  assert.deepEqual(checks(by(FE).findings), ['RELEASE_CALLER_MISSING', 'RELEASE_TAG_OFF_BRANCH']);
+  assert.deepEqual(checks(by(META).findings), ['RELEASE_MISSING']);
+  const failing = await audit({ source: fakeSource({ release: async () => { throw new Error('GET releases -> 502'); } }), repositories: [FE, KB] });
+  assert.equal(failing.repositories[0].status, 'UNREADABLE', 'a failed release read is never silent conformance');
+  assert.notEqual(failing.repositories[1].status, 'UNREADABLE', 'none reads no release state');
+});
+
+test('GitHubConformanceSource release reads: tags and Releases through the release engine store, compare status only', async () => {
+  const calls = [];
+  const client = {
+    request: async (path, options) => {
+      calls.push(path);
+      if (path.startsWith('/repos/R/x/compare/')) return { status: 'ahead', commits: [] };
+      if (path === '/repos/R/x/releases/tags/v1.0.0') return { id: 1, tag_name: 'v1.0.0', draft: false };
+      if (path === '/repos/R/x/git/tags/' + V11) return { object: { type: 'commit', sha: V1 } };
+      if (path === '/repos/R/x/git/matching-refs/tags/v') return [{ ref: 'refs/tags/v1.0.0', object: { type: 'commit', sha: V1 } }, { ref: 'refs/tags/v1.0.1', object: { type: 'tag', sha: V11 } }];
+      if (options?.allow404) return null;
+      throw new Error(`unexpected ${path}`);
+    },
+    listAll: async path => { throw new Error(`matching-refs must not be paginated: ${path}`); },
+  };
+  const src = new GitHubConformanceSource(client);
+  assert.deepEqual(await src.versionTags('R/x', 'v'), [{ name: 'v1.0.0', sha: V1 }, { name: 'v1.0.1', sha: V1 }], 'annotated tags are dereferenced');
+  assert.equal(await src.branchStatus('R/x', V1, 'master'), 'ahead');
+  assert.equal((await src.release('R/x', 'v1.0.0')).draft, false);
+  assert.equal(await src.release('R/x', 'v9.9.9'), null);
+  assert.ok(calls.includes('/repos/R/x/git/matching-refs/tags/v'));
+  assert.ok(calls.includes(`/repos/R/x/compare/${V1}...master?per_page=1`));
+  await assert.rejects(new GitHubConformanceSource({ request: async () => ({}) }).branchStatus('R/x', V1, 'master'), /unreadable/);
+  // a compare 404 (orphan tag commit, missing branch) is a status, other errors stay errors
+  const compare404 = new GitHubConformanceSource({ request: async (path, options) => { assert.equal(options?.allow404, true); return null; } });
+  assert.equal(await compare404.branchStatus('R/x', V1, 'gone'), 'not-found');
+  await assert.rejects(new GitHubConformanceSource({ request: async () => { throw new Error('GET compare -> 502'); } }).branchStatus('R/x', V1, 'master'), /502/);
+});
+
+test('release: a compare 404 is RELEASE_TAG_OFF_BRANCH drift, not an unreadable repository', async () => {
+  const off = checkRelease(profile(FE), caller, releaseFacts([{ name: 'v1.0.10', sha: V11 }], { status: 'not-found' }), callerFiles);
+  assert.deepEqual(off.map(f => [f.check, f.severity]), [['RELEASE_TAG_OFF_BRANCH', 'drift']]);
+  assert.match(off[0].remediation, /compare returned 404/);
+  const report = await audit({ source: fakeSource({ branchStatus: async repo => (repo === FE ? 'not-found' : 'ahead') }), repositories: [FE] });
+  assert.equal(report.repositories[0].status, 'DRIFT');
+  assert.ok(checks(report.repositories[0].findings).includes('RELEASE_TAG_OFF_BRANCH'));
+});
+
+test('release: the release caller must run on the trigger the registry declares', () => {
+  const tagged = releaseFacts([{ name: 'v1.9.2', sha: V1 }]);
+  const file = (path, on) => ({ path, text: `on:${on.startsWith('[') ? ' ' : '\n'}${on}\njobs:\n  release:\n${releaseUses(V1, 'v1.0.0')}` });
+  const run = (name, files) => checkRelease(profile(name), extractPins(files), tagged, files);
+  // integration-merge (.github) needs push
+  assert.deepEqual(run(META, [file('.github/workflows/r.yml', '  push:\n    branches: [master]')]), []);
+  const dispatchOnly = run(META, [file('.github/workflows/r.yml', '  workflow_dispatch:')]);
+  assert.deepEqual(dispatchOnly.map(f => [f.check, f.severity]), [['RELEASE_TRIGGER_MISSING', 'drift']]);
+  assert.match(dispatchOnly[0].message, /integration-merge .*\.github\/workflows\/r\.yml.* no push trigger \(has: workflow_dispatch\)/);
+  assert.equal(checks(run(META, [{ path: '.github/workflows/r.yml', text: releaseUses(V1, 'v1.0.0') }]))[0], 'RELEASE_TRIGGER_MISSING', 'no on: block');
+  // promotion-merge needs push as well
+  const promotion = { ...profile(META), release: { strategy: 'semver-by-impact', trigger: 'promotion-merge', tagPrefix: 'v' } };
+  assert.deepEqual(checks(checkRelease(promotion, extractPins([file('a.yml', '  pull_request:')]), tagged, [file('a.yml', '  pull_request:')])), ['RELEASE_TRIGGER_MISSING']);
+  // production-deploy: deployment_status (FE), workflow_run, or a job in the workflow_dispatch deploy workflow (BE)
+  for (const on of ['  deployment_status:', '  workflow_run:\n    workflows: [Deploy Production]', '  workflow_dispatch:', '[workflow_dispatch]']) {
+    assert.deepEqual(run(BE, [file('.github/workflows/deploy.yml', on)]), [], on);
+  }
+  assert.deepEqual(checks(run(FE, [file('.github/workflows/r.yml', '  push:')])), ['RELEASE_TRIGGER_MISSING']);
+  // the trigger is read from the file that calls release.yml, not from another workflow
+  const elsewhere = [{ path: 'other.yml', text: 'on:\n  deployment_status:\n' }, file('.github/workflows/r.yml', '  push:')];
+  assert.deepEqual(checks(checkRelease(profile(FE), extractPins(elsewhere), tagged, elsewhere)), ['RELEASE_TRIGGER_MISSING']);
 });
 
 // --- drift Issues ------------------------------------------------------------------------------------------

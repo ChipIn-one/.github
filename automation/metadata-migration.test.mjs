@@ -551,3 +551,20 @@ test("issue-side Project items ignore a user-owned or other-org Project with the
   ] } } } }) };
   await assert.rejects(readIssueProjectItems(unreadableOwner, "ChipIn-one/chipin-frontend", 466, 5, "ChipIn-one"), /owner is unreadable/);
 });
+
+test("GitHubClient.listAll paginates and stops on an endpoint that ignores page", async () => {
+  const full = Array.from({ length: 100 }, (_, i) => ({ ref: "refs/tags/v1.0." + i }));
+  const pages = [];
+  const paged = new GitHubClient("t", async (url) => {
+    const page = Number(new URL(url).searchParams.get("page"));
+    pages.push(page);
+    return new Response(JSON.stringify(page === 1 ? full : [{ ref: "refs/tags/v2.0.0" }]), { status: 200 });
+  });
+  assert.equal((await paged.listAll("/repos/R/x/tags")).length, 101);
+  assert.deepEqual(pages, [1, 2]);
+
+  let requests = 0;
+  const ignoresPage = new GitHubClient("t", async () => { requests += 1; return new Response(JSON.stringify(full), { status: 200 }); });
+  await assert.rejects(ignoresPage.listAll("/repos/R/x/git/matching-refs/tags/v"), /ignores pagination: page 2 repeats page 1/);
+  assert.equal(requests, 2);
+});

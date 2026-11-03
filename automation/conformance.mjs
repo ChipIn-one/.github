@@ -9,6 +9,7 @@ import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { GitHubClient, projectReadBudget, readProjectItemsPage } from './github-metadata.mjs';
 import { getRepositoryProfile, loadRegistry, parseYamlSubset } from './registry.mjs';
+import { githubStore, sortedVersionTags } from './release.mjs';
 
 export const CONFORMANCE_CONTRACT = 'chipin-conformance/v1';
 export const ISSUE_MARKER = 'Conformance: ';
@@ -61,6 +62,9 @@ const TOUCHES = {
     /^automation\/github-metadata\.mjs$/, /^automation\/registry\.mjs$/, /^workflow-registry\.yaml$/],
   'pr-gate': [/^\.github\/workflows\/pr-gate\.yml$/, /^automation\//, /^workflow-registry\.yaml$/],
   'issue-gate': [/^\.github\/workflows\/issue-gate\.yml$/, /^automation\//, /^workflow-registry\.yaml$/],
+  // reusable release workflow (.github/workflows/release.yml, pin name `release`): the engine, its client and the registry
+  release: [/^\.github\/workflows\/release\.yml$/, /^automation\/release(-action\/|\.mjs$)/, /^automation\/github-metadata\.mjs$/,
+    /^automation\/registry\.mjs$/, /^workflow-registry\.yaml$/],
 };
 const IGNORED_CHANGE = /(\.test\.mjs|\.md)$/;
 export const touchesCapability = (name, files) => {
@@ -225,6 +229,75 @@ export function checkCompletionSweep(profile, sharedWorkflows) {
   return [finding('COMPLETION_SWEEP_MISSING', 'drift',
     `completionRunner is org-sweep but no scheduled workflow in ${SHARED} runs completion.mjs --repository ${profile.repository}.`,
     `Add the org sweep (like .github/workflows/frontend-production-completion.yml) or set completionRunner: repository and add the repository caller.`)];
+}
+
+// Release flow (docs/workflow/release.md, .github#174). The registry `release` block against reality: a caller of the
+// reusable release workflow, the latest `<tagPrefix>X.Y.Z` tag on the release branch history, a published GitHub
+// Release for each of the newest RELEASE_TAGS_CHECKED tags (bounded API cost). `none` is a note only.
+export const RELEASE_WORKFLOW = '.github/workflows/release.yml';
+export const RELEASE_TAGS_CHECKED = 5;
+// promotion-merge releases from the promotion branch; integration-merge and deploy-tag (the deployed SHA comes from the
+// integration branch) from the integration branch
+// Triggers of the workflow file that calls release.yml, per registry trigger (any one is enough). production-deploy
+// accepts a deployment_status workflow (frontend), a workflow_run after the deploy, or a job inside the
+// workflow_dispatch deploy workflow (backend).
+export const RELEASE_CALLER_TRIGGERS = {
+  'integration-merge': ['push'],
+  'promotion-merge': ['push'],
+  'production-deploy': ['deployment_status', 'workflow_run', 'workflow_dispatch'],
+};
+export const releaseBranchOf = profile => (profile.release.trigger === 'promotion-merge' ? profile.branches.promotion : profile.branches.integration);
+
+// facts: { tags: newest first [{ name, sha }], latestStatus: compare status of latest tag...release branch,
+// releases: Map(tag name -> { draft } | null) for the newest RELEASE_TAGS_CHECKED tags }
+export function checkRelease(profile, pins, facts, workflows = []) {
+  const { strategy, trigger, tagPrefix } = profile.release;
+  if (strategy === 'none') {
+    return [finding('RELEASE_UNVERSIONED', 'note', 'Release strategy is none: the repository is intentionally unversioned (no tags, no Releases, no release caller).', 'None; set a release strategy in workflow-registry.yaml if it should be versioned.')];
+  }
+  const findings = [];
+  const callerShape = trigger === 'production-deploy'
+    ? 'a deployment_status workflow on the successful production deployment (like chipin-frontend .github/workflows/release-on-production.yml) or a job after the successful deploy in the deploy workflow'
+    : trigger === 'promotion-merge' ? 'templates/caller-release-promotion.yml' : 'templates/caller-release-integration.yml';
+  const callerPaths = new Set(pins.filter(pin => pin.target === RELEASE_WORKFLOW).map(pin => pin.path));
+  const expected = RELEASE_CALLER_TRIGGERS[trigger] ?? [];
+  if (!callerPaths.size) {
+    findings.push(finding('RELEASE_CALLER_MISSING', 'drift', `Release strategy is ${strategy} (${trigger}) but no workflow uses ${RELEASE_WORKFLOW} from ${SHARED}.`,
+      `Add the release caller (${callerShape}) and pin it to a tagged SHA (docs/workflow/release.md).`));
+  } else if (expected.length) {
+    const triggers = new Set(workflows.filter(file => callerPaths.has(file.path)).flatMap(file => workflowTriggers(file.text)));
+    if (!expected.some(name => triggers.has(name))) {
+      findings.push(finding('RELEASE_TRIGGER_MISSING', 'drift',
+        `Release trigger is ${trigger} but the release caller (${[...callerPaths].join(', ')}) has no ${expected.join(' or ')} trigger (has: ${[...triggers].join(', ') || 'none'}).`,
+        `Run the release caller from ${callerShape} (docs/workflow/release.md).`));
+    }
+  }
+  const branch = releaseBranchOf(profile);
+  const latest = facts.tags[0] ?? null;
+  if (!latest) {
+    findings.push(finding('RELEASE_NO_TAGS', 'note', `No ${tagPrefix}X.Y.Z tag exists yet.`, 'The first release needs release.mjs --initial-version X.Y.Z (docs/workflow/release.md).'));
+    return findings;
+  }
+  if (!['ahead', 'identical'].includes(facts.latestStatus)) {
+    findings.push(finding('RELEASE_TAG_OFF_BRANCH', 'drift', `The latest tag ${latest.name} (${latest.sha.slice(0, 7)}) is not on the history of ${branch} (compare status ${facts.latestStatus}).`,
+      `Tag a commit of ${branch}: the release engine takes the previous tag from the ancestors of the release commit${facts.latestStatus === 'not-found' ? ' (the compare returned 404: an orphan tag commit or a missing branch)' : ''}.`));
+  }
+  const missing = facts.tags.slice(0, RELEASE_TAGS_CHECKED).filter(tag => !facts.releases.get(tag.name) || facts.releases.get(tag.name).draft).map(tag => tag.name);
+  if (missing.length) {
+    findings.push(finding('RELEASE_MISSING', 'drift', `Tag(s) without a published GitHub Release (newest ${RELEASE_TAGS_CHECKED} checked): ${missing.join(', ')}.`,
+      'Run the release caller (release.mjs apply) for the tagged commit, which creates only the Release, or publish the Release by hand.'));
+  }
+  return findings;
+}
+
+export async function readReleaseFacts(profile, source) {
+  if (profile.release.strategy === 'none') return { tags: [], latestStatus: null, releases: new Map() };
+  const tags = sortedVersionTags(await source.versionTags(profile.repository, profile.release.tagPrefix), profile.release.tagPrefix);
+  if (!tags.length) return { tags, latestStatus: null, releases: new Map() };
+  const latestStatus = await source.branchStatus(profile.repository, tags[0].sha, releaseBranchOf(profile));
+  const releases = new Map();
+  for (const tag of tags.slice(0, RELEASE_TAGS_CHECKED)) releases.set(tag.name, await source.release(profile.repository, tag.name));
+  return { tags, latestStatus, releases };
 }
 
 export async function checkPins(profile, pins, source, tags) {
@@ -416,6 +489,7 @@ export async function auditRepository(profile, source, shared) {
       ...checkCallers(profile, pins),
       ...checkCompletionCaller(profile, workflows, pins),
       ...checkCompletionSweep(profile, shared.workflows),
+      ...checkRelease(profile, pins, await readReleaseFacts(profile, source), workflows),
       ...await checkPins(profile, pins, source, shared.tags),
       ...checkDependabot(profile, profile.capabilities.dependabot === 'required' ? await source.repoFile(profile.repository, '.github/dependabot.yml', ref) ?? await source.repoFile(profile.repository, '.github/dependabot.yaml', ref) : null),
       ...checkRouting(profile, routing ? await source.repoFile(profile.repository, 'AGENTS.md', ref) : null, routing && contextPath ? await source.repoFile(profile.repository, contextPath, ref) : null, shared.routingCanon, contextPath),
@@ -639,6 +713,17 @@ export class GitHubConformanceSource {
   async compare(base, head) {
     const data = await this.client.request(`/repos/${SHARED}/compare/${base}...${head}`);
     return { status: data.status, files: (data.files ?? []).map(f => f.filename) };
+  }
+  // release flow (checkRelease): tags and Releases are read exactly as the release engine reads them
+  async versionTags(repository, tagPrefix) { return githubStore(this.client, repository).listVersionTags(tagPrefix); }
+  async release(repository, tag) { return githubStore(this.client, repository).readRelease(tag); }
+  // status of base...branch only (ahead/identical = base is on the branch history); one commit per page keeps it cheap.
+  // A 404 (orphan tag commit, missing branch) is `not-found`, reported as RELEASE_TAG_OFF_BRANCH, not UNREADABLE.
+  async branchStatus(repository, base, branch) {
+    const data = await this.client.request(`/repos/${repository}/compare/${base}...${encodeURIComponent(branch)}?per_page=1`, { allow404: true });
+    if (data === null) return 'not-found';
+    if (!data?.status) throw new Error(`compare ${base.slice(0, 7)}...${branch} of ${repository} unreadable`);
+    return data.status;
   }
   async branchRules(repository, branch) {
     try {
