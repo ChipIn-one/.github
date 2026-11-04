@@ -892,9 +892,13 @@ export function createReceiptResolver({ deployments, environment, creator, integ
 // One page of jobs per run and of annotations per check run; a full page cannot prove what is beyond it.
 export const RUN_JOBS_PAGE_SIZE = 100;
 export const ANNOTATIONS_PAGE_SIZE = 100;
+// Newest successful dispatch runs of the registry workflow read to prove the cited run is the newest deploy.
+export const NEWEST_DEPLOY_RUNS_PAGE_SIZE = 10;
 // The record-receipt job writes exactly this notice (core.notice), which GitHub stores as a check-run annotation of
-// that job. Job outputs and the step summary are not readable through the REST API; the annotation is, and only the
-// job itself (the Actions app of that run) can write it, unlike the Deployment or its status log_url.
+// that job. Job outputs and the step summary are not readable through the REST API; the annotation is. It is not
+// unforgeable: any workflow of the repository with `checks: write` can append annotations to an Actions check run.
+// The defence is that exactly one receipt notice may exist across all successful attempts of the job, so an
+// injected notice makes the receipt ambiguous (invalid), never valid on its own.
 const RECEIPT_ANNOTATION = /^Production receipt: deployment (\d+) for ([0-9a-f]{40})$/u;
 const ANY_RECEIPT_ANNOTATION = /^Production receipt:/u;
 const RUN_ID = /^[1-9]\d{0,19}$/u;
@@ -923,6 +927,10 @@ export function receiptRunId(deployment) {
  *   `workflow_dispatch`, `head_branch` the registry branch, `status` completed with `conclusion` success, and its
  *   `head_sha` is contained in the integration head (a tag named like the branch gives the same `head_branch`);
  * - the Deployment was created inside the run window (run created_at .. updated_at);
+ * - the run is the newest successful `workflow_dispatch` run of the registry workflow on the registry branch: no
+ *   such run has a higher run_number (readNewestDeployRuns). A deleted newer receipt or a re-run of an older
+ *   run's receipt job would otherwise make an older deploy look current. Fail closed: any newer successful run,
+ *   even one that wrote no receipt, makes the receipt invalid;
  * - the run's successful `job` jobs (all attempts, one page) carry, among all their annotations, exactly one receipt
  *   notice, and it names this deployment id and SHA; that job's window (started_at .. completed_at) contains the
  *   Deployment's created_at;
@@ -936,6 +944,7 @@ export async function verifyWorkflowRunReceipt(deployment, verdict, {
   integrationHeadSha,
   containsCommit,
   readRun,
+  readNewestDeployRuns,
   readRunJobs,
   readAnnotations,
 }) {
@@ -975,6 +984,13 @@ export async function verifyWorkflowRunReceipt(deployment, verdict, {
     throw error;
   }
   if (!headOnBranch) return invalid("run-head-not-on-integration-branch");
+  if (!Number.isSafeInteger(run.run_number) || run.run_number <= 0) return invalid("run-number-unreadable");
+  const newest = await readNewestDeployRuns();
+  if (!Array.isArray(newest?.workflow_runs)) throw new Error("Runs of " + evidence.workflow + " are not a list");
+  if (newest.workflow_runs.some((other) => !Number.isSafeInteger(other?.run_number))) {
+    throw new Error("Runs of " + evidence.workflow + " carry an unreadable run_number");
+  }
+  if (newest.workflow_runs.some((other) => other.run_number > run.run_number)) return invalid("run-not-newest-deploy");
 
   const jobsPage = await readRunJobs(runId);
   const jobs = jobsPage?.jobs;
@@ -1014,7 +1030,8 @@ export class UntrustedProductionEvidence extends Error {
 
 /**
  * Latest-receipt resolver (verifier `workflow-run`). What runs in production is the newest receipt by created_at
- * (then id); a rollback writes a newer receipt for an older SHA, so an older receipt never attests anything. Only
+ * (then id); a rollback writes a newer receipt for an older SHA, so an older receipt is never used here (and the
+ * newest-run check of verifyWorkflowRunReceipt rejects an older deploy that became newest by deletion). Only
  * the newest receipt is validated. When it is invalid the resolver does not fall back to an older one (that older
  * receipt could attest commits a rollback removed, or hide a forgery): every lookup throws
  * UntrustedProductionEvidence and the Issue stays open (`production-evidence-untrusted`) until a newer valid
@@ -1201,6 +1218,9 @@ export async function runDeploymentReceiptCompletionSweep(client, profile, {
           integrationHeadSha,
           containsCommit,
           readRun: (runId) => client.request("/repos/" + owner + "/" + repo + "/actions/runs/" + runId),
+          readNewestDeployRuns: () => client.request("/repos/" + owner + "/" + repo + "/actions/workflows/"
+            + encodeURIComponent(evidence.workflow.split("/").pop()) + "/runs?event=workflow_dispatch&branch="
+            + encodeURIComponent(evidence.branch) + "&status=success&per_page=" + NEWEST_DEPLOY_RUNS_PAGE_SIZE),
           readRunJobs: (runId) => client.request("/repos/" + owner + "/" + repo + "/actions/runs/" + runId
             + "/jobs?filter=all&per_page=" + RUN_JOBS_PAGE_SIZE),
           readAnnotations: (checkRunId) => client.request("/repos/" + owner + "/" + repo + "/check-runs/" + checkRunId

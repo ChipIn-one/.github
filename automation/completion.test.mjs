@@ -1593,7 +1593,7 @@ function beStatus({ id = 7000, runId = BE_RUN, createdAt = "2026-10-08T10:05:01Z
 function beRun({ id = BE_RUN, ...overrides } = {}) {
   return {
     id, path: ".github/workflows/deploy-production.yml", event: "workflow_dispatch", head_branch: "develop",
-    status: "completed", conclusion: "success", head_sha: RUN_HEAD, created_at: "2026-10-08T10:00:00Z", updated_at: "2026-10-08T10:06:00Z",
+    status: "completed", conclusion: "success", head_sha: RUN_HEAD, run_number: id - 4900, created_at: "2026-10-08T10:00:00Z", updated_at: "2026-10-08T10:06:00Z",
     html_url: BE_RUN_URL(id), repository: { full_name: BE }, head_repository: { full_name: BE }, ...overrides,
   };
 }
@@ -1636,8 +1636,13 @@ function beClient({
   annotations = { [BE_RUN * 10 + 1]: [], [BE_RUN * 10 + 2]: [receiptNotice(700, RECEIPT_SHA)] },
   ancestry = [MERGE + "..." + HEAD, RECEIPT_SHA + "..." + HEAD, OLD_RECEIPT_SHA + "..." + HEAD, RUN_HEAD + "..." + HEAD, MERGE + "..." + RECEIPT_SHA],
   compareErrors = {},
+  newestRuns,
 } = {}) {
   const log = [];
+  // default: every successful dispatch run of the fixture, newest first (what GitHub lists for the workflow)
+  const listedRuns = newestRuns ?? Object.values(runs)
+    .filter((run) => !(run instanceof Error) && run.conclusion === "success" && run.event === "workflow_dispatch")
+    .sort((left, right) => right.run_number - left.run_number);
   const answer = (table, key, path) => {
     const value = table[key];
     if (value instanceof Error) throw value;
@@ -1665,6 +1670,10 @@ function beClient({
       }
       if ((match = /\/deployments\/(\d+)\/statuses\?per_page=100$/u.exec(path))) return answer(statuses, match[1], path);
       if ((match = /\/actions\/runs\/(\d+)$/u.exec(path))) return answer(runs, match[1], path);
+      if (path.endsWith("/actions/workflows/deploy-production.yml/runs?event=workflow_dispatch&branch=develop&status=success&per_page=10")) {
+        if (listedRuns instanceof Error) throw listedRuns;
+        return { total_count: listedRuns.length, workflow_runs: listedRuns };
+      }
       if ((match = /\/actions\/runs\/(\d+)\/jobs\?filter=all&per_page=100$/u.exec(path))) return answer(jobs, match[1], path);
       if ((match = /\/check-runs\/(\d+)\/annotations\?per_page=100$/u.exec(path))) return answer(annotations, match[1], path);
       if ((match = /\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/u.exec(path))) {
@@ -1788,6 +1797,45 @@ test("backend: the develop head is read as refs/heads/develop, so a tag named de
   assert.match(results[0].decision.detail, /run-head-not-on-integration-branch/u);
   assert.ok(client.log.includes("GET /repos/" + BE + "/commits/heads/develop"));
   assert.ok(!client.log.includes("GET /repos/" + BE + "/commits/develop"));
+});
+
+test("backend: the cited run must be the newest successful deploy (deleted newer receipt, re-run of an old receipt job)", async () => {
+  // R1 (5000) deployed RECEIPT_SHA, R2 (5001) rolled back to OLD_RECEIPT_SHA; a writer marked R2's receipt inactive and
+  // deleted it, so R1's receipt 700 is the newest left in the window
+  const r2 = beRun({ id: 5001, head_sha: RUN_HEAD, created_at: "2026-10-09T10:00:00Z", updated_at: "2026-10-09T10:06:00Z" });
+  const { client } = await untrusted("rollback receipt deleted", { runs: { [BE_RUN]: beRun(), 5001: r2 } }, "run-not-newest-deploy");
+  assert.ok(client.log.some((entry) => entry.includes("/actions/workflows/deploy-production.yml/runs?")));
+  assert.ok(!client.log.some((entry) => entry.includes("/jobs?")), "no job read for an outdated run");
+
+  // a re-run of R1's record-receipt after R2 writes a fresh receipt 703 citing R1 (R1's first receipt was deleted)
+  const rerun = beDeployment({ id: 703, createdAt: "2026-10-10T09:00:00Z" });
+  await untrusted("re-run of an old receipt job", {
+    deployments: [rerun],
+    statuses: { 703: [beStatus({ id: 7030, createdAt: "2026-10-10T09:00:01Z" })] },
+    runs: { [BE_RUN]: beRun({ updated_at: "2026-10-10T09:01:00Z" }), 5001: r2 },
+  }, "run-not-newest-deploy");
+
+  // any newer successful dispatch run counts, even one listed without a receipt (fail closed)
+  await untrusted("newer run without receipt", { newestRuns: [beRun({ id: 5009 }), beRun()] }, "run-not-newest-deploy");
+  // the cited run itself, older runs and an empty list are fine
+  assert.equal((await beRunCompletion(beClient({ newestRuns: [beRun(), beRun({ id: 4990 })] }))).results[0].decision.code, "closed-completed");
+  assert.equal((await beRunCompletion(beClient({ newestRuns: [] }))).results[0].decision.code, "closed-completed");
+  await untrusted("no run_number", { runs: { [BE_RUN]: beRun({ run_number: null }) } }, "run-number-unreadable");
+  // an unreadable list is unreadable, not untrusted
+  for (const newestRuns of [new Error("GET runs -> 403: Resource not accessible"), [{ run_number: "x" }]]) {
+    const flaky = beClient({ newestRuns });
+    assert.equal((await beRunCompletion(flaky)).results[0].decision.code, "production-evidence-unreadable");
+    assert.deepEqual(closes(flaky), []);
+  }
+});
+
+test("backend: an injected receipt notice next to the legitimate one makes the receipt ambiguous", async () => {
+  await untrusted("legitimate + injected", {
+    annotations: { [BE_RUN * 10 + 1]: [], [BE_RUN * 10 + 2]: [receiptNotice(700, RECEIPT_SHA), receiptNotice(700, RECEIPT_SHA)] },
+  }, "receipt-job-output-ambiguous");
+  await untrusted("legitimate + injected for another receipt", {
+    annotations: { [BE_RUN * 10 + 1]: [], [BE_RUN * 10 + 2]: [receiptNotice(700, RECEIPT_SHA), receiptNotice(999, OLD_RECEIPT_SHA)] },
+  }, "receipt-job-output-ambiguous");
 });
 
 test("backend: a full page of jobs cannot prove the receipt job (run-jobs-truncated)", async () => {
