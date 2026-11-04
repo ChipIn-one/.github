@@ -504,15 +504,22 @@ export function closedBeforeProductionCandidates(profile, issues, since) {
   for (const issue of issues) {
     if (!issue.closedAt || issue.closedAt < since || issue.stateReason !== 'COMPLETED') continue;
     if (COMPLETION_ENGINE_ACTORS.includes(issue.closedBy)) continue;
+    // the linkage bound applies only to candidates: a partial PR list could hide a pending merge
+    if (issue.linkageIncomplete) throw new Error(`Development-linked PRs of ${profile.repository}#${issue.number} are incomplete`);
     const prs = (issue.linkedPullRequests ?? []).filter(pr => pr.repository === profile.repository && pr.headRepository === profile.repository && pr.mergedAt
       && pr.baseRefName === integration && SHA.test(String(pr.mergeCommitSha ?? '')));
-    if (prs.length) rows.push({ number: issue.number, closedAt: issue.closedAt, closedBy: issue.closedBy ?? 'unknown', prs });
+    const closedBy = `${issue.closedBy ?? 'unknown'}${issue.closedViaPullRequest ? ` via the closing keyword of PR #${issue.closedViaPullRequest}` : ''}`;
+    if (prs.length) rows.push({ number: issue.number, closedAt: issue.closedAt, closedBy, prs });
   }
   return rows;
 }
 
 // scan: { since, issues, truncated }; production: async () => ({ label, contains: async ({ mergeCommitSha, mergedAt }) => boolean } | { skipped }), called
-// only when a candidate exists. Any read error of the production evidence propagates (the repository is UNREADABLE).
+// only when a candidate exists. A 403 on the evidence read or a receipt window without a valid receipt (error code
+// CLOSED_BEFORE_PRODUCTION_UNVERIFIABLE) is the note CLOSED_BEFORE_PRODUCTION_UNVERIFIABLE, so this note-level check
+// never hides the drift of the repository; any other read error propagates (the repository is UNREADABLE).
+export const EVIDENCE_UNVERIFIABLE = 'CLOSED_BEFORE_PRODUCTION_UNVERIFIABLE';
+const unverifiable = error => error?.code === EVIDENCE_UNVERIFIABLE || /\b403\b/.test(String(error?.message ?? error));
 export async function checkClosedBeforeProduction(profile, scan, production) {
   if (!closedBeforeProductionApplies(profile)) return [];
   const findings = [];
@@ -523,7 +530,15 @@ export async function checkClosedBeforeProduction(profile, scan, production) {
   }
   const candidates = closedBeforeProductionCandidates(profile, scan.issues, scan.since);
   if (!candidates.length) return findings;
-  const evidence = await production();
+  const unverified = error => {
+    if (!unverifiable(error)) throw error;
+    findings.push(finding(EVIDENCE_UNVERIFIABLE, 'note',
+      `${candidates.length} Issue(s) closed by hand after a merge into ${profile.branches.integration} could not be checked against production evidence: ${String(error?.message ?? error).slice(0, 200)}.`,
+      'Grant the audit token Deployments: Read-only (deployment-receipt) and check that the newest production deployments carry a valid receipt; the rest of the audit is valid.'));
+    return findings;
+  };
+  let evidence;
+  try { evidence = await production(); } catch (error) { return unverified(error); }
   if (evidence.skipped) {
     findings.push(finding('CLOSED_BEFORE_PRODUCTION_SKIPPED', 'note', `CLOSED_BEFORE_PRODUCTION was not checked: ${evidence.skipped}`,
       'None; the check runs again once the record matches a layout the completion engine implements.'));
@@ -532,7 +547,11 @@ export async function checkClosedBeforeProduction(profile, scan, production) {
   const early = [];
   for (const row of candidates) {
     const pending = [];
-    for (const pr of row.prs) if (!(await evidence.contains(pr))) pending.push(pr);
+    for (const pr of row.prs) {
+      let contained;
+      try { contained = await evidence.contains(pr); } catch (error) { return unverified(error); }
+      if (!contained) pending.push(pr);
+    }
     if (pending.length) early.push({ ...row, pending });
   }
   if (!early.length) return findings;
@@ -869,15 +888,18 @@ export class GitHubConformanceSource {
     const issues = [];
     let after = null;
     for (let page = 1; page <= maxPages; page += 1) {
-      const data = await this.client.graphql('query($o:String!,$r:String!,$s:DateTime!,$n:Int!,$a:String){repository(owner:$o,name:$r){issues(states:CLOSED,first:$n,after:$a,orderBy:{field:UPDATED_AT,direction:DESC},filterBy:{since:$s}){pageInfo{hasNextPage endCursor} nodes{number closedAt stateReason timelineItems(last:1,itemTypes:[CLOSED_EVENT]){nodes{... on ClosedEvent{actor{login}}}} closedByPullRequestsReferences(first:50,includeClosedPrs:true){totalCount nodes{number mergedAt baseRefName repository{nameWithOwner} headRepository{nameWithOwner} mergeCommit{oid}}}}}}}', { o: owner, r: name, s: since, n: pageSize, a: after });
+      const data = await this.client.graphql('query($o:String!,$r:String!,$s:DateTime!,$n:Int!,$a:String){repository(owner:$o,name:$r){issues(states:CLOSED,first:$n,after:$a,orderBy:{field:UPDATED_AT,direction:DESC},filterBy:{since:$s}){pageInfo{hasNextPage endCursor} nodes{number closedAt stateReason timelineItems(last:1,itemTypes:[CLOSED_EVENT]){nodes{... on ClosedEvent{actor{login} closer{__typename ... on PullRequest{number}}}}} closedByPullRequestsReferences(first:50,includeClosedPrs:true){totalCount nodes{number mergedAt baseRefName repository{nameWithOwner} headRepository{nameWithOwner} mergeCommit{oid}}}}}}}', { o: owner, r: name, s: since, n: pageSize, a: after });
       const connection = data?.repository?.issues;
       if (!connection?.pageInfo || !Array.isArray(connection.nodes)) throw new Error(`closed Issues of ${repository} unreadable`);
       for (const node of connection.nodes) {
         const linked = node.closedByPullRequestsReferences;
-        if (!linked || !Array.isArray(linked.nodes) || linked.totalCount !== linked.nodes.length) throw new Error(`Development-linked PRs of ${repository}#${node.number} are incomplete`);
+        if (!linked || !Array.isArray(linked.nodes)) throw new Error(`Development-linked PRs of ${repository}#${node.number} are unreadable`);
+        const closer = node.timelineItems?.nodes?.at(-1)?.closer;
         issues.push({
           number: node.number, closedAt: node.closedAt, stateReason: node.stateReason,
           closedBy: node.timelineItems?.nodes?.at(-1)?.actor?.login ?? null,
+          closedViaPullRequest: closer?.__typename === 'PullRequest' ? closer.number : null,
+          linkageIncomplete: linked.totalCount !== linked.nodes.length,
           linkedPullRequests: linked.nodes.map(pr => ({ number: pr.number, repository: pr.repository?.nameWithOwner ?? null, headRepository: pr.headRepository?.nameWithOwner ?? null, mergedAt: pr.mergedAt, baseRefName: pr.baseRefName, mergeCommitSha: pr.mergeCommit?.oid ?? null })),
         });
       }
@@ -927,7 +949,9 @@ export class GitHubConformanceSource {
       label: `a valid ${environment} receipt by ${creator}`,
       contains: async ({ mergeCommitSha }) => {
         if (await resolver.findReceipt(mergeCommitSha)) return true;
-        if (!(await resolver.checked()).some(row => row.valid)) throw new Error(`no valid ${environment} receipt by ${creator} among the newest ${window.read} deployment(s) of ${repository}`);
+        if (!(await resolver.checked()).some(row => row.valid)) {
+          throw Object.assign(new Error(`no valid ${environment} receipt by ${creator} among the newest ${window.read} deployment(s) of ${repository}`), { code: EVIDENCE_UNVERIFIABLE });
+        }
         return false;
       },
     };

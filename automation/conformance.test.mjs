@@ -954,11 +954,28 @@ test('CLOSED_BEFORE_PRODUCTION: a full scan window is a note; the audit reports 
   assert.ok(checks(report.repositories[0].notes).includes('CLOSED_BEFORE_PRODUCTION'));
 });
 
-test('CLOSED_BEFORE_PRODUCTION: unreadable closes or production evidence make the repository UNREADABLE, never clean', async () => {
-  const evidence = await audit({ source: fakeSource({ recentlyClosedIssues: async () => ({ issues: [closedIssue(464, { merge: M2 })], truncated: false }),
+test('CLOSED_BEFORE_PRODUCTION: a 403 or no valid receipt is the note UNVERIFIABLE and never hides drift', async () => {
+  const candidate = async () => ({ issues: [closedIssue(464, { merge: M2 })], truncated: false });
+  const forbidden = await audit({ source: fakeSource({ recentlyClosedIssues: candidate,
     productionContainment: async () => { throw new Error('Deployments of ChipIn-one/chipin-frontend are unreadable: GET x -> 403'); } }), repositories: [FE] });
+  assert.equal(forbidden.repositories[0].status, 'CONFORMANT');
+  const note = forbidden.repositories[0].notes.find(n => n.check === 'CLOSED_BEFORE_PRODUCTION_UNVERIFIABLE');
+  assert.match(note.message, /^1 Issue\(s\) .* could not be checked .*403/);
+  assert.match(note.remediation, /Deployments: Read-only/);
+  const base = fakeSource();
+  const drift = await audit({ source: fakeSource({ recentlyClosedIssues: candidate,
+    productionContainment: async () => ({ label: 'x', contains: async () => { throw Object.assign(new Error('no valid Production receipt'), { code: 'CLOSED_BEFORE_PRODUCTION_UNVERIFIABLE' }); } }),
+    repoFile: async (repo, path, ref) => (repo === FE && path === 'AGENTS.md' ? ROUTING.replace('stop.', 'halt.') : base.repoFile(repo, path, ref)) }), repositories: [FE] });
+  assert.equal(drift.repositories[0].status, 'DRIFT', 'the drift of the repository stays visible');
+  assert.deepEqual(checks(drift.repositories[0].findings), ['ROUTING_BLOCK_STALE']);
+  assert.ok(checks(drift.repositories[0].notes).includes('CLOSED_BEFORE_PRODUCTION_UNVERIFIABLE'));
+});
+
+test('CLOSED_BEFORE_PRODUCTION: other unreadable closes or production evidence make the repository UNREADABLE, never clean', async () => {
+  const evidence = await audit({ source: fakeSource({ recentlyClosedIssues: async () => ({ issues: [closedIssue(464, { merge: M2 })], truncated: false }),
+    productionContainment: async () => { throw new Error('Deployments of ChipIn-one/chipin-frontend are unreadable: GET x -> 502'); } }), repositories: [FE] });
   assert.equal(evidence.repositories[0].status, 'UNREADABLE');
-  assert.match(evidence.repositories[0].error, /CLOSED_BEFORE_PRODUCTION unreadable: Deployments .* 403/);
+  assert.match(evidence.repositories[0].error, /CLOSED_BEFORE_PRODUCTION unreadable: Deployments .* 502/);
   const containment = await audit({ source: fakeSource({ recentlyClosedIssues: async () => ({ issues: [closedIssue(464, { merge: M2 })], truncated: false }),
     productionContainment: async () => ({ label: 'x', contains: async () => { throw new Error('GET compare -> 502'); } }) }), repositories: [FE] });
   assert.equal(containment.repositories[0].status, 'UNREADABLE');
@@ -977,7 +994,14 @@ test('GitHubConformanceSource: closed-Issue scan is bounded and fails closed on 
   assert.deepEqual(scan.issues.map(i => [i.number, i.closedBy, i.linkedPullRequests[0].mergeCommitSha]), [[1, 'syllik', M1], [2, 'syllik', M1]]);
   assert.deepEqual(calls.map(v => [v.s, v.a]), [[SINCE, null], [SINCE, 'c1']]);
   const partial = { graphql: async () => ({ repository: { issues: { pageInfo: { hasNextPage: false }, nodes: [node(1, 2)] } } }) };
-  await assert.rejects(new GitHubConformanceSource(partial).recentlyClosedIssues(FE, SINCE), /incomplete/);
+  const partialScan = await new GitHubConformanceSource(partial).recentlyClosedIssues(FE, SINCE);
+  assert.equal(partialScan.issues[0].linkageIncomplete, true);
+  assert.throws(() => closedBeforeProductionCandidates(profile(FE), partialScan.issues, SINCE), /incomplete/, 'a candidate with partial linkage fails closed');
+  const notCandidates = [{ ...partialScan.issues[0], stateReason: 'NOT_PLANNED' }, { ...partialScan.issues[0], closedBy: 'github-actions' }];
+  assert.deepEqual(closedBeforeProductionCandidates(profile(FE), notCandidates, SINCE), [], 'the bound applies only to candidates');
+  const keyword = { graphql: async () => ({ repository: { issues: { pageInfo: { hasNextPage: false }, nodes: [{ ...node(1), timelineItems: { nodes: [{ actor: { login: 'syllik' }, closer: { __typename: 'PullRequest', number: 5 } }] } }] } } }) };
+  const keywordScan = await new GitHubConformanceSource(keyword).recentlyClosedIssues(FE, SINCE);
+  assert.equal(closedBeforeProductionCandidates(profile(FE), keywordScan.issues, SINCE)[0].closedBy, 'syllik via the closing keyword of PR #5');
   const noCursor = { graphql: async () => ({ repository: { issues: { pageInfo: { hasNextPage: true, endCursor: null }, nodes: [node(1)] } } }) };
   await assert.rejects(new GitHubConformanceSource(noCursor).recentlyClosedIssues(FE, SINCE), /cursor is missing/);
   const fork = { graphql: async () => ({ repository: { issues: { pageInfo: { hasNextPage: false }, nodes: [{ ...node(1), closedByPullRequestsReferences: { totalCount: 1, nodes: [{ number: 5, mergedAt: RECENT, baseRefName: 'master', repository: { nameWithOwner: FE }, headRepository: { nameWithOwner: 'someone/fork' }, mergeCommit: null }] } }] } } }) };
@@ -1001,7 +1025,7 @@ test('GitHubConformanceSource: production containment reuses the completion rece
   assert.equal(await ok.contains({ mergeCommitSha: M1, mergedAt: RECENT }), true);
   assert.equal(await ok.contains({ mergeCommitSha: '3'.repeat(40), mergedAt: RECENT }), false);
   const none = await new GitHubConformanceSource({ request: responses('failure') }).productionContainment(profile(FE));
-  await assert.rejects(none.contains({ mergeCommitSha: M1, mergedAt: RECENT }), /no valid Production receipt/);
+  await assert.rejects(none.contains({ mergeCommitSha: M1, mergedAt: RECENT }), e => /no valid Production receipt/.test(e.message) && e.code === 'CLOSED_BEFORE_PRODUCTION_UNVERIFIABLE');
   await assert.rejects(new GitHubConformanceSource({ request: async () => { throw new Error('GET x -> 403'); } }).productionContainment(profile(FE)), /403/);
 });
 
