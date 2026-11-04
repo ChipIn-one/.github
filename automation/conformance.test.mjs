@@ -898,20 +898,21 @@ const M1 = '1'.repeat(40);
 const M2 = '2'.repeat(40);
 const RECENT = new Date(Date.now() - 2 * 86_400_000).toISOString();
 const SINCE = new Date(Date.now() - 30 * 86_400_000).toISOString();
-const closedIssue = (number, { closedBy = 'syllik', merge = M1, base = 'master', closedAt = RECENT, stateReason = 'COMPLETED', repository = FE, mergedAt = RECENT } = {}) => ({
+const closedIssue = (number, { closedBy = 'syllik', merge = M1, base = 'master', closedAt = RECENT, stateReason = 'COMPLETED', repository = FE, headRepository = repository, mergedAt = RECENT } = {}) => ({
   number, closedAt, stateReason, closedBy,
-  linkedPullRequests: [{ number: number + 1000, repository, mergedAt, baseRefName: base, mergeCommitSha: merge }],
+  linkedPullRequests: [{ number: number + 1000, repository, headRepository, mergedAt, baseRefName: base, mergeCommitSha: merge }],
 });
-const inProduction = (...shas) => async () => ({ label: 'a valid Production receipt by vercel[bot]', contains: async sha => shas.includes(sha) });
+const inProduction = (...shas) => async () => ({ label: 'a valid Production receipt by vercel[bot]', contains: async pr => shas.includes(pr.mergeCommitSha) });
 const scanOf = (issues, truncated = false) => ({ since: SINCE, issues, truncated });
 
-test('CLOSED_BEFORE_PRODUCTION: a human close before the merge reached production is drift with remediation', async () => {
+test('CLOSED_BEFORE_PRODUCTION: a human close before the merge reached production is a note with remediation', async () => {
   const findings = await checkClosedBeforeProduction(profile(FE), scanOf([closedIssue(464, { merge: M2 }), closedIssue(470)]), inProduction(M1));
-  assert.deepEqual(findings.map(f => [f.check, f.severity]), [['CLOSED_BEFORE_PRODUCTION', 'drift']]);
+  assert.deepEqual(findings.map(f => [f.check, f.severity]), [['CLOSED_BEFORE_PRODUCTION', 'note']]);
   assert.match(findings[0].message, /^1 Issue\(s\) closed as completed/);
   assert.match(findings[0].message, /#464 \(closed \d{4}-\d{2}-\d{2} by syllik; PR #1464 2222222 not in production\)/);
   assert.doesNotMatch(findings[0].message, /#470/);
-  assert.match(findings[0].remediation, /Reopen each Issue/);
+  assert.match(findings[0].remediation, /^Leave the Issue closed/);
+  assert.match(findings[0].remediation, /fresh linked PR/);
 });
 
 test('CLOSED_BEFORE_PRODUCTION: an engine close is ignored and evidence is not read', async () => {
@@ -922,10 +923,11 @@ test('CLOSED_BEFORE_PRODUCTION: an engine close is ignored and evidence is not r
   assert.equal(read, 0);
 });
 
-test('CLOSED_BEFORE_PRODUCTION: a PR already in production, outside the window, not completed or not merged into the integration branch is ignored', async () => {
+test('CLOSED_BEFORE_PRODUCTION: a PR already in production, outside the window, not completed, not merged into the integration branch, from a fork or without a merge commit is ignored', async () => {
   const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
   const issues = [closedIssue(1), closedIssue(2, { merge: M2, closedAt: old }), closedIssue(3, { merge: M2, stateReason: 'NOT_PLANNED' }),
-    closedIssue(4, { merge: M2, base: 'feature' }), closedIssue(5, { merge: M2, mergedAt: null }), closedIssue(6, { merge: M2, repository: KB })];
+    closedIssue(4, { merge: M2, base: 'feature' }), closedIssue(5, { merge: M2, mergedAt: null }), closedIssue(6, { merge: M2, repository: KB }),
+    closedIssue(7, { merge: M2, headRepository: 'someone/chipin-frontend' }), closedIssue(8, { merge: null })];
   assert.deepEqual(closedBeforeProductionCandidates(profile(FE), issues, SINCE).map(r => r.number), [1]);
   assert.deepEqual(await checkClosedBeforeProduction(profile(FE), scanOf(issues), inProduction(M1)), []);
 });
@@ -943,13 +945,13 @@ test('CLOSED_BEFORE_PRODUCTION: production-merge (dev/main record) uses the inte
   assert.match(findings[0].message, /^1 Issue\(s\).*merged into dev .*#9 /);
 });
 
-test('CLOSED_BEFORE_PRODUCTION: a full scan window is a note; the audit reports the drift', async () => {
+test('CLOSED_BEFORE_PRODUCTION: a full scan window is a note; the audit reports the finding as a note only', async () => {
   const note = await checkClosedBeforeProduction(profile(FE), scanOf([], true), inProduction());
   assert.deepEqual(note.map(f => [f.check, f.severity]), [['CLOSED_BEFORE_PRODUCTION_WINDOW_FULL', 'note']]);
   assert.match(note[0].message, new RegExp(`More than ${CLOSED_SCAN_PAGE_SIZE * CLOSED_SCAN_MAX_PAGES} Issues`));
   const report = await audit({ source: fakeSource({ recentlyClosedIssues: async () => ({ issues: [closedIssue(464, { merge: M2 })], truncated: false }), productionContainment: inProduction(M1) }), repositories: [FE] });
-  assert.equal(report.repositories[0].status, 'DRIFT');
-  assert.deepEqual(checks(report.repositories[0].findings), ['CLOSED_BEFORE_PRODUCTION']);
+  assert.equal(report.repositories[0].status, 'CONFORMANT');
+  assert.ok(checks(report.repositories[0].notes).includes('CLOSED_BEFORE_PRODUCTION'));
 });
 
 test('CLOSED_BEFORE_PRODUCTION: unreadable closes or production evidence make the repository UNREADABLE, never clean', async () => {
@@ -967,7 +969,7 @@ test('CLOSED_BEFORE_PRODUCTION: unreadable closes or production evidence make th
 
 test('GitHubConformanceSource: closed-Issue scan is bounded and fails closed on incomplete linkage', async () => {
   const node = (number, total = 1) => ({ number, closedAt: RECENT, stateReason: 'COMPLETED', timelineItems: { nodes: [{ actor: { login: 'syllik' } }] },
-    closedByPullRequestsReferences: { totalCount: total, nodes: [{ number: 5, mergedAt: RECENT, baseRefName: 'master', repository: { nameWithOwner: FE }, mergeCommit: { oid: M1 } }] } });
+    closedByPullRequestsReferences: { totalCount: total, nodes: [{ number: 5, mergedAt: RECENT, baseRefName: 'master', repository: { nameWithOwner: FE }, headRepository: { nameWithOwner: FE }, mergeCommit: { oid: M1 } }] } });
   const calls = [];
   const client = { graphql: async (query, vars) => { calls.push(vars); return { repository: { issues: { pageInfo: { hasNextPage: true, endCursor: `c${calls.length}` }, nodes: [node(calls.length)] } } }; } };
   const scan = await new GitHubConformanceSource(client).recentlyClosedIssues(FE, SINCE, { pageSize: 1, maxPages: 2 });
@@ -976,6 +978,12 @@ test('GitHubConformanceSource: closed-Issue scan is bounded and fails closed on 
   assert.deepEqual(calls.map(v => [v.s, v.a]), [[SINCE, null], [SINCE, 'c1']]);
   const partial = { graphql: async () => ({ repository: { issues: { pageInfo: { hasNextPage: false }, nodes: [node(1, 2)] } } }) };
   await assert.rejects(new GitHubConformanceSource(partial).recentlyClosedIssues(FE, SINCE), /incomplete/);
+  const noCursor = { graphql: async () => ({ repository: { issues: { pageInfo: { hasNextPage: true, endCursor: null }, nodes: [node(1)] } } }) };
+  await assert.rejects(new GitHubConformanceSource(noCursor).recentlyClosedIssues(FE, SINCE), /cursor is missing/);
+  const fork = { graphql: async () => ({ repository: { issues: { pageInfo: { hasNextPage: false }, nodes: [{ ...node(1), closedByPullRequestsReferences: { totalCount: 1, nodes: [{ number: 5, mergedAt: RECENT, baseRefName: 'master', repository: { nameWithOwner: FE }, headRepository: { nameWithOwner: 'someone/fork' }, mergeCommit: null }] } }] } } }) };
+  const forked = await new GitHubConformanceSource(fork).recentlyClosedIssues(FE, SINCE);
+  assert.deepEqual(forked.issues[0].linkedPullRequests[0], { number: 5, repository: FE, headRepository: 'someone/fork', mergedAt: RECENT, baseRefName: 'master', mergeCommitSha: null });
+  assert.deepEqual(closedBeforeProductionCandidates(profile(FE), forked.issues, SINCE), [], 'fork PR and missing merge commit are not candidates');
 });
 
 test('GitHubConformanceSource: production containment reuses the completion receipt rules', async () => {
@@ -990,9 +998,39 @@ test('GitHubConformanceSource: production containment reuses the completion rece
     throw new Error(`unexpected ${path}`);
   };
   const ok = await new GitHubConformanceSource({ request: responses('success') }).productionContainment(profile(FE));
-  assert.equal(await ok.contains(M1), true);
-  assert.equal(await ok.contains('3'.repeat(40)), false);
+  assert.equal(await ok.contains({ mergeCommitSha: M1, mergedAt: RECENT }), true);
+  assert.equal(await ok.contains({ mergeCommitSha: '3'.repeat(40), mergedAt: RECENT }), false);
   const none = await new GitHubConformanceSource({ request: responses('failure') }).productionContainment(profile(FE));
-  await assert.rejects(none.contains(M1), /no valid Production receipt/);
+  await assert.rejects(none.contains({ mergeCommitSha: M1, mergedAt: RECENT }), /no valid Production receipt/);
   await assert.rejects(new GitHubConformanceSource({ request: async () => { throw new Error('GET x -> 403'); } }).productionContainment(profile(FE)), /403/);
+});
+
+test('GitHubConformanceSource: production-merge containment uses merged dev -> main release PR heads, as the engine does', async () => {
+  const releaseHead = '9'.repeat(40);
+  const mainHead = '8'.repeat(40);
+  const before = new Date(Date.now() - 5 * 86_400_000).toISOString();
+  const client = {
+    listAll: async path => {
+      assert.match(path, /\/pulls\?state=closed&base=main/);
+      return [
+        { number: 474, merged_at: RECENT, base: { ref: 'main' }, head: { ref: 'dev', sha: releaseHead, repo: { full_name: FE } } },
+        { number: 475, merged_at: RECENT, base: { ref: 'main' }, head: { ref: 'hotfix', sha: mainHead, repo: { full_name: FE } } },
+      ];
+    },
+    request: async path => {
+      if (path.includes('/commits/')) throw new Error('the promotion head is not evidence');
+      const compare = /\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/.exec(path);
+      assert.equal(compare[2], releaseHead, 'only the dev -> main release PR head is compared');
+      return compare[1] === M1 ? { status: 'ahead', merge_base_commit: { sha: M1 } } : { status: 'diverged', merge_base_commit: { sha: '0'.repeat(40) } };
+    },
+  };
+  const evidence = await new GitHubConformanceSource(client).productionContainment(legacyFrontend());
+  assert.equal(await evidence.contains({ mergeCommitSha: M1, mergedAt: before }), true);
+  assert.equal(await evidence.contains({ mergeCommitSha: M2, mergedAt: before }), false);
+  assert.equal(await evidence.contains({ mergeCommitSha: M1, mergedAt: new Date().toISOString() }), false, 'a release merged before the PR is not evidence');
+  const other = { ...legacyFrontend(), branches: Object.freeze({ default: 'main', integration: 'develop', promotion: 'release' }) };
+  const skipped = await new GitHubConformanceSource(client).productionContainment(other);
+  assert.match(skipped.skipped, /implemented for dev -> main/);
+  const findings = await checkClosedBeforeProduction({ ...other }, scanOf([closedIssue(1, { base: 'develop' })]), async () => skipped);
+  assert.deepEqual(findings.map(f => [f.check, f.severity]), [['CLOSED_BEFORE_PRODUCTION_SKIPPED', 'note']]);
 });

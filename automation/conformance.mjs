@@ -11,7 +11,8 @@ import { GitHubClient, projectReadBudget, readProjectItemsPage } from './github-
 import { getRepositoryProfile, loadRegistry, parseYamlSubset } from './registry.mjs';
 import { githubStore, sortedVersionTags } from './release.mjs';
 import { RECEIPT_STATUS_PAGE_SIZE, createReceiptResolver, readBranchHead, readProductionDeployments } from './completion.mjs';
-import { compareContainsCommit } from './frontend-production-completion.mjs';
+import { compareContainsCommit, readProductionReleases } from './frontend-production-completion.mjs';
+import { INTEGRATION_BRANCH as FRONTEND_INTEGRATION_BRANCH, PRODUCTION_BRANCH as FRONTEND_PRODUCTION_BRANCH } from './frontend-production-completion-policy.mjs';
 
 export const CONFORMANCE_CONTRACT = 'chipin-conformance/v1';
 export const ISSUE_MARKER = 'Conformance: ';
@@ -494,22 +495,23 @@ export const COMPLETION_ENGINE_ACTORS = Object.freeze(['github-actions', 'github
 export const closedBeforeProductionApplies = profile => profile.kind !== 'meta' && CLOSED_BEFORE_PRODUCTION_STRATEGIES.includes(profile.completion);
 
 // Pure filter over normalized closed Issues ({ number, closedAt, stateReason, closedBy, linkedPullRequests:
-// [{ number, repository, mergedAt, baseRefName, mergeCommitSha }] }): completed closes in the window, not by an engine
-// actor, with at least one same-repository PR merged into the integration branch. Returns the merged PRs to check.
+// [{ number, repository, headRepository, mergedAt, baseRefName, mergeCommitSha }] }): completed closes in the window, not by an engine
+// actor, with at least one same-repository PR (base and head; fork PRs are skipped as the engine does) merged into
+// the integration branch. Returns the merged PRs to check.
 export function closedBeforeProductionCandidates(profile, issues, since) {
   const integration = profile.branches.integration;
   const rows = [];
   for (const issue of issues) {
     if (!issue.closedAt || issue.closedAt < since || issue.stateReason !== 'COMPLETED') continue;
     if (COMPLETION_ENGINE_ACTORS.includes(issue.closedBy)) continue;
-    const prs = (issue.linkedPullRequests ?? []).filter(pr => pr.repository === profile.repository && pr.mergedAt
+    const prs = (issue.linkedPullRequests ?? []).filter(pr => pr.repository === profile.repository && pr.headRepository === profile.repository && pr.mergedAt
       && pr.baseRefName === integration && SHA.test(String(pr.mergeCommitSha ?? '')));
     if (prs.length) rows.push({ number: issue.number, closedAt: issue.closedAt, closedBy: issue.closedBy ?? 'unknown', prs });
   }
   return rows;
 }
 
-// scan: { since, issues, truncated }; production: async () => ({ label, contains: async mergeSha => boolean }), called
+// scan: { since, issues, truncated }; production: async () => ({ label, contains: async ({ mergeCommitSha, mergedAt }) => boolean } | { skipped }), called
 // only when a candidate exists. Any read error of the production evidence propagates (the repository is UNREADABLE).
 export async function checkClosedBeforeProduction(profile, scan, production) {
   if (!closedBeforeProductionApplies(profile)) return [];
@@ -522,17 +524,22 @@ export async function checkClosedBeforeProduction(profile, scan, production) {
   const candidates = closedBeforeProductionCandidates(profile, scan.issues, scan.since);
   if (!candidates.length) return findings;
   const evidence = await production();
+  if (evidence.skipped) {
+    findings.push(finding('CLOSED_BEFORE_PRODUCTION_SKIPPED', 'note', `CLOSED_BEFORE_PRODUCTION was not checked: ${evidence.skipped}`,
+      'None; the check runs again once the record matches a layout the completion engine implements.'));
+    return findings;
+  }
   const early = [];
   for (const row of candidates) {
     const pending = [];
-    for (const pr of row.prs) if (!(await evidence.contains(pr.mergeCommitSha))) pending.push(pr);
+    for (const pr of row.prs) if (!(await evidence.contains(pr))) pending.push(pr);
     if (pending.length) early.push({ ...row, pending });
   }
   if (!early.length) return findings;
   const list = early.map(r => `#${r.number} (closed ${r.closedAt.slice(0, 10)} by ${r.closedBy}; ${r.pending.map(pr => `PR #${pr.number} ${pr.mergeCommitSha.slice(0, 7)}`).join(', ')} not in production)`);
-  findings.push(finding('CLOSED_BEFORE_PRODUCTION', 'drift',
+  findings.push(finding('CLOSED_BEFORE_PRODUCTION', 'note',
     `${early.length} Issue(s) closed as completed in the last ${CLOSED_BEFORE_PRODUCTION_DAYS} days while a linked PR merged into ${profile.branches.integration} is not yet in ${evidence.label}: ${list.join('; ')}.`,
-    `Reopen each Issue so the completion engine closes it once production contains the merge (Awaiting release shows the wait), or leave it closed if the owner accepts the early close; the finding clears when production contains every listed merge commit. Close ${profile.repository} Issues by hand only after production (docs/workflow/completion.md).`));
+    `Leave the Issue closed: the finding clears after the production release (Promote) that contains the merge. Reopen only if the work is really not done; a reopen after the merge is a scope change for the completion engine, so the Issue then needs a fresh linked PR. Close ${profile.repository} Issues by hand only after production (docs/workflow/completion.md).`));
   return findings;
 }
 
@@ -862,7 +869,7 @@ export class GitHubConformanceSource {
     const issues = [];
     let after = null;
     for (let page = 1; page <= maxPages; page += 1) {
-      const data = await this.client.graphql('query($o:String!,$r:String!,$s:DateTime!,$n:Int!,$a:String){repository(owner:$o,name:$r){issues(states:CLOSED,first:$n,after:$a,orderBy:{field:UPDATED_AT,direction:DESC},filterBy:{since:$s}){pageInfo{hasNextPage endCursor} nodes{number closedAt stateReason timelineItems(last:1,itemTypes:[CLOSED_EVENT]){nodes{... on ClosedEvent{actor{login}}}} closedByPullRequestsReferences(first:50,includeClosedPrs:true){totalCount nodes{number mergedAt baseRefName repository{nameWithOwner} mergeCommit{oid}}}}}}}', { o: owner, r: name, s: since, n: pageSize, a: after });
+      const data = await this.client.graphql('query($o:String!,$r:String!,$s:DateTime!,$n:Int!,$a:String){repository(owner:$o,name:$r){issues(states:CLOSED,first:$n,after:$a,orderBy:{field:UPDATED_AT,direction:DESC},filterBy:{since:$s}){pageInfo{hasNextPage endCursor} nodes{number closedAt stateReason timelineItems(last:1,itemTypes:[CLOSED_EVENT]){nodes{... on ClosedEvent{actor{login}}}} closedByPullRequestsReferences(first:50,includeClosedPrs:true){totalCount nodes{number mergedAt baseRefName repository{nameWithOwner} headRepository{nameWithOwner} mergeCommit{oid}}}}}}}', { o: owner, r: name, s: since, n: pageSize, a: after });
       const connection = data?.repository?.issues;
       if (!connection?.pageInfo || !Array.isArray(connection.nodes)) throw new Error(`closed Issues of ${repository} unreadable`);
       for (const node of connection.nodes) {
@@ -871,7 +878,7 @@ export class GitHubConformanceSource {
         issues.push({
           number: node.number, closedAt: node.closedAt, stateReason: node.stateReason,
           closedBy: node.timelineItems?.nodes?.at(-1)?.actor?.login ?? null,
-          linkedPullRequests: linked.nodes.map(pr => ({ number: pr.number, repository: pr.repository?.nameWithOwner ?? null, mergedAt: pr.mergedAt, baseRefName: pr.baseRefName, mergeCommitSha: pr.mergeCommit?.oid ?? null })),
+          linkedPullRequests: linked.nodes.map(pr => ({ number: pr.number, repository: pr.repository?.nameWithOwner ?? null, headRepository: pr.headRepository?.nameWithOwner ?? null, mergedAt: pr.mergedAt, baseRefName: pr.baseRefName, mergeCommitSha: pr.mergeCommit?.oid ?? null })),
         });
       }
       if (!connection.pageInfo.hasNextPage) return { issues, truncated: false };
@@ -882,14 +889,30 @@ export class GitHubConformanceSource {
   }
   // Current production evidence, read the way the completion engine reads it (automation/completion.mjs):
   // deployment-receipt = the newest valid receipt of the registry productionEvidence that contains the commit;
-  // production-merge = the promotion branch head contains the commit. A window without any valid receipt is
-  // unreadable, never "nothing reached production".
+  // production-merge = the head of a merged integration -> promotion release PR, merged at or after the PR, contains
+  // the commit (readProductionReleases, same rule as findProductionRelease of the frontend policy; the promotion head
+  // itself is not evidence because release PRs may be squashed). The engine implements production-merge only for
+  // dev/main, so another layout is skipped with a note. A window without any valid receipt is unreadable, never
+  // "nothing reached production".
   async productionContainment(profile) {
     const repository = profile.repository;
     const containsCommit = (commit, head) => compareContainsCommit(this.client, repository, commit, head);
     if (profile.completion === 'production-merge') {
-      const head = await readBranchHead(this.client, repository, profile.branches.promotion);
-      return { label: `${profile.branches.promotion} (${head.slice(0, 7)})`, contains: sha => containsCommit(sha, head) };
+      const { integration, promotion } = profile.branches;
+      if (integration !== FRONTEND_INTEGRATION_BRANCH || promotion !== FRONTEND_PRODUCTION_BRANCH) {
+        return { skipped: `production-merge is implemented for ${FRONTEND_INTEGRATION_BRANCH} -> ${FRONTEND_PRODUCTION_BRANCH}; ${repository} declares ${integration} -> ${promotion ?? 'none'}.` };
+      }
+      const releases = await readProductionReleases(this.client, repository);
+      return {
+        label: `a merged ${integration} -> ${promotion} release PR`,
+        contains: async ({ mergeCommitSha, mergedAt }) => {
+          for (const release of releases) {
+            if (Date.parse(release.mergedAt) < Date.parse(mergedAt)) continue;
+            if (await containsCommit(mergeCommitSha, release.headSha)) return true;
+          }
+          return false;
+        },
+      };
     }
     const { environment, creator } = profile.productionEvidence ?? {};
     if (!environment || !creator) throw new Error(`${repository} has no productionEvidence in the registry`);
@@ -902,8 +925,8 @@ export class GitHubConformanceSource {
     });
     return {
       label: `a valid ${environment} receipt by ${creator}`,
-      contains: async sha => {
-        if (await resolver.findReceipt(sha)) return true;
+      contains: async ({ mergeCommitSha }) => {
+        if (await resolver.findReceipt(mergeCommitSha)) return true;
         if (!(await resolver.checked()).some(row => row.valid)) throw new Error(`no valid ${environment} receipt by ${creator} among the newest ${window.read} deployment(s) of ${repository}`);
         return false;
       },
