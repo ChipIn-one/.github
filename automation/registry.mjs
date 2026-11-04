@@ -224,7 +224,7 @@ export const PRODUCTION_EVIDENCE_VERIFIERS = Object.freeze(['workflow-run']);
 const WORKFLOW_RUN_EVIDENCE_KEYS = Object.freeze(['task', 'verifier', 'workflow', 'branch', 'job']);
 const WORKFLOW_PATH = /^\.github\/workflows\/[A-Za-z0-9._-]+\.ya?ml$/;
 // a job display name: printable, no leading or trailing whitespace (e.g. `record-receipt`, `deploy / deploy`)
-const JOB_NAME = /^\S(?:[^\p{Cc}]*\S)?$/u;
+const JOB_NAME = /^[^\p{Cc}\p{Cf}\s](?:[^\p{Cc}\p{Cf}]*[^\p{Cc}\p{Cf}\s])?$/u;
 const DEPLOYMENT_TASK = /^[A-Za-z0-9._:-]+$/;
 const PROTECTION = ['ruleset', 'protection', 'unavailable'];
 const RELEASE_STRATEGIES = ['semver-by-impact', 'deploy-tag', 'none'];

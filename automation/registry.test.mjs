@@ -231,7 +231,7 @@ test('deployment-receipt with verifier workflow-run declares task, workflow, bra
     ['verifier', 'signature'], ['verifier', ''],
     ['workflow', 'deploy-production.yml'], ['workflow', '.github/workflows/../x.yml'], ['workflow', '.github/workflows/x.txt'],
     ['branch', 'develop'], // not the integration branch of the record
-    ['branch', ''], ['job', ' record-receipt'], ['job', 'record-receipt '], ['job', 'record\treceipt'], ['job', ''], ['job', 7], ['task', 'deploy image'], ['task', ''], ['task', 7],
+    ['branch', ''], ['job', ' record-receipt'], ['job', 'record-receipt '], ['job', 'record\treceipt'], ['job', 'record\u0007receipt'], ['job', 'record\u200breceipt'], ['job', '\u200brecord-receipt'], ['job', 'record-receipt\u00a0'], ['job', ''], ['job', 7], ['task', 'deploy image'], ['task', ''], ['task', 7],
   ]) {
     rejects(() => validateRegistry(document([record({ ...RECEIPT, productionEvidence: { ...RUN_EVIDENCE, [key]: value } })])), 'REGISTRY_VALUE');
   }

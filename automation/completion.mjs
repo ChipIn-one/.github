@@ -305,9 +305,12 @@ export async function readDeclaredTargetStates(client, issue) {
   return states;
 }
 
+// `GET /commits/heads/<branch>` names the branch ref explicitly: the short form `/commits/<branch>` resolves an
+// ambiguous name, so a tag named like the branch (e.g. `develop`) could answer with another commit (chipin-backend#184).
 export async function readBranchHead(client, repository, branch) {
   const { owner, repo } = splitRepository(repository);
-  const commit = await client.request("/repos/" + owner + "/" + repo + "/commits/" + encodeURIComponent(branch));
+  const commit = await client.request("/repos/" + owner + "/" + repo + "/commits/heads/"
+    + String(branch).split("/").map(encodeURIComponent).join("/"));
   if (!SHA_PATTERN.test(String(commit?.sha ?? ""))) {
     throw blocked("UNREADABLE_BRANCH_HEAD", "Head of " + repository + "@" + branch + " is unreadable");
   }

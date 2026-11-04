@@ -335,6 +335,13 @@ test("integration-merge: the evaluator refuses incomplete context instead of gue
 
 test("readBranchHead fails closed on an unreadable head", async () => {
   assert.equal(await readBranchHead({ request: async () => ({ sha: HEAD }) }, ORG, "master"), HEAD);
+  // the branch ref is named explicitly: a tag with the branch's name never answers (chipin-backend#184)
+  const refs = { "/repos/ChipIn-one/chipin-backend/commits/develop": { sha: MERGE }, "/repos/ChipIn-one/chipin-backend/commits/heads/develop": { sha: HEAD } };
+  const asked = [];
+  assert.equal(await readBranchHead({ request: async (path) => { asked.push(path); return refs[path]; } }, "ChipIn-one/chipin-backend", "develop"), HEAD);
+  assert.deepEqual(asked, ["/repos/ChipIn-one/chipin-backend/commits/heads/develop"]);
+  assert.equal(await readBranchHead({ request: async (path) => (path === "/repos/ChipIn-one/.github/commits/heads/release/v1%231" ? { sha: HEAD } : null) },
+    ORG, "release/v1#1"), HEAD, "each path segment is encoded, the slash is kept");
   await assert.rejects(() => readBranchHead({ request: async () => ({ sha: "nope" }) }, ORG, "master"),
     (error) => error instanceof CompletionBlocked && error.code === "UNREADABLE_BRANCH_HEAD");
   await assert.rejects(() => readBranchHead({ request: async () => ({}) }, "bad", "master"),
@@ -393,7 +400,7 @@ function fakeClient({
     },
     request: async (path, options = {}) => {
       log.push((options.method ?? "GET") + " " + path);
-      if (path.endsWith("/commits/master")) return { sha: HEAD };
+      if (path.endsWith("/commits/heads/master")) return { sha: HEAD };
       if (path.includes("/compare/")) {
         if (compareError) throw new Error(compareError);
         return { status: compareStatus, merge_base_commit: { sha: MERGE } };
@@ -422,7 +429,7 @@ test("integration sweep closes a complete .github Issue through the shared stale
   assert.equal(results[0].decision.code, "closed-completed");
   assert.ok(client.log.some((entry) => entry.startsWith("PATCH ") && entry.endsWith("/issues/1")));
   // the integration head was read once, from the registry branch
-  assert.equal(client.log.filter((entry) => entry === "GET /repos/ChipIn-one/.github/commits/master").length, 1);
+  assert.equal(client.log.filter((entry) => entry === "GET /repos/ChipIn-one/.github/commits/heads/master").length, 1);
 });
 
 test("integration sweep leaves the Issue open when it changed after evaluation (stale snapshot)", async () => {
@@ -470,7 +477,7 @@ test("integration sweep fails closed when the token cannot see every sub-issue, 
 test("integration sweep requires the Project config when reconciliation is on and fails closed on an unreadable head", async () => {
   await assert.rejects(() => runIntegrationCompletionSweep(fakeClient(), orgProfile(), { reconcileProjectStatus: true }), /projectConfig/u);
   const client = fakeClient();
-  client.request = async (path) => (path.endsWith("/commits/master") ? { sha: null } : { state: "open" });
+  client.request = async (path) => (path.endsWith("/commits/heads/master") ? { sha: null } : { state: "open" });
   await assert.rejects(() => runIntegrationCompletionSweep(client, orgProfile(), { reconcileProjectStatus: false }),
     (error) => error.code === "UNREADABLE_BRANCH_HEAD");
 });
@@ -706,7 +713,7 @@ function projectClient({
     },
     request: async (path, options = {}) => {
       log.push((options.method ?? "GET") + " " + path);
-      if (path.endsWith("/commits/master")) return { sha: HEAD };
+      if (path.endsWith("/commits/heads/master")) return { sha: HEAD };
       if (path.includes("/compare/")) return { status: "ahead", merge_base_commit: { sha: MERGE } };
       if (/\/issues\/\d+$/u.test(path) && (options.method ?? "GET") === "GET") {
         return { state: issueState, updated_at: issueUpdatedAt, sub_issues_summary: { total: 0, completed: 0, percent_completed: 0 } };
@@ -1650,7 +1657,7 @@ function beClient({
     request: async (path, options = {}) => {
       log.push((options.method ?? "GET") + " " + path);
       assert.ok(path.startsWith("/repos/" + BE + "/"), "only the backend repository is read: " + path);
-      if (path.endsWith("/commits/develop")) return { sha: HEAD };
+      if (path.endsWith("/commits/heads/develop")) return { sha: HEAD };
       let match = /\/deployments\?environment=([^&]+)&per_page=(\d+)&page=(\d+)$/u.exec(path);
       if (match) {
         assert.equal(decodeURIComponent(match[1]), "production-receipt");
@@ -1768,6 +1775,19 @@ test("backend: a run on a tag named develop (head_branch develop, head_sha off d
   const flaky = beClient({ compareErrors: { [RUN_HEAD + "..." + HEAD]: "GET /compare -> 502: Bad Gateway" } });
   assert.equal((await beRunCompletion(flaky)).results[0].decision.code, "production-evidence-unreadable");
   assert.deepEqual(closes(flaky), []);
+});
+
+test("backend: the develop head is read as refs/heads/develop, so a tag named develop cannot move it", async () => {
+  // a tag `develop` at MERGE (which contains the attacker's run head RUN_HEAD) would answer the short ref /commits/develop;
+  // the real develop head HEAD does not contain RUN_HEAD, so the run is rejected
+  const client = beClient({ ancestry: [MERGE + "..." + HEAD, RECEIPT_SHA + "..." + HEAD, MERGE + "..." + RECEIPT_SHA, RUN_HEAD + "..." + MERGE] });
+  const base = client.request;
+  client.request = async (path, options) => (path.endsWith("/commits/develop") ? { sha: MERGE } : base(path, options));
+  const { results } = await beRunCompletion(client);
+  assert.equal(results[0].decision.code, "production-evidence-untrusted");
+  assert.match(results[0].decision.detail, /run-head-not-on-integration-branch/u);
+  assert.ok(client.log.includes("GET /repos/" + BE + "/commits/heads/develop"));
+  assert.ok(!client.log.includes("GET /repos/" + BE + "/commits/develop"));
 });
 
 test("backend: a full page of jobs cannot prove the receipt job (run-jobs-truncated)", async () => {
