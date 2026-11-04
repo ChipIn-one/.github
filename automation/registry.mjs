@@ -217,12 +217,14 @@ const DEPLOYMENT_CREATOR = /^[a-z\d](?:[a-z\d-]{0,38})(?:\[bot\])?$/i;
 // productionEvidence.verifier (chipin-backend#184): absent = the receipt record itself is the evidence (a platform
 // such as Vercel writes it; the frontend). `workflow-run` = the record is written by a job of our own workflow, which
 // anyone with write access could imitate, so the engine also proves it against that workflow run: `workflow` is the
-// workflow file path, `branch` its head branch (the integration branch), `job` the job that writes the receipt and
+// workflow file path, `branch` its head branch (the integration branch), `job` the display name of the job that writes
+// the receipt as the jobs API reports it (the `name:` of the job, or its job id when it has no `name:`) and
 // `task` the Deployment task. Only these keys go with the verifier, and only with it.
 export const PRODUCTION_EVIDENCE_VERIFIERS = Object.freeze(['workflow-run']);
 const WORKFLOW_RUN_EVIDENCE_KEYS = Object.freeze(['task', 'verifier', 'workflow', 'branch', 'job']);
 const WORKFLOW_PATH = /^\.github\/workflows\/[A-Za-z0-9._-]+\.ya?ml$/;
-const JOB_ID = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+// a job display name: printable, no leading or trailing whitespace (e.g. `record-receipt`, `deploy / deploy`)
+const JOB_NAME = /^\S(?:[^\p{Cc}]*\S)?$/u;
 const DEPLOYMENT_TASK = /^[A-Za-z0-9._:-]+$/;
 const PROTECTION = ['ruleset', 'protection', 'unavailable'];
 const RELEASE_STRATEGIES = ['semver-by-impact', 'deploy-tag', 'none'];
@@ -323,7 +325,7 @@ function normalizeRepository(record, index) {
       assertString(`${where}.productionEvidence.task`, task, DEPLOYMENT_TASK);
       assertString(`${where}.productionEvidence.workflow`, workflow, WORKFLOW_PATH);
       assertString(`${where}.productionEvidence.branch`, branch, BRANCH);
-      assertString(`${where}.productionEvidence.job`, job, JOB_ID);
+      assertString(`${where}.productionEvidence.job`, job, JOB_NAME);
       if (branch !== record.branches.integration) {
         fail('REGISTRY_VALUE', `${where}.productionEvidence.branch: "${branch}" is not the integration branch "${record.branches.integration}"`);
       }

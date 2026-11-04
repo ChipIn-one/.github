@@ -917,7 +917,8 @@ export function receiptRunId(deployment) {
  * rules are those of chipin-backend's release-after-deploy guard plus the job evidence:
  * - `task` equals the registry task; payload.run_id is a positive integer cited by no other receipt in the window;
  * - the run is in this repository (head repository too), its `path` is the registry workflow, `event`
- *   `workflow_dispatch`, `head_branch` the registry branch, `status` completed with `conclusion` success;
+ *   `workflow_dispatch`, `head_branch` the registry branch, `status` completed with `conclusion` success, and its
+ *   `head_sha` is contained in the integration head (a tag named like the branch gives the same `head_branch`);
  * - the Deployment was created inside the run window (run created_at .. updated_at);
  * - the run's successful `job` jobs (all attempts, one page) carry, among all their annotations, exactly one receipt
  *   notice, and it names this deployment id and SHA; that job's window (started_at .. completed_at) contains the
@@ -929,6 +930,8 @@ export async function verifyWorkflowRunReceipt(deployment, verdict, {
   repository,
   evidence,
   citations,
+  integrationHeadSha,
+  containsCommit,
   readRun,
   readRunJobs,
   readAnnotations,
@@ -959,6 +962,16 @@ export async function verifyWorkflowRunReceipt(deployment, verdict, {
     return invalid("run-conclusion-" + (run.status !== "completed" ? (run.status ?? "unknown") : (run.conclusion ?? "unknown")));
   }
   if (!withinWindow(record.createdAt, run.created_at, run.updated_at)) return invalid("outside-run-window");
+  // head_branch alone is not proof: a run dispatched on a tag named like the branch reports the tag name there
+  if (!SHA_PATTERN.test(String(run.head_sha ?? ""))) return invalid("run-head-unreadable");
+  let headOnBranch;
+  try {
+    headOnBranch = await containsCommit(run.head_sha, integrationHeadSha);
+  } catch (error) {
+    if (isNotFound(error)) return invalid("run-head-not-on-integration-branch");
+    throw error;
+  }
+  if (!headOnBranch) return invalid("run-head-not-on-integration-branch");
 
   const jobsPage = await readRunJobs(runId);
   const jobs = jobsPage?.jobs;
@@ -1182,6 +1195,8 @@ export async function runDeploymentReceiptCompletionSweep(client, profile, {
           repository,
           evidence,
           citations,
+          integrationHeadSha,
+          containsCommit,
           readRun: (runId) => client.request("/repos/" + owner + "/" + repo + "/actions/runs/" + runId),
           readRunJobs: (runId) => client.request("/repos/" + owner + "/" + repo + "/actions/runs/" + runId
             + "/jobs?filter=all&per_page=" + RUN_JOBS_PAGE_SIZE),

@@ -1550,6 +1550,8 @@ test("deployment-receipt: a record without productionEvidence is refused before 
 
 const BE = "ChipIn-one/chipin-backend";
 const BE_RUN = 5000;
+// the develop commit the Deploy Production run was dispatched on (its head_sha)
+const RUN_HEAD = "4444444444444444444444444444444444444444";
 const BE_RUN_URL = (id) => "https://github.com/ChipIn-one/chipin-backend/actions/runs/" + id;
 const BE_EVIDENCE_LINE = "    productionEvidence: { environment: production-receipt, creator: \"github-actions[bot]\", task: \"deploy:image-receipt\","
   + " verifier: workflow-run, workflow: .github/workflows/deploy-production.yml, branch: develop, job: record-receipt }\n";
@@ -1584,7 +1586,7 @@ function beStatus({ id = 7000, runId = BE_RUN, createdAt = "2026-10-08T10:05:01Z
 function beRun({ id = BE_RUN, ...overrides } = {}) {
   return {
     id, path: ".github/workflows/deploy-production.yml", event: "workflow_dispatch", head_branch: "develop",
-    status: "completed", conclusion: "success", created_at: "2026-10-08T10:00:00Z", updated_at: "2026-10-08T10:06:00Z",
+    status: "completed", conclusion: "success", head_sha: RUN_HEAD, created_at: "2026-10-08T10:00:00Z", updated_at: "2026-10-08T10:06:00Z",
     html_url: BE_RUN_URL(id), repository: { full_name: BE }, head_repository: { full_name: BE }, ...overrides,
   };
 }
@@ -1625,7 +1627,8 @@ function beClient({
   runs = { [BE_RUN]: beRun() },
   jobs = { [BE_RUN]: beJobs() },
   annotations = { [BE_RUN * 10 + 1]: [], [BE_RUN * 10 + 2]: [receiptNotice(700, RECEIPT_SHA)] },
-  ancestry = [MERGE + "..." + HEAD, RECEIPT_SHA + "..." + HEAD, OLD_RECEIPT_SHA + "..." + HEAD, MERGE + "..." + RECEIPT_SHA],
+  ancestry = [MERGE + "..." + HEAD, RECEIPT_SHA + "..." + HEAD, OLD_RECEIPT_SHA + "..." + HEAD, RUN_HEAD + "..." + HEAD, MERGE + "..." + RECEIPT_SHA],
+  compareErrors = {},
 } = {}) {
   const log = [];
   const answer = (table, key, path) => {
@@ -1658,6 +1661,7 @@ function beClient({
       if ((match = /\/actions\/runs\/(\d+)\/jobs\?filter=all&per_page=100$/u.exec(path))) return answer(jobs, match[1], path);
       if ((match = /\/check-runs\/(\d+)\/annotations\?per_page=100$/u.exec(path))) return answer(annotations, match[1], path);
       if ((match = /\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/u.exec(path))) {
+        if (compareErrors[match[1] + "..." + match[2]]) throw new Error(compareErrors[match[1] + "..." + match[2]]);
         return ancestry.includes(match[1] + "..." + match[2])
           ? { status: "ahead", merge_base_commit: { sha: match[1] } }
           : { status: "diverged", merge_base_commit: { sha: "ffffffffffffffffffffffffffffffffffffffff" } };
@@ -1752,6 +1756,53 @@ test("backend: a forged receipt (branch workflow, wrong path, event, conclusion,
   await untrusted("string payload", { deployments: [beDeployment({ payload: "run 5000" })] }, "run-id-unreadable");
 });
 
+test("backend: a run on a tag named develop (head_branch develop, head_sha off develop) never closes", async () => {
+  const offDevelop = [MERGE + "..." + HEAD, RECEIPT_SHA + "..." + HEAD, MERGE + "..." + RECEIPT_SHA];
+  const { client } = await untrusted("tag named develop", { ancestry: offDevelop }, "run-head-not-on-integration-branch");
+  assert.ok(client.log.includes("GET /repos/" + BE + "/compare/" + RUN_HEAD + "..." + HEAD), "head_sha is compared with the develop head");
+  assert.ok(!client.log.some((entry) => entry.includes("/jobs?")), "no job read for a run off develop");
+  await untrusted("head commit gone", { compareErrors: { [RUN_HEAD + "..." + HEAD]: "GET /compare -> 404: No commit found" } },
+    "run-head-not-on-integration-branch");
+  await untrusted("no head_sha", { runs: { [BE_RUN]: beRun({ head_sha: "develop" }) } }, "run-head-unreadable");
+  // any other compare error is unreadable, not untrusted
+  const flaky = beClient({ compareErrors: { [RUN_HEAD + "..." + HEAD]: "GET /compare -> 502: Bad Gateway" } });
+  assert.equal((await beRunCompletion(flaky)).results[0].decision.code, "production-evidence-unreadable");
+  assert.deepEqual(closes(flaky), []);
+});
+
+test("backend: a full page of jobs cannot prove the receipt job (run-jobs-truncated)", async () => {
+  const full = beJobs();
+  const filler = Array.from({ length: 98 }, (_, index) => ({ ...full.jobs[0], id: 90000 + index, name: "matrix " + index }));
+  await untrusted("100 jobs on the page", {
+    jobs: { [BE_RUN]: { total_count: 100, jobs: [...filler, ...full.jobs] } },
+  }, "run-jobs-truncated");
+});
+
+test("backend: a verifier record without its workflow-run keys is refused before any read", async () => {
+  const registry = await backendReceiptRegistry();
+  for (const drop of ["task", "workflow", "branch", "job"]) {
+    const forged = {
+      ...registry,
+      repositories: registry.repositories.map((profile) => {
+        if (profile.repository !== BE) return profile;
+        const { [drop]: _dropped, ...evidence } = profile.productionEvidence;
+        return { ...profile, productionEvidence: evidence };
+      }),
+    };
+    const client = beClient();
+    await assert.rejects(() => runCompletion(client, { repository: BE, registry: forged, reconcileProjectStatus: false }),
+      (error) => error instanceof CompletionBlocked && error.code === "PRODUCTION_EVIDENCE_UNDECLARED", drop);
+    assert.deepEqual(client.log, [], drop);
+  }
+  const wrongVerifier = {
+    ...registry,
+    repositories: registry.repositories.map((profile) => (profile.repository === BE
+      ? { ...profile, productionEvidence: { ...profile.productionEvidence, verifier: "signature" } } : profile)),
+  };
+  await assert.rejects(() => runCompletion(beClient(), { repository: BE, registry: wrongVerifier, reconcileProjectStatus: false }),
+    (error) => error.code === "PRODUCTION_EVIDENCE_UNDECLARED");
+});
+
 test("backend: a run_id cited by more than one receipt rejects all of them", async () => {
   const twin = beDeployment({ id: 701, createdAt: "2026-10-08T10:05:05Z" });
   const { client } = await untrusted("cited twice", {
@@ -1785,7 +1836,7 @@ test("backend: the record-receipt job evidence must name exactly this deployment
   await untrusted("newest status inactive", {
     statuses: { 700: [beStatus(), beStatus({ id: 7009, state: "inactive", createdAt: "2026-10-09T10:00:00Z" })] },
   }, "newest-status-inactive");
-  await untrusted("sha not on develop", { ancestry: [MERGE + "..." + HEAD, MERGE + "..." + RECEIPT_SHA] }, "not-on-integration-branch");
+  await untrusted("sha not on develop", { ancestry: [MERGE + "..." + HEAD, RUN_HEAD + "..." + HEAD, MERGE + "..." + RECEIPT_SHA] }, "not-on-integration-branch");
 });
 
 test("backend: only the latest receipt counts; a rollback to an older SHA keeps newer work open", async () => {
