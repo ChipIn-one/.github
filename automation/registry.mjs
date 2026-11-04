@@ -214,6 +214,16 @@ const PRODUCTION_EVIDENCE_STRATEGY = 'deployment-receipt';
 // `completion.mjs --repository <it>` on a schedule (owner decision for chipin-frontend). Conformance reads it.
 export const COMPLETION_RUNNERS = Object.freeze(['repository', 'org-sweep']);
 const DEPLOYMENT_CREATOR = /^[a-z\d](?:[a-z\d-]{0,38})(?:\[bot\])?$/i;
+// productionEvidence.verifier (chipin-backend#184): absent = the receipt record itself is the evidence (a platform
+// such as Vercel writes it; the frontend). `workflow-run` = the record is written by a job of our own workflow, which
+// anyone with write access could imitate, so the engine also proves it against that workflow run: `workflow` is the
+// workflow file path, `branch` its head branch (the integration branch), `job` the job that writes the receipt and
+// `task` the Deployment task. Only these keys go with the verifier, and only with it.
+export const PRODUCTION_EVIDENCE_VERIFIERS = Object.freeze(['workflow-run']);
+const WORKFLOW_RUN_EVIDENCE_KEYS = Object.freeze(['task', 'verifier', 'workflow', 'branch', 'job']);
+const WORKFLOW_PATH = /^\.github\/workflows\/[A-Za-z0-9._-]+\.ya?ml$/;
+const JOB_ID = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+const DEPLOYMENT_TASK = /^[A-Za-z0-9._:-]+$/;
 const PROTECTION = ['ruleset', 'protection', 'unavailable'];
 const RELEASE_STRATEGIES = ['semver-by-impact', 'deploy-tag', 'none'];
 const RELEASE_TRIGGERS = ['promotion-merge', 'integration-merge', 'production-deploy'];
@@ -287,7 +297,7 @@ function normalizeRepository(record, index) {
     if (!Object.hasOwn(record, 'productionEvidence')) {
       fail('REGISTRY_VALUE', `${where}: completion ${PRODUCTION_EVIDENCE_STRATEGY} needs productionEvidence { environment, creator }`);
     }
-    assertKeys(`${where}.productionEvidence`, record.productionEvidence, ['environment', 'creator']);
+    assertKeys(`${where}.productionEvidence`, record.productionEvidence, ['environment', 'creator'], WORKFLOW_RUN_EVIDENCE_KEYS);
     const { environment, creator } = record.productionEvidence;
     if (typeof environment !== 'string' || environment.trim() !== environment) {
       fail('REGISTRY_VALUE', `${where}.productionEvidence.environment: invalid value ${JSON.stringify(environment)}`);
@@ -298,6 +308,27 @@ function normalizeRepository(record, index) {
       fail('REGISTRY_VALUE', `${where}: completion ${PRODUCTION_EVIDENCE_STRATEGY} needs deploymentProfile production`);
     }
     productionEvidence = { environment, creator };
+    const runKeys = WORKFLOW_RUN_EVIDENCE_KEYS.filter(key => Object.hasOwn(record.productionEvidence, key));
+    if (runKeys.length > 0) {
+      const { task, verifier, workflow, branch, job } = record.productionEvidence;
+      if (!Object.hasOwn(record.productionEvidence, 'verifier')) {
+        fail('REGISTRY_VALUE', `${where}.productionEvidence: ${runKeys.join(', ')} need verifier ${PRODUCTION_EVIDENCE_VERIFIERS.join(' | ')}`);
+      }
+      assertEnum(`${where}.productionEvidence.verifier`, verifier, PRODUCTION_EVIDENCE_VERIFIERS);
+      for (const key of WORKFLOW_RUN_EVIDENCE_KEYS) {
+        if (!Object.hasOwn(record.productionEvidence, key)) {
+          fail('REGISTRY_VALUE', `${where}.productionEvidence: verifier ${verifier} needs "${key}"`);
+        }
+      }
+      assertString(`${where}.productionEvidence.task`, task, DEPLOYMENT_TASK);
+      assertString(`${where}.productionEvidence.workflow`, workflow, WORKFLOW_PATH);
+      assertString(`${where}.productionEvidence.branch`, branch, BRANCH);
+      assertString(`${where}.productionEvidence.job`, job, JOB_ID);
+      if (branch !== record.branches.integration) {
+        fail('REGISTRY_VALUE', `${where}.productionEvidence.branch: "${branch}" is not the integration branch "${record.branches.integration}"`);
+      }
+      productionEvidence = { environment, creator, task, verifier, workflow, branch, job };
+    }
   } else if (Object.hasOwn(record, 'productionEvidence')) {
     fail('REGISTRY_VALUE', `${where}.productionEvidence: only completion ${PRODUCTION_EVIDENCE_STRATEGY} reads production evidence`);
   }

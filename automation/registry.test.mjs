@@ -207,6 +207,37 @@ test('deployment-receipt is automatic and declares its production evidence', () 
   assert.deepEqual(parsed, { productionEvidence: { environment: 'Production', creator: 'vercel[bot]' } });
 });
 
+// a backend-style record (chipin-backend#184): the receipt is written by our own workflow and proven against its run
+const RUN_EVIDENCE = {
+  environment: 'production-receipt', creator: 'github-actions[bot]', task: 'deploy:image-receipt',
+  verifier: 'workflow-run', workflow: '.github/workflows/deploy-production.yml', branch: 'main', job: 'record-receipt',
+};
+
+test('deployment-receipt with verifier workflow-run declares task, workflow, branch and job (chipin-backend#184)', () => {
+  const [profile] = validateRegistry(document([record({ ...RECEIPT, productionEvidence: RUN_EVIDENCE })])).repositories;
+  assert.deepEqual(profile.productionEvidence, RUN_EVIDENCE);
+  assert.throws(() => { profile.productionEvidence.workflow = '.github/workflows/x.yml'; }, TypeError);
+  // the frontend shape stays exactly { environment, creator }
+  assert.deepEqual(Object.keys(validateRegistry(document([record(RECEIPT)])).repositories[0].productionEvidence), ['environment', 'creator']);
+  // the YAML subset reads the backend line as written in workflow-registry.yaml
+  const line = 'productionEvidence: { environment: production-receipt, creator: "github-actions[bot]", task: "deploy:image-receipt",'
+    + ' verifier: workflow-run, workflow: .github/workflows/deploy-production.yml, branch: main, job: record-receipt }';
+  assert.deepEqual(parseYamlSubset(line), { productionEvidence: RUN_EVIDENCE });
+  for (const key of ['task', 'verifier', 'workflow', 'branch', 'job']) {
+    const { [key]: _dropped, ...partial } = RUN_EVIDENCE;
+    rejects(() => validateRegistry(document([record({ ...RECEIPT, productionEvidence: partial })])), 'REGISTRY_VALUE');
+  }
+  for (const [key, value] of [
+    ['verifier', 'signature'], ['verifier', ''],
+    ['workflow', 'deploy-production.yml'], ['workflow', '.github/workflows/../x.yml'], ['workflow', '.github/workflows/x.txt'],
+    ['branch', 'develop'], // not the integration branch of the record
+    ['branch', ''], ['job', 'record receipt'], ['job', ''], ['task', 'deploy image'], ['task', ''], ['task', 7],
+  ]) {
+    rejects(() => validateRegistry(document([record({ ...RECEIPT, productionEvidence: { ...RUN_EVIDENCE, [key]: value } })])), 'REGISTRY_VALUE');
+  }
+  rejects(() => validateRegistry(document([record({ ...RECEIPT, productionEvidence: { ...RUN_EVIDENCE, extra: 1 } })])), 'REGISTRY_SCHEMA');
+});
+
 test('completionRunner: repository by default, org-sweep only for an automatic code or docs record (.github#217)', () => {
   const automatic = { ...RECEIPT, capabilities: { completion: 'automatic' } };
   assert.equal(validateRegistry(document([record(automatic)])).repositories[0].completionRunner, 'repository');
@@ -225,7 +256,9 @@ test('deployment-receipt without valid production evidence is rejected; other st
   rejects(() => validateRegistry(document([record(withoutEvidence)])), 'REGISTRY_VALUE');
   rejects(() => validateRegistry(document([record({ ...RECEIPT, productionEvidence: null })])), 'REGISTRY_SCHEMA');
   rejects(() => validateRegistry(document([record({ ...RECEIPT, productionEvidence: { environment: 'Production' } })])), 'REGISTRY_SCHEMA');
-  rejects(() => validateRegistry(document([record({ ...RECEIPT, productionEvidence: { ...productionEvidence, branch: 'master' } })])), 'REGISTRY_SCHEMA');
+  rejects(() => validateRegistry(document([record({ ...RECEIPT, productionEvidence: { ...productionEvidence, region: 'eu' } })])), 'REGISTRY_SCHEMA');
+  // the workflow-run keys exist only together with the verifier (chipin-backend#184)
+  rejects(() => validateRegistry(document([record({ ...RECEIPT, productionEvidence: { ...productionEvidence, branch: 'main' } })])), 'REGISTRY_VALUE');
   for (const bad of [
     { environment: '', creator: 'vercel[bot]' },
     { environment: ' Production', creator: 'vercel[bot]' },

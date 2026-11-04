@@ -25,6 +25,7 @@ import {
   runIntegrationCompletionSweep,
   setAwaitingReleaseStatus,
   validateProductionReceipt,
+  verifyWorkflowRunReceipt,
 } from "./completion.mjs";
 import { AUTOMATIC_COMPLETION_STRATEGIES, loadRegistry, validateRegistry } from "./registry.mjs";
 
@@ -1543,4 +1544,331 @@ test("deployment-receipt: a record without productionEvidence is refused before 
   assert.deepEqual(client.log, []);
   assert.equal(createReceiptResolver.length, 1);
   assert.throws(() => createReceiptResolver({ deployments: [], readStatuses: null, containsCommit: null }), /callbacks are required/u);
+});
+
+// ---- deployment-receipt with verifier workflow-run (chipin-backend#184) ----
+
+const BE = "ChipIn-one/chipin-backend";
+const BE_RUN = 5000;
+const BE_RUN_URL = (id) => "https://github.com/ChipIn-one/chipin-backend/actions/runs/" + id;
+const BE_EVIDENCE_LINE = "    productionEvidence: { environment: production-receipt, creator: \"github-actions[bot]\", task: \"deploy:image-receipt\","
+  + " verifier: workflow-run, workflow: .github/workflows/deploy-production.yml, branch: develop, job: record-receipt }\n";
+
+// The later registry switch (docs/workflow/backend.md rollout), simulated: the live backend record stays manual.
+async function backendReceiptRegistry() {
+  const live = await readFile(new URL("../workflow-registry.yaml", import.meta.url), "utf8");
+  const strategy = /^    completion: manual {18}# deployment-receipt decided \(#156\)[^\n]*\n/mu;
+  const capability = /(prMetadata: required, relationships: required, )completion: manual(, milestones: enabled, dependabot: required, agentRouting: required \})/u;
+  assert.match(live, strategy, "the live backend record is completion: manual");
+  assert.match(live, capability);
+  return loadRegistry({
+    text: live.replace(strategy, "    completion: deployment-receipt\n" + BE_EVIDENCE_LINE).replace(capability, "$1completion: automatic$2"),
+  });
+}
+
+function beDeployment({
+  id = 700, sha = RECEIPT_SHA, runId = BE_RUN, createdAt = "2026-10-08T10:05:00Z", task = "deploy:image-receipt",
+  environment = "production-receipt", creator = "github-actions[bot]", payload,
+} = {}) {
+  return {
+    id, sha, ref: sha, task, environment, creator: { login: creator }, created_at: createdAt,
+    payload: payload ?? { image: "olegbal/chipin-backend:" + sha, run_id: runId },
+  };
+}
+function beStatus({ id = 7000, runId = BE_RUN, createdAt = "2026-10-08T10:05:01Z", logUrl, ...rest } = {}) {
+  return {
+    id, state: "success", creator: { login: "github-actions[bot]" }, created_at: createdAt, environment: "production-receipt",
+    log_url: logUrl ?? BE_RUN_URL(runId), ...rest,
+  };
+}
+function beRun({ id = BE_RUN, ...overrides } = {}) {
+  return {
+    id, path: ".github/workflows/deploy-production.yml", event: "workflow_dispatch", head_branch: "develop",
+    status: "completed", conclusion: "success", created_at: "2026-10-08T10:00:00Z", updated_at: "2026-10-08T10:06:00Z",
+    html_url: BE_RUN_URL(id), repository: { full_name: BE }, head_repository: { full_name: BE }, ...overrides,
+  };
+}
+function beJobs({ runId = BE_RUN, receiptJob = {} } = {}) {
+  const jobs = [
+    { id: runId * 10 + 1, name: "deploy / deploy", conclusion: "success", started_at: "2026-10-08T10:00:10Z",
+      completed_at: "2026-10-08T10:04:40Z", check_run_url: "https://api.github.com/repos/" + BE + "/check-runs/" + (runId * 10 + 1) },
+    { id: runId * 10 + 2, name: "record-receipt", conclusion: "success", started_at: "2026-10-08T10:04:50Z",
+      completed_at: "2026-10-08T10:05:10Z", check_run_url: "https://api.github.com/repos/" + BE + "/check-runs/" + (runId * 10 + 2), ...receiptJob },
+  ];
+  return { total_count: jobs.length, jobs };
+}
+const receiptNotice = (deploymentId, sha) => ({ annotation_level: "notice", title: "", message: "Production receipt: deployment " + deploymentId + " for " + sha });
+
+function bePrNode(number, mergeCommit = MERGE) {
+  return {
+    number, url: "https://github.com/" + BE + "/pull/" + number, state: "MERGED",
+    mergedAt: "2026-10-01T10:00:00Z", baseRefName: "develop", headRefName: "feat/x-" + number,
+    headRefOid: "2222222222222222222222222222222222222222",
+    repository: { nameWithOwner: BE }, headRepository: { nameWithOwner: BE }, mergeCommit: { oid: mergeCommit },
+  };
+}
+function beNode({ number = 1, pullRequests = [bePrNode(101)] } = {}) {
+  return candidateNode({
+    number, url: "https://github.com/" + BE + "/issues/" + number,
+    closedByPullRequestsReferences: { totalCount: pullRequests.length, nodes: pullRequests },
+  });
+}
+
+/**
+ * Fake chipin-backend: develop head HEAD; `ancestry` lists "base...head" pairs answered `ahead`. `statuses`, `runs`,
+ * `jobs` and `annotations` map ids to answers (missing = 404, an Error is thrown).
+ */
+function beClient({
+  nodes = [beNode()],
+  deployments = [beDeployment()],
+  statuses = { 700: [beStatus()] },
+  runs = { [BE_RUN]: beRun() },
+  jobs = { [BE_RUN]: beJobs() },
+  annotations = { [BE_RUN * 10 + 1]: [], [BE_RUN * 10 + 2]: [receiptNotice(700, RECEIPT_SHA)] },
+  ancestry = [MERGE + "..." + HEAD, RECEIPT_SHA + "..." + HEAD, OLD_RECEIPT_SHA + "..." + HEAD, MERGE + "..." + RECEIPT_SHA],
+} = {}) {
+  const log = [];
+  const answer = (table, key, path) => {
+    const value = table[key];
+    if (value instanceof Error) throw value;
+    if (value === undefined) throw new Error("GET " + path + " -> 404: Not Found");
+    return value;
+  };
+  return {
+    log,
+    graphql: async (query) => {
+      if (!query.includes("query FrontendCompletionCandidates")) throw new Error("unexpected GraphQL: " + query.split("\n")[0]);
+      return { repository: { issues: { totalCount: nodes.length, pageInfo: { hasNextPage: false, endCursor: null }, nodes } } };
+    },
+    listAll: async (path) => {
+      if (path.endsWith("/dependencies/blocked_by") || path.endsWith("/sub_issues")) return [];
+      throw new Error("unexpected list path: " + path);
+    },
+    request: async (path, options = {}) => {
+      log.push((options.method ?? "GET") + " " + path);
+      assert.ok(path.startsWith("/repos/" + BE + "/"), "only the backend repository is read: " + path);
+      if (path.endsWith("/commits/develop")) return { sha: HEAD };
+      let match = /\/deployments\?environment=([^&]+)&per_page=(\d+)&page=(\d+)$/u.exec(path);
+      if (match) {
+        assert.equal(decodeURIComponent(match[1]), "production-receipt");
+        return deployments.slice((Number(match[3]) - 1) * Number(match[2]), Number(match[3]) * Number(match[2]));
+      }
+      if ((match = /\/deployments\/(\d+)\/statuses\?per_page=100$/u.exec(path))) return answer(statuses, match[1], path);
+      if ((match = /\/actions\/runs\/(\d+)$/u.exec(path))) return answer(runs, match[1], path);
+      if ((match = /\/actions\/runs\/(\d+)\/jobs\?filter=all&per_page=100$/u.exec(path))) return answer(jobs, match[1], path);
+      if ((match = /\/check-runs\/(\d+)\/annotations\?per_page=100$/u.exec(path))) return answer(annotations, match[1], path);
+      if ((match = /\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/u.exec(path))) {
+        return ancestry.includes(match[1] + "..." + match[2])
+          ? { status: "ahead", merge_base_commit: { sha: match[1] } }
+          : { status: "diverged", merge_base_commit: { sha: "ffffffffffffffffffffffffffffffffffffffff" } };
+      }
+      if (/\/issues\/\d+$/u.test(path) && (options.method ?? "GET") === "GET") {
+        return { state: "open", updated_at: "2026-10-07T10:00:00Z", sub_issues_summary: { total: 0, completed: 0, percent_completed: 0 } };
+      }
+      if (/\/issues\/\d+$/u.test(path) && options.method === "PATCH") {
+        assert.deepEqual(options.body, { state: "closed", state_reason: "completed" });
+        return { state: "closed", state_reason: "completed" };
+      }
+      throw new Error("unexpected request: " + path);
+    },
+  };
+}
+const beRunCompletion = async (client) => runCompletion(client, {
+  repository: BE, registry: await backendReceiptRegistry(), reconcileProjectStatus: false,
+});
+const closes = (client) => client.log.filter((entry) => entry.startsWith("PATCH "));
+
+test("backend: the live record stays manual; the switched record validates with the workflow-run verifier", async () => {
+  const live = loadRegistry().repositories.find((profile) => profile.repository === BE);
+  assert.equal(live.completion, "manual");
+  assert.equal(live.capabilities.completion, "manual");
+  assert.equal(Object.hasOwn(live, "productionEvidence"), false);
+  const switched = (await backendReceiptRegistry()).repositories.find((profile) => profile.repository === BE);
+  assert.equal(switched.completion, "deployment-receipt");
+  assert.deepEqual(switched.productionEvidence, {
+    environment: "production-receipt", creator: "github-actions[bot]", task: "deploy:image-receipt", verifier: "workflow-run",
+    workflow: ".github/workflows/deploy-production.yml", branch: "develop", job: "record-receipt",
+  });
+});
+
+test("backend: a receipt proven by its Deploy Production run closes the Issue with explicit evidence", async () => {
+  const client = beClient();
+  const receipt = await beRunCompletion(client);
+  const [result] = receipt.results;
+  assert.equal(result.decision.action, "closed");
+  assert.equal(result.decision.code, "closed-completed");
+  assert.match(result.decision.detail, /PR #101 \(1111111\) is in production receipt deployment 700 \(production-receipt, github-actions\[bot\], sha ccccccc, status 7000 success/u);
+  assert.deepEqual(result.decision.evidence.pullRequests[0].receipt, {
+    deploymentId: 700, sha: RECEIPT_SHA, environment: "production-receipt", creator: "github-actions[bot]",
+    createdAt: "2026-10-08T10:05:00Z", statusId: 7000, statusState: "success", statusCreatedAt: "2026-10-08T10:05:01Z",
+    runId: String(BE_RUN), jobId: BE_RUN * 10 + 2,
+  });
+  assert.equal(closes(client).length, 1);
+  assert.equal(receipt.productionEvidence.verifier, "workflow-run");
+  assert.equal(receipt.productionEvidence.job, "record-receipt");
+  assert.deepEqual(receipt.productionEvidence.checked.map((row) => [row.deploymentId, row.valid, row.reason]), [[700, true, null]]);
+  assert.match(formatCompletionSummary(receipt),
+    /valid receipts: 700 \(ccccccc, status 7000\); verifier workflow-run \(\.github\/workflows\/deploy-production\.yml on develop, job record-receipt\), only the latest receipt counts/u);
+  for (const read of ["/actions/runs/5000", "/actions/runs/5000/jobs?filter=all&per_page=100", "/check-runs/50002/annotations?per_page=100"]) {
+    assert.ok(client.log.includes("GET /repos/" + BE + read), read);
+  }
+  // a payload run_id given as a decimal string (API echo of a string payload field) is accepted as well
+  const stringRunId = beClient({ deployments: [beDeployment({ payload: { run_id: String(BE_RUN) } })] });
+  assert.equal((await beRunCompletion(stringRunId)).results[0].decision.code, "closed-completed");
+});
+
+const untrusted = async (label, options, reason) => {
+  const client = beClient(options);
+  const receipt = await beRunCompletion(client);
+  const [result] = receipt.results;
+  assert.equal(result.decision.action, "leave-open", label);
+  assert.equal(result.decision.code, "production-evidence-untrusted", label);
+  assert.match(result.decision.detail, new RegExp("is not trusted: " + reason + "\\. Older receipts are not used\\.", "u"), label);
+  assert.deepEqual(closes(client), [], label);
+  return { client, receipt };
+};
+
+test("backend: a forged receipt (branch workflow, wrong path, event, conclusion, repository, missing run) never closes", async () => {
+  for (const [label, run, reason] of [
+    ["workflow from a feature branch", beRun({ head_branch: "feat/forge" }), "run-branch-mismatch"],
+    ["another workflow file", beRun({ path: ".github/workflows/forge.yml" }), "run-workflow-mismatch"],
+    ["dynamic path", beRun({ path: "dynamic/pages/pages-build-deployment" }), "run-workflow-mismatch"],
+    ["push event", beRun({ event: "push" }), "run-event-mismatch"],
+    ["pull_request event", beRun({ event: "pull_request" }), "run-event-mismatch"],
+    ["failed run", beRun({ conclusion: "failure" }), "run-conclusion-failure"],
+    ["cancelled run", beRun({ conclusion: "cancelled" }), "run-conclusion-cancelled"],
+    ["run still in progress", beRun({ status: "in_progress", conclusion: null }), "run-conclusion-in_progress"],
+    ["run of another repository", beRun({ repository: { full_name: "ChipIn-one/chipin-frontend" } }), "run-repository-mismatch"],
+    ["fork head", beRun({ head_repository: { full_name: "evil/chipin-backend" } }), "run-repository-mismatch"],
+    ["run id answered for another run", beRun({ id: 4999 }), "run-id-mismatch"],
+    ["receipt created before the run", beRun({ created_at: "2026-10-08T10:05:30Z" }), "outside-run-window"],
+    ["receipt created after the run", beRun({ updated_at: "2026-10-08T10:04:00Z" }), "outside-run-window"],
+  ]) {
+    await untrusted(label, { runs: { [BE_RUN]: run } }, reason);
+  }
+  await untrusted("run gone", { runs: {} }, "run-not-found");
+  await untrusted("no run_id", { deployments: [beDeployment({ payload: { image: "x" } })] }, "run-id-unreadable");
+  await untrusted("run_id not an integer", { deployments: [beDeployment({ runId: "5000; rm" })] }, "run-id-unreadable");
+  await untrusted("string payload", { deployments: [beDeployment({ payload: "run 5000" })] }, "run-id-unreadable");
+});
+
+test("backend: a run_id cited by more than one receipt rejects all of them", async () => {
+  const twin = beDeployment({ id: 701, createdAt: "2026-10-08T10:05:05Z" });
+  const { client } = await untrusted("cited twice", {
+    deployments: [beDeployment(), twin],
+    statuses: { 700: [beStatus()], 701: [beStatus({ id: 7001, createdAt: "2026-10-08T10:05:06Z" })] },
+  }, "run-id-cited-twice");
+  assert.ok(!client.log.some((entry) => entry.includes("/actions/runs/")), "no run read for a twice-cited run_id");
+  assert.ok(!client.log.some((entry) => entry.includes("/deployments/700/statuses")), "the older twin is never used");
+});
+
+test("backend: the record-receipt job evidence must name exactly this deployment and SHA", async () => {
+  const notices = (list) => ({ annotations: { [BE_RUN * 10 + 1]: [], [BE_RUN * 10 + 2]: list } });
+  await untrusted("other deployment id", notices([receiptNotice(699, RECEIPT_SHA)]), "receipt-job-output-mismatch");
+  await untrusted("other sha", notices([receiptNotice(700, OLD_RECEIPT_SHA)]), "receipt-job-output-mismatch");
+  await untrusted("malformed notice", notices([{ message: "Production receipt: deployment 700 for ccc" }]), "receipt-job-output-mismatch");
+  await untrusted("no notice", notices([{ message: "Node.js 20 actions are deprecated" }]), "receipt-job-output-missing");
+  await untrusted("two notices", notices([receiptNotice(700, RECEIPT_SHA), receiptNotice(702, RECEIPT_SHA)]), "receipt-job-output-ambiguous");
+  await untrusted("notice in another job does not count", {
+    annotations: { [BE_RUN * 10 + 1]: [receiptNotice(700, RECEIPT_SHA)], [BE_RUN * 10 + 2]: [] },
+  }, "receipt-job-output-missing");
+  await untrusted("full annotation page", notices(Array.from({ length: 100 }, () => receiptNotice(700, RECEIPT_SHA))), "receipt-job-annotations-truncated");
+  await untrusted("no record-receipt job", { jobs: { [BE_RUN]: { total_count: 1, jobs: [beJobs().jobs[0]] } } }, "receipt-job-missing");
+  await untrusted("record-receipt failed", { jobs: { [BE_RUN]: beJobs({ receiptJob: { conclusion: "failure" } }) } }, "receipt-job-missing");
+  await untrusted("jobs beyond the page", { jobs: { [BE_RUN]: { ...beJobs(), total_count: 120 } } }, "run-jobs-truncated");
+  await untrusted("receipt outside the job window", {
+    jobs: { [BE_RUN]: beJobs({ receiptJob: { started_at: "2026-10-08T10:05:20Z", completed_at: "2026-10-08T10:05:40Z" } }) },
+  }, "outside-job-window");
+  await untrusted("unparsable check run", { jobs: { [BE_RUN]: beJobs({ receiptJob: { check_run_url: null } }) } }, "receipt-job-unreadable");
+  await untrusted("status log_url of another run", { statuses: { 700: [beStatus({ logUrl: BE_RUN_URL(4242) })] } }, "status-log-url-mismatch");
+  // record-level checks still apply before the run is read
+  await untrusted("newest status inactive", {
+    statuses: { 700: [beStatus(), beStatus({ id: 7009, state: "inactive", createdAt: "2026-10-09T10:00:00Z" })] },
+  }, "newest-status-inactive");
+  await untrusted("sha not on develop", { ancestry: [MERGE + "..." + HEAD, MERGE + "..." + RECEIPT_SHA] }, "not-on-integration-branch");
+});
+
+test("backend: only the latest receipt counts; a rollback to an older SHA keeps newer work open", async () => {
+  // run 5001 rolled production back to OLD_RECEIPT_SHA after run 5000 had deployed RECEIPT_SHA (which contains MERGE)
+  const rollback = beDeployment({ id: 710, sha: OLD_RECEIPT_SHA, runId: 5001, createdAt: "2026-10-09T10:05:00Z" });
+  const client = beClient({
+    deployments: [beDeployment(), rollback],
+    statuses: { 700: [beStatus({ state: "inactive", createdAt: "2026-10-09T10:05:02Z" })], 710: [beStatus({ id: 7100, runId: 5001, createdAt: "2026-10-09T10:05:01Z" })] },
+    runs: { [BE_RUN]: beRun(), 5001: beRun({ id: 5001, created_at: "2026-10-09T10:00:00Z", updated_at: "2026-10-09T10:06:00Z" }) },
+    jobs: { [BE_RUN]: beJobs(), 5001: beJobs({ runId: 5001, receiptJob: { started_at: "2026-10-09T10:04:50Z", completed_at: "2026-10-09T10:05:10Z" } }) },
+    annotations: { 50011: [], 50012: [receiptNotice(710, OLD_RECEIPT_SHA)] },
+  });
+  const receipt = await beRunCompletion(client);
+  const [result] = receipt.results;
+  assert.equal(result.decision.code, "awaiting-production");
+  assert.deepEqual(result.decision.evidence.pullRequests, [{ number: 101, mergeCommitSha: MERGE, receipt: null }]);
+  assert.deepEqual(closes(client), []);
+  assert.ok(!client.log.some((entry) => entry.includes("/deployments/700/")), "the older receipt is never consulted");
+  assert.deepEqual(receipt.productionEvidence.checked.map((row) => [row.deploymentId, row.valid]), [[710, true]]);
+
+  // even if the older receipt still showed success, a newer valid receipt decides
+  const stillSuccess = beClient({
+    deployments: [beDeployment(), rollback],
+    statuses: { 700: [beStatus()], 710: [beStatus({ id: 7100, runId: 5001, createdAt: "2026-10-09T10:05:01Z" })] },
+    runs: { [BE_RUN]: beRun(), 5001: beRun({ id: 5001, created_at: "2026-10-09T10:00:00Z", updated_at: "2026-10-09T10:06:00Z" }) },
+    jobs: { 5001: beJobs({ runId: 5001, receiptJob: { started_at: "2026-10-09T10:04:50Z", completed_at: "2026-10-09T10:05:10Z" } }) },
+    annotations: { 50011: [], 50012: [receiptNotice(710, OLD_RECEIPT_SHA)] },
+  });
+  assert.equal((await beRunCompletion(stillSuccess)).results[0].decision.code, "awaiting-production");
+});
+
+test("backend: an untrusted newer receipt is never skipped in favour of an older valid one (fail closed)", async () => {
+  const forged = beDeployment({ id: 720, sha: RECEIPT_SHA, runId: 6000, createdAt: "2026-10-09T12:00:00Z" });
+  const { client } = await untrusted("forged newest", {
+    deployments: [beDeployment(), forged],
+    statuses: { 700: [beStatus()], 720: [beStatus({ id: 7200, runId: 6000, createdAt: "2026-10-09T12:00:01Z" })] },
+    runs: { [BE_RUN]: beRun(), 6000: beRun({ id: 6000, head_branch: "feat/forge", created_at: "2026-10-09T11:59:00Z", updated_at: "2026-10-09T12:01:00Z" }) },
+  }, "run-branch-mismatch");
+  assert.ok(!client.log.some((entry) => entry.includes("/deployments/700/")), "the older valid receipt is not used");
+
+  // a deployment of another task is not a receipt at all and does not hide the newest receipt
+  const otherTask = beDeployment({ id: 730, task: "deploy", createdAt: "2026-10-10T10:00:00Z" });
+  const filtered = beClient({ deployments: [otherTask, beDeployment()] });
+  assert.equal((await beRunCompletion(filtered)).results[0].decision.code, "closed-completed");
+  // no receipt at all: awaiting production, as for the frontend
+  const none = beClient({ deployments: [] });
+  assert.equal((await beRunCompletion(none)).results[0].decision.code, "awaiting-production");
+});
+
+test("backend: an unreadable run read leaves only that Issue open as production-evidence-unreadable", async () => {
+  const client = beClient({ runs: { [BE_RUN]: new Error("GET /actions/runs/5000 -> 502: Bad Gateway") } });
+  const [result] = (await beRunCompletion(client)).results;
+  assert.equal(result.decision.code, "production-evidence-unreadable");
+  assert.deepEqual(closes(client), []);
+});
+
+test("backend: verifyWorkflowRunReceipt never trusts a record without the registry task", async () => {
+  const verdict = await verifyWorkflowRunReceipt(beDeployment({ task: "deploy" }), { receipt: { deploymentId: 700, sha: RECEIPT_SHA } }, {
+    repository: BE,
+    evidence: { task: "deploy:image-receipt", workflow: ".github/workflows/deploy-production.yml", branch: "develop", job: "record-receipt" },
+    citations: new Map(),
+    readRun: () => assert.fail("no run read"),
+    readRunJobs: () => assert.fail("no jobs read"),
+    readAnnotations: () => assert.fail("no annotations read"),
+  });
+  assert.deepEqual([verdict.valid, verdict.reason], [false, "task-mismatch"]);
+});
+
+test("frontend deployment-receipt is unchanged by the workflow-run verifier: no run reads, same evidence shape", async () => {
+  const client = receiptClient();
+  const receipt = await receiptRun(client);
+  assert.equal(receipt.results[0].decision.code, "closed-completed");
+  assert.ok(!client.log.some((entry) => /\/actions\/|\/check-runs\//u.test(entry)), "no workflow run, job or annotation read");
+  assert.deepEqual(Object.keys(receipt.productionEvidence), ["environment", "creator", "deploymentsRead", "matchingDeployments", "truncated", "checked"]);
+  assert.deepEqual(Object.keys(receipt.results[0].decision.evidence.pullRequests[0].receipt),
+    ["deploymentId", "sha", "environment", "creator", "createdAt", "statusId", "statusState", "statusCreatedAt"]);
+  assert.doesNotMatch(formatCompletionSummary(receipt), /verifier|latest receipt/u);
+  // the frontend still accepts an older valid receipt that contains the merge (Vercel keeps several Production records)
+  const older = deployment({ id: 800, sha: OLD_RECEIPT_SHA, createdAt: "2026-10-05T10:00:00Z" });
+  const both = receiptClient({
+    deployments: [deployment(), older],
+    deploymentStatuses: { 900: [deploymentStatus()], 800: [deploymentStatus({ id: 8000, createdAt: "2026-10-05T10:01:00Z" })] },
+    ancestry: [MERGE + "..." + HEAD, RECEIPT_SHA + "..." + HEAD, OLD_RECEIPT_SHA + "..." + HEAD, MERGE + "..." + OLD_RECEIPT_SHA],
+  });
+  assert.equal((await receiptRun(both)).results[0].decision.code, "closed-completed");
 });

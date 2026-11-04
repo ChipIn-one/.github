@@ -12,6 +12,10 @@
 //                        contained in a valid production receipt: a GitHub Deployment of the registry
 //                        `productionEvidence` environment and creator whose newest status is `success` and whose
 //                        SHA is on the integration branch. Merged but not yet received -> `awaiting-production`.
+//                        With `productionEvidence.verifier: workflow-run` (chipin-backend#184) the receipt is
+//                        written by our own workflow, so it is also proven against its workflow run, and only
+//                        the latest receipt counts (what runs in production); an untrusted latest receipt leaves
+//                        every candidate open (`production-evidence-untrusted`).
 // All strategies share the fail-closed gates: native Development link as identity, complete pagination,
 // same-repository PRs only, no linked branches, no open blockers, no incomplete sub-issues, no scope change
 // after the last merge (timeline + body-revision history, .github#178), stale-snapshot check before the
@@ -832,7 +836,7 @@ export async function validateProductionReceipt(deployment, {
     throw error;
   }
   if (!onBranch) return invalid("not-on-integration-branch");
-  return { valid: true, reason: null, receipt: record };
+  return { valid: true, reason: null, receipt: record, newestStatus: newest };
 }
 
 /**
@@ -878,6 +882,159 @@ export function createReceiptResolver({ deployments, environment, creator, integ
   };
 }
 
+// ---------------------------------------------------------------------------
+// deployment-receipt with `productionEvidence.verifier: workflow-run` (chipin-backend#184)
+// ---------------------------------------------------------------------------
+
+// One page of jobs per run and of annotations per check run; a full page cannot prove what is beyond it.
+export const RUN_JOBS_PAGE_SIZE = 100;
+export const ANNOTATIONS_PAGE_SIZE = 100;
+// The record-receipt job writes exactly this notice (core.notice), which GitHub stores as a check-run annotation of
+// that job. Job outputs and the step summary are not readable through the REST API; the annotation is, and only the
+// job itself (the Actions app of that run) can write it, unlike the Deployment or its status log_url.
+const RECEIPT_ANNOTATION = /^Production receipt: deployment (\d+) for ([0-9a-f]{40})$/u;
+const ANY_RECEIPT_ANNOTATION = /^Production receipt:/u;
+const RUN_ID = /^[1-9]\d{0,19}$/u;
+
+/** A run window check: `at` within [from, to], all readable timestamps. */
+function withinWindow(at, from, to) {
+  const [time, start, end] = [Date.parse(at ?? ""), Date.parse(from ?? ""), Date.parse(to ?? "")];
+  return Number.isFinite(time) && Number.isFinite(start) && Number.isFinite(end) && start <= time && time <= end;
+}
+
+/** payload.run_id of a receipt as a decimal string, or null when it is missing or not a positive integer. */
+export function receiptRunId(deployment) {
+  const payload = deployment?.payload;
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const value = payload.run_id;
+  if (Number.isSafeInteger(value) && value > 0) return String(value);
+  if (typeof value === "string" && RUN_ID.test(value)) return value;
+  return null;
+}
+
+/**
+ * Prove one receipt (already valid as a record: validateProductionReceipt) against the workflow run it cites. The
+ * rules are those of chipin-backend's release-after-deploy guard plus the job evidence:
+ * - `task` equals the registry task; payload.run_id is a positive integer cited by no other receipt in the window;
+ * - the run is in this repository (head repository too), its `path` is the registry workflow, `event`
+ *   `workflow_dispatch`, `head_branch` the registry branch, `status` completed with `conclusion` success;
+ * - the Deployment was created inside the run window (run created_at .. updated_at);
+ * - the run's successful `job` jobs (all attempts, one page) carry, among all their annotations, exactly one receipt
+ *   notice, and it names this deployment id and SHA; that job's window (started_at .. completed_at) contains the
+ *   Deployment's created_at;
+ * - the newest status's `log_url` is the run's html_url.
+ * A 404 of the run makes the receipt invalid; any other read error is thrown (the Issue fails closed).
+ */
+export async function verifyWorkflowRunReceipt(deployment, verdict, {
+  repository,
+  evidence,
+  citations,
+  readRun,
+  readRunJobs,
+  readAnnotations,
+}) {
+  const runId = receiptRunId(deployment);
+  const record = { ...verdict.receipt, runId, jobId: null };
+  const invalid = (reason) => ({ valid: false, reason, receipt: record });
+  if (deployment?.task !== evidence.task) return invalid("task-mismatch");
+  if (runId === null) return invalid("run-id-unreadable");
+  if ((citations.get(runId) ?? 0) > 1) return invalid("run-id-cited-twice");
+
+  let run;
+  try {
+    run = await readRun(runId);
+  } catch (error) {
+    if (isNotFound(error)) return invalid("run-not-found");
+    throw error;
+  }
+  if (run === null || typeof run !== "object") throw new Error("Workflow run " + runId + " is unreadable");
+  if (String(run.id) !== runId) return invalid("run-id-mismatch");
+  if (run.repository?.full_name !== repository || run.head_repository?.full_name !== repository) {
+    return invalid("run-repository-mismatch");
+  }
+  if (run.path !== evidence.workflow) return invalid("run-workflow-mismatch");
+  if (run.event !== "workflow_dispatch") return invalid("run-event-mismatch");
+  if (run.head_branch !== evidence.branch) return invalid("run-branch-mismatch");
+  if (run.status !== "completed" || run.conclusion !== "success") {
+    return invalid("run-conclusion-" + (run.status !== "completed" ? (run.status ?? "unknown") : (run.conclusion ?? "unknown")));
+  }
+  if (!withinWindow(record.createdAt, run.created_at, run.updated_at)) return invalid("outside-run-window");
+
+  const jobsPage = await readRunJobs(runId);
+  const jobs = jobsPage?.jobs;
+  if (!Array.isArray(jobs) || !Number.isInteger(jobsPage.total_count)) throw new Error("Jobs of run " + runId + " are not a list");
+  if (jobsPage.total_count > jobs.length || jobs.length >= RUN_JOBS_PAGE_SIZE) return invalid("run-jobs-truncated");
+  const receiptJobs = jobs.filter((job) => job?.name === evidence.job && job?.conclusion === "success");
+  if (receiptJobs.length === 0) return invalid("receipt-job-missing");
+
+  const notices = [];
+  for (const job of receiptJobs) {
+    const checkRunId = /\/check-runs\/(\d+)$/u.exec(String(job.check_run_url ?? ""))?.[1];
+    if (!checkRunId) return invalid("receipt-job-unreadable");
+    const annotations = await readAnnotations(checkRunId);
+    if (!Array.isArray(annotations)) throw new Error("Annotations of check run " + checkRunId + " are not a list");
+    if (annotations.length >= ANNOTATIONS_PAGE_SIZE) return invalid("receipt-job-annotations-truncated");
+    for (const annotation of annotations) {
+      const message = String(annotation?.message ?? "");
+      if (ANY_RECEIPT_ANNOTATION.test(message)) notices.push({ job, match: RECEIPT_ANNOTATION.exec(message) });
+    }
+  }
+  if (notices.length === 0) return invalid("receipt-job-output-missing");
+  if (notices.length > 1) return invalid("receipt-job-output-ambiguous");
+  const [{ job, match }] = notices;
+  if (!match || match[1] !== String(record.deploymentId) || match[2] !== record.sha) return invalid("receipt-job-output-mismatch");
+  record.jobId = job.id ?? null;
+  if (!withinWindow(record.createdAt, job.started_at, job.completed_at)) return invalid("outside-job-window");
+  if (verdict.newestStatus?.log_url !== run.html_url || typeof run.html_url !== "string") return invalid("status-log-url-mismatch");
+  return { valid: true, reason: null, receipt: record };
+}
+
+export class UntrustedProductionEvidence extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "UntrustedProductionEvidence";
+  }
+}
+
+/**
+ * Latest-receipt resolver (verifier `workflow-run`). What runs in production is the newest receipt by created_at
+ * (then id); a rollback writes a newer receipt for an older SHA, so an older receipt never attests anything. Only
+ * the newest receipt is validated. When it is invalid the resolver does not fall back to an older one (that older
+ * receipt could attest commits a rollback removed, or hide a forgery): every lookup throws
+ * UntrustedProductionEvidence and the Issue stays open (`production-evidence-untrusted`) until a newer valid
+ * receipt exists. No receipt at all answers null (`awaiting-production`).
+ */
+export function createLatestReceiptResolver({ deployments, validate, containsCommit }) {
+  if (!Array.isArray(deployments)) throw new Error("deployments are required");
+  if (typeof validate !== "function" || typeof containsCommit !== "function") {
+    throw new Error("validate and containsCommit callbacks are required");
+  }
+  const [latest] = deployments;
+  let pending = null;
+  const latestVerdict = () => (pending ??= validate(latest));
+  return {
+    async findReceipt(mergeCommitSha) {
+      if (!latest) return null;
+      const verdict = await latestVerdict();
+      if (!verdict.valid) {
+        throw new UntrustedProductionEvidence("The latest production receipt, deployment " + verdict.receipt.deploymentId
+          + " (sha " + String(verdict.receipt.sha ?? "unknown").slice(0, 7) + ", run " + (verdict.receipt.runId ?? "unknown")
+          + "), is not trusted: " + verdict.reason + ". Older receipts are not used.");
+      }
+      return (await containsCommit(mergeCommitSha, verdict.receipt.sha)) ? verdict.receipt : null;
+    },
+    async checked() {
+      if (!pending) return [];
+      try {
+        const verdict = await pending;
+        return [{ ...verdict.receipt, valid: verdict.valid, reason: verdict.reason }];
+      } catch (error) {
+        return [{ valid: false, reason: "unreadable: " + (error instanceof Error ? error.message : String(error)) }];
+      }
+    },
+  };
+}
+
 const describeReceipt = (receipt) => "deployment " + receipt.deploymentId + " (" + receipt.environment + ", "
   + receipt.creator + ", sha " + receipt.sha.slice(0, 7) + ", status " + receipt.statusId + " success at "
   + receipt.statusCreatedAt + ")";
@@ -907,7 +1064,13 @@ export async function evaluateIssueForDeploymentReceiptCompletion(issue, {
 
   const pullRequests = [];
   for (const pullRequest of issue.linkedPullRequests) {
-    const receipt = await findReceipt(pullRequest.mergeCommitSha);
+    let receipt;
+    try {
+      receipt = await findReceipt(pullRequest.mergeCommitSha);
+    } catch (error) {
+      if (error instanceof UntrustedProductionEvidence) return leaveOpen("production-evidence-untrusted", error.message);
+      throw error;
+    }
     pullRequests.push({ number: pullRequest.number, mergeCommitSha: pullRequest.mergeCommitSha, receipt: receipt ?? null });
   }
   const evidence = { pullRequests };
@@ -986,13 +1149,50 @@ export async function runDeploymentReceiptCompletionSweep(client, profile, {
   if (reconcileProjectStatus && !projectConfig) {
     throw new Error("projectConfig is required when Project reconciliation is enabled");
   }
+  const evidence = profile.productionEvidence;
+  const workflowRun = evidence.verifier !== undefined;
+  if (workflowRun && (evidence.verifier !== "workflow-run" || !evidence.task || !evidence.workflow || !evidence.branch || !evidence.job)) {
+    throw blocked("PRODUCTION_EVIDENCE_UNDECLARED", profile.repository
+      + " declares productionEvidence.verifier without verifier workflow-run { task, workflow, branch, job } in workflow-registry.yaml.");
+  }
   const { owner, repo } = splitRepository(repository);
   const deploymentWindow = await readProductionDeployments(client, repository, { environment, pageSize, maxPages });
   const candidates = deploymentWindow.deployments.filter((deployment) => (
     deployment?.environment === environment && deployment?.creator?.login === creator
+    && (!workflowRun || deployment?.task === evidence.task)
   ));
   const readStatuses = (deploymentId) => client.request("/repos/" + owner + "/" + repo + "/deployments/"
     + deploymentId + "/statuses?per_page=" + RECEIPT_STATUS_PAGE_SIZE);
+  // run_id citations over the whole window: a run cited by more than one receipt proves none of them
+  const citations = new Map();
+  for (const deployment of workflowRun ? candidates : []) {
+    const runId = receiptRunId(deployment);
+    if (runId !== null) citations.set(runId, (citations.get(runId) ?? 0) + 1);
+  }
+  const createResolver = (integrationHeadSha, containsCommit) => (workflowRun
+    ? createLatestReceiptResolver({
+      deployments: candidates,
+      containsCommit,
+      validate: async (deployment) => {
+        const verdict = await validateProductionReceipt(deployment, {
+          environment, creator, integrationHeadSha, readStatuses, containsCommit,
+        });
+        if (!verdict.valid) return { ...verdict, receipt: { ...verdict.receipt, runId: receiptRunId(deployment), jobId: null } };
+        return verifyWorkflowRunReceipt(deployment, verdict, {
+          repository,
+          evidence,
+          citations,
+          readRun: (runId) => client.request("/repos/" + owner + "/" + repo + "/actions/runs/" + runId),
+          readRunJobs: (runId) => client.request("/repos/" + owner + "/" + repo + "/actions/runs/" + runId
+            + "/jobs?filter=all&per_page=" + RUN_JOBS_PAGE_SIZE),
+          readAnnotations: (checkRunId) => client.request("/repos/" + owner + "/" + repo + "/check-runs/" + checkRunId
+            + "/annotations?per_page=" + ANNOTATIONS_PAGE_SIZE),
+        });
+      },
+    })
+    : createReceiptResolver({
+      deployments: candidates, environment, creator, integrationHeadSha, readStatuses, containsCommit,
+    }));
 
   let resolver = null;
   const results = await runOpenIssueSweep(client, profile, {
@@ -1001,9 +1201,7 @@ export async function runDeploymentReceiptCompletionSweep(client, profile, {
     unreadableCode: "production-evidence-unreadable",
     unreadableDetail: "Implementation or production evidence could not be read for this Issue; skipped until the next run: ",
     evaluate: (candidate, { integrationHeadSha, containsCommit }) => {
-      resolver ??= createReceiptResolver({
-        deployments: candidates, environment, creator, integrationHeadSha, readStatuses, containsCommit,
-      });
+      resolver ??= createResolver(integrationHeadSha, containsCommit);
       return evaluateIssueForDeploymentReceiptCompletion(candidate, {
         repository,
         integrationBranch,
@@ -1019,6 +1217,9 @@ export async function runDeploymentReceiptCompletionSweep(client, profile, {
     productionEvidence: {
       environment,
       creator,
+      ...(workflowRun ? {
+        task: evidence.task, verifier: evidence.verifier, workflow: evidence.workflow, branch: evidence.branch, job: evidence.job,
+      } : {}),
       deploymentsRead: deploymentWindow.read,
       matchingDeployments: candidates.length,
       truncated: deploymentWindow.truncated,
@@ -1134,7 +1335,11 @@ function formatProductionEvidence(evidence) {
     + ", " + (evidence.checked ?? []).length + " checked, valid receipts: "
     + (valid.length > 0
       ? valid.map((row) => row.deploymentId + " (" + String(row.sha).slice(0, 7) + ", status " + row.statusId + ")").join(", ")
-      : "none");
+      : "none")
+    + (evidence.verifier
+      ? "; verifier " + evidence.verifier + " (" + evidence.workflow + " on " + evidence.branch + ", job " + evidence.job
+        + "), only the latest receipt counts"
+      : "");
 }
 
 // GitHub Actions annotation for a skipped run, so the green no-op is visible on the run page (null otherwise)
