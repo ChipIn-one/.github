@@ -32,3 +32,11 @@ The record alone is not trusted: anyone with write access can create an identica
 2. [chipin-backend#213](https://github.com/ChipIn-one/chipin-backend/issues/213): the evidence step in `deploy-production`, reviewed and merged by olegbal.
 3. Before the engine is turned on, olegbal disables "Auto-close issues with merged linked pull requests" in chipin-backend.
 4. Registry switch to `completion: deployment-receipt` with `productionEvidence`, plus a completion caller using the same fail-closed read-back model as `frontend-production-completion`, as a separate PR merged by olegbal.
+
+Step **A1** of [chipin-backend#184](https://github.com/ChipIn-one/chipin-backend/issues/184), the engine, is done once its `.github` PR merges: `deployment-receipt` accepts `productionEvidence.verifier: workflow-run` and verifies the receipt against its run as described in [completion.md](completion.md#workflow-run-verifier-backend) (only the latest receipt counts; an untrusted latest receipt keeps Issues open as `production-evidence-untrusted`). It changes no backend behaviour: the record stays `completion: manual` / `capabilities.completion: manual`. What remains:
+
+- step 3 (olegbal disables native auto-close in chipin-backend);
+- the registry switch of step 4 with exactly this evidence line:
+  `productionEvidence: { environment: production-receipt, creator: "github-actions[bot]", task: "deploy:image-receipt", verifier: workflow-run, workflow: .github/workflows/deploy-production.yml, branch: develop, job: record-receipt }`;
+- the runner of step 4 (repository caller or org sweep) and a token with Deployments read, Actions read and check-run annotation read on chipin-backend, plus Issues write;
+- an org tag containing A1, pinned by that caller.
