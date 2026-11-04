@@ -1639,9 +1639,9 @@ function beClient({
   newestRuns,
 } = {}) {
   const log = [];
-  // default: every successful dispatch run of the fixture, newest first (what GitHub lists for the workflow)
+  // default: every dispatch run of the fixture on develop, any status, newest first (what GitHub lists for the workflow)
   const listedRuns = newestRuns ?? Object.values(runs)
-    .filter((run) => !(run instanceof Error) && run.conclusion === "success" && run.event === "workflow_dispatch")
+    .filter((run) => !(run instanceof Error) && run.event === "workflow_dispatch" && run.head_branch === "develop")
     .sort((left, right) => right.run_number - left.run_number);
   const answer = (table, key, path) => {
     const value = table[key];
@@ -1670,7 +1670,7 @@ function beClient({
       }
       if ((match = /\/deployments\/(\d+)\/statuses\?per_page=100$/u.exec(path))) return answer(statuses, match[1], path);
       if ((match = /\/actions\/runs\/(\d+)$/u.exec(path))) return answer(runs, match[1], path);
-      if (path.endsWith("/actions/workflows/deploy-production.yml/runs?event=workflow_dispatch&branch=develop&status=success&per_page=10")) {
+      if (path.endsWith("/actions/workflows/deploy-production.yml/runs?event=workflow_dispatch&branch=develop&per_page=10")) {
         if (listedRuns instanceof Error) throw listedRuns;
         return { total_count: listedRuns.length, workflow_runs: listedRuns };
       }
@@ -1815,15 +1815,30 @@ test("backend: the cited run must be the newest successful deploy (deleted newer
     runs: { [BE_RUN]: beRun({ updated_at: "2026-10-10T09:01:00Z" }), 5001: r2 },
   }, "run-not-newest-deploy");
 
-  // any newer successful dispatch run counts, even one listed without a receipt (fail closed)
+  // any newer dispatch run counts, whatever its status, even one listed without a receipt (fail closed)
   await untrusted("newer run without receipt", { newestRuns: [beRun({ id: 5009 }), beRun()] }, "run-not-newest-deploy");
+  await untrusted("newer failed run (deployed, record-receipt failed)",
+    { newestRuns: [beRun({ id: 5009, conclusion: "failure" }), beRun()] }, "run-not-newest-deploy");
+  await untrusted("newer run whose latest attempt was cancelled",
+    { newestRuns: [beRun({ id: 5009, conclusion: "cancelled", run_attempt: 2 }), beRun()] }, "run-not-newest-deploy");
+  await untrusted("newer run in progress",
+    { newestRuns: [beRun({ id: 5009, status: "in_progress", conclusion: null }), beRun()] }, "run-not-newest-deploy");
+  await untrusted("newer queued run", { newestRuns: [beRun({ id: 5009, status: "queued", conclusion: null })] }, "run-not-newest-deploy");
   // the cited run itself, older runs and an empty list are fine
   assert.equal((await beRunCompletion(beClient({ newestRuns: [beRun(), beRun({ id: 4990 })] }))).results[0].decision.code, "closed-completed");
   assert.equal((await beRunCompletion(beClient({ newestRuns: [] }))).results[0].decision.code, "closed-completed");
   await untrusted("no run_number", { runs: { [BE_RUN]: beRun({ run_number: null }) } }, "run-number-unreadable");
   // an unreadable list is unreadable, not untrusted
-  for (const newestRuns of [new Error("GET runs -> 403: Resource not accessible"), [{ run_number: "x" }]]) {
+  for (const newestRuns of [new Error("GET runs -> 403: Resource not accessible"), new Error("GET runs -> 404: Not Found"), [{ run_number: "x" }]]) {
     const flaky = beClient({ newestRuns });
+    assert.equal((await beRunCompletion(flaky)).results[0].decision.code, "production-evidence-unreadable");
+    assert.deepEqual(closes(flaky), []);
+  }
+  // a response that is not a run list is unreadable as well
+  for (const body of [{}, { workflow_runs: null }, { workflow_runs: {} }, null]) {
+    const flaky = beClient();
+    const base = flaky.request;
+    flaky.request = async (path, options) => (path.includes("/actions/workflows/") ? body : base(path, options));
     assert.equal((await beRunCompletion(flaky)).results[0].decision.code, "production-evidence-unreadable");
     assert.deepEqual(closes(flaky), []);
   }
