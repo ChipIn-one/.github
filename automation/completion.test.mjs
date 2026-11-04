@@ -1639,9 +1639,9 @@ function beClient({
   newestRuns,
 } = {}) {
   const log = [];
-  // default: every dispatch run of the fixture on develop, any status, newest first (what GitHub lists for the workflow)
+  // default: every run of the fixture (any branch, event, status), newest first (what GitHub lists for the workflow)
   const listedRuns = newestRuns ?? Object.values(runs)
-    .filter((run) => !(run instanceof Error) && run.event === "workflow_dispatch" && run.head_branch === "develop")
+    .filter((run) => !(run instanceof Error) && run.path === ".github/workflows/deploy-production.yml")
     .sort((left, right) => right.run_number - left.run_number);
   const answer = (table, key, path) => {
     const value = table[key];
@@ -1670,7 +1670,7 @@ function beClient({
       }
       if ((match = /\/deployments\/(\d+)\/statuses\?per_page=100$/u.exec(path))) return answer(statuses, match[1], path);
       if ((match = /\/actions\/runs\/(\d+)$/u.exec(path))) return answer(runs, match[1], path);
-      if (path.endsWith("/actions/workflows/deploy-production.yml/runs?event=workflow_dispatch&branch=develop&per_page=10")) {
+      if (path.endsWith("/actions/workflows/deploy-production.yml/runs?per_page=10")) {
         if (listedRuns instanceof Error) throw listedRuns;
         return { total_count: listedRuns.length, workflow_runs: listedRuns };
       }
@@ -1823,6 +1823,9 @@ test("backend: the cited run must be the newest successful deploy (deleted newer
     { newestRuns: [beRun({ id: 5009, conclusion: "cancelled", run_attempt: 2 }), beRun()] }, "run-not-newest-deploy");
   await untrusted("newer run in progress",
     { newestRuns: [beRun({ id: 5009, status: "in_progress", conclusion: null }), beRun()] }, "run-not-newest-deploy");
+  await untrusted("newer run on another branch",
+    { newestRuns: [beRun({ id: 5009, head_branch: "feat/x" }), beRun()] }, "run-not-newest-deploy");
+  await untrusted("newer push-event run", { newestRuns: [beRun({ id: 5009, event: "push" }), beRun()] }, "run-not-newest-deploy");
   await untrusted("newer queued run", { newestRuns: [beRun({ id: 5009, status: "queued", conclusion: null })] }, "run-not-newest-deploy");
   // the cited run itself, older runs and an empty list are fine
   assert.equal((await beRunCompletion(beClient({ newestRuns: [beRun(), beRun({ id: 4990 })] }))).results[0].decision.code, "closed-completed");
