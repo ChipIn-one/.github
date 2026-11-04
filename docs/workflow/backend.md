@@ -53,5 +53,5 @@ Users with write access to chipin-backend are trusted. The verifier stops forged
 - [ ] The runner token can read Actions runs and jobs and check-run annotations on chipin-backend (plus Deployments read and Issues write); a failed read leaves every Issue `production-evidence-unreadable`.
 - [ ] The backend caller (decided: a repository caller, not only the org sweep) triggers on `workflow_run` `completed` of Deploy Production (plus `push` to `develop`), not on `deployment_status`: the receipt's status is written while the run is still `in_progress` ([completion.md](completion.md#workflow-run-verifier-backend)), and it pins an org tag containing A1.
 
-The switch itself (step 4) uses exactly this evidence line:
+The switch itself (step A3) uses exactly this evidence line:
 `productionEvidence: { environment: production-receipt, creator: "github-actions[bot]", task: "deploy:image-receipt", verifier: workflow-run, workflow: .github/workflows/deploy-production.yml, branch: develop, job: record-receipt }`
