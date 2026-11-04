@@ -4,7 +4,7 @@ import test from 'node:test';
 
 import {
   GitHubConformanceSource, GitHubConformanceStore, RELEASE_TAGS_CHECKED, audit, checkCallers, checkRelease, checkCompletionCaller, checkCompletionSweep, checkDependabot, checkIntake, checkMergedPastRed,
-  checkPins, checkProjectPullRequests, checkProtection, checkRouting, extractPins, extractRoutingBlock, loadContextPaths, main, parseMarker, renderIssue,
+  checkPins, checkProjectPullRequests, checkClosedBeforeProduction, closedBeforeProductionCandidates, CLOSED_SCAN_MAX_PAGES, CLOSED_SCAN_PAGE_SIZE, checkProtection, checkRouting, extractPins, extractRoutingBlock, loadContextPaths, main, parseMarker, renderIssue,
   completionSweepCovers, readReleaseFacts, releaseBranchOf, renderSummary, sortTags, touchesCapability, upsertIssues, workflowTriggers,
 } from './conformance.mjs';
 import { getRepositoryProfile, loadRegistry, validateRegistry } from './registry.mjs';
@@ -456,6 +456,8 @@ function fakeSource(over = {}) {
     classicProtection: async repo => (repo === FE ? { state: 'ok', requiredChecks: ['frontend-ci'] } : repo === META ? { state: 'unprotected' } : na),
     openIssues: async () => [],
     closedIssuesWithOpenPrs: async () => [],
+    recentlyClosedIssues: async () => ({ issues: [], truncated: false }),
+    productionContainment: async () => { throw new Error('production evidence must not be read without a candidate'); },
     mergedPullRequests: async () => [{ number: 5, mergedAt: new Date().toISOString(), headSha: 'h' }],
     checkRuns: async () => [{ name: 'Unit and integration tests', conclusion: 'success' }],
     orgRepositories: async () => [{ fullName: FE, archived: false }, { fullName: 'ChipIn-one/chipin-backend-python', archived: false }, { fullName: NOTIF, archived: false }, { fullName: 'ChipIn-one/old', archived: true }],
@@ -889,4 +891,108 @@ test('Project #5 PR scan re-reads phantom empty pages and fails closed when one 
   const empty = { graphql: async () => ({ organization: { projectV2: { items: phantom } } }) };
   await assert.rejects(new GitHubConformanceSource(empty, loadRegistry(), { pageRetry }).projectPullRequests(),
     e => e.code === 'PROJECT_ITEMS_PHANTOM' && /first page stayed empty/.test(e.message));
+});
+
+// --- CLOSED_BEFORE_PRODUCTION (.github#181) -------------------------------------------------------------
+const M1 = '1'.repeat(40);
+const M2 = '2'.repeat(40);
+const RECENT = new Date(Date.now() - 2 * 86_400_000).toISOString();
+const SINCE = new Date(Date.now() - 30 * 86_400_000).toISOString();
+const closedIssue = (number, { closedBy = 'syllik', merge = M1, base = 'master', closedAt = RECENT, stateReason = 'COMPLETED', repository = FE, mergedAt = RECENT } = {}) => ({
+  number, closedAt, stateReason, closedBy,
+  linkedPullRequests: [{ number: number + 1000, repository, mergedAt, baseRefName: base, mergeCommitSha: merge }],
+});
+const inProduction = (...shas) => async () => ({ label: 'a valid Production receipt by vercel[bot]', contains: async sha => shas.includes(sha) });
+const scanOf = (issues, truncated = false) => ({ since: SINCE, issues, truncated });
+
+test('CLOSED_BEFORE_PRODUCTION: a human close before the merge reached production is drift with remediation', async () => {
+  const findings = await checkClosedBeforeProduction(profile(FE), scanOf([closedIssue(464, { merge: M2 }), closedIssue(470)]), inProduction(M1));
+  assert.deepEqual(findings.map(f => [f.check, f.severity]), [['CLOSED_BEFORE_PRODUCTION', 'drift']]);
+  assert.match(findings[0].message, /^1 Issue\(s\) closed as completed/);
+  assert.match(findings[0].message, /#464 \(closed \d{4}-\d{2}-\d{2} by syllik; PR #1464 2222222 not in production\)/);
+  assert.doesNotMatch(findings[0].message, /#470/);
+  assert.match(findings[0].remediation, /Reopen each Issue/);
+});
+
+test('CLOSED_BEFORE_PRODUCTION: an engine close is ignored and evidence is not read', async () => {
+  let read = 0;
+  const findings = await checkClosedBeforeProduction(profile(FE), scanOf([closedIssue(1, { closedBy: 'github-actions', merge: M2 })]),
+    async () => { read += 1; return { label: 'x', contains: async () => false }; });
+  assert.deepEqual(findings, []);
+  assert.equal(read, 0);
+});
+
+test('CLOSED_BEFORE_PRODUCTION: a PR already in production, outside the window, not completed or not merged into the integration branch is ignored', async () => {
+  const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
+  const issues = [closedIssue(1), closedIssue(2, { merge: M2, closedAt: old }), closedIssue(3, { merge: M2, stateReason: 'NOT_PLANNED' }),
+    closedIssue(4, { merge: M2, base: 'feature' }), closedIssue(5, { merge: M2, mergedAt: null }), closedIssue(6, { merge: M2, repository: KB })];
+  assert.deepEqual(closedBeforeProductionCandidates(profile(FE), issues, SINCE).map(r => r.number), [1]);
+  assert.deepEqual(await checkClosedBeforeProduction(profile(FE), scanOf(issues), inProduction(M1)), []);
+});
+
+test('CLOSED_BEFORE_PRODUCTION: integration-merge and manual repositories are not checked', async () => {
+  for (const name of [META, KB, BE]) {
+    assert.deepEqual(await checkClosedBeforeProduction(profile(name), scanOf([closedIssue(1, { merge: M2, base: profile(name).branches.integration, repository: name })]), inProduction()), [], name);
+  }
+  const report = await audit({ source: fakeSource({ recentlyClosedIssues: async () => { throw new Error('must not be read'); } }), repositories: [META, KB] });
+  assert.ok(report.repositories.every(r => r.status !== 'UNREADABLE'));
+});
+
+test('CLOSED_BEFORE_PRODUCTION: production-merge (dev/main record) uses the integration branch for candidates', async () => {
+  const findings = await checkClosedBeforeProduction(legacyFrontend(), scanOf([closedIssue(9, { base: 'dev' }), closedIssue(10, { base: 'main', merge: M2 })]), inProduction());
+  assert.match(findings[0].message, /^1 Issue\(s\).*merged into dev .*#9 /);
+});
+
+test('CLOSED_BEFORE_PRODUCTION: a full scan window is a note; the audit reports the drift', async () => {
+  const note = await checkClosedBeforeProduction(profile(FE), scanOf([], true), inProduction());
+  assert.deepEqual(note.map(f => [f.check, f.severity]), [['CLOSED_BEFORE_PRODUCTION_WINDOW_FULL', 'note']]);
+  assert.match(note[0].message, new RegExp(`More than ${CLOSED_SCAN_PAGE_SIZE * CLOSED_SCAN_MAX_PAGES} Issues`));
+  const report = await audit({ source: fakeSource({ recentlyClosedIssues: async () => ({ issues: [closedIssue(464, { merge: M2 })], truncated: false }), productionContainment: inProduction(M1) }), repositories: [FE] });
+  assert.equal(report.repositories[0].status, 'DRIFT');
+  assert.deepEqual(checks(report.repositories[0].findings), ['CLOSED_BEFORE_PRODUCTION']);
+});
+
+test('CLOSED_BEFORE_PRODUCTION: unreadable closes or production evidence make the repository UNREADABLE, never clean', async () => {
+  const evidence = await audit({ source: fakeSource({ recentlyClosedIssues: async () => ({ issues: [closedIssue(464, { merge: M2 })], truncated: false }),
+    productionContainment: async () => { throw new Error('Deployments of ChipIn-one/chipin-frontend are unreadable: GET x -> 403'); } }), repositories: [FE] });
+  assert.equal(evidence.repositories[0].status, 'UNREADABLE');
+  assert.match(evidence.repositories[0].error, /CLOSED_BEFORE_PRODUCTION unreadable: Deployments .* 403/);
+  const containment = await audit({ source: fakeSource({ recentlyClosedIssues: async () => ({ issues: [closedIssue(464, { merge: M2 })], truncated: false }),
+    productionContainment: async () => ({ label: 'x', contains: async () => { throw new Error('GET compare -> 502'); } }) }), repositories: [FE] });
+  assert.equal(containment.repositories[0].status, 'UNREADABLE');
+  const closes = await audit({ source: fakeSource({ recentlyClosedIssues: async () => { throw new Error('GraphQL -> 502'); } }), repositories: [FE] });
+  assert.equal(closes.repositories[0].status, 'UNREADABLE');
+  assert.match(closes.repositories[0].error, /CLOSED_BEFORE_PRODUCTION unreadable: GraphQL -> 502/);
+});
+
+test('GitHubConformanceSource: closed-Issue scan is bounded and fails closed on incomplete linkage', async () => {
+  const node = (number, total = 1) => ({ number, closedAt: RECENT, stateReason: 'COMPLETED', timelineItems: { nodes: [{ actor: { login: 'syllik' } }] },
+    closedByPullRequestsReferences: { totalCount: total, nodes: [{ number: 5, mergedAt: RECENT, baseRefName: 'master', repository: { nameWithOwner: FE }, mergeCommit: { oid: M1 } }] } });
+  const calls = [];
+  const client = { graphql: async (query, vars) => { calls.push(vars); return { repository: { issues: { pageInfo: { hasNextPage: true, endCursor: `c${calls.length}` }, nodes: [node(calls.length)] } } }; } };
+  const scan = await new GitHubConformanceSource(client).recentlyClosedIssues(FE, SINCE, { pageSize: 1, maxPages: 2 });
+  assert.equal(scan.truncated, true);
+  assert.deepEqual(scan.issues.map(i => [i.number, i.closedBy, i.linkedPullRequests[0].mergeCommitSha]), [[1, 'syllik', M1], [2, 'syllik', M1]]);
+  assert.deepEqual(calls.map(v => [v.s, v.a]), [[SINCE, null], [SINCE, 'c1']]);
+  const partial = { graphql: async () => ({ repository: { issues: { pageInfo: { hasNextPage: false }, nodes: [node(1, 2)] } } }) };
+  await assert.rejects(new GitHubConformanceSource(partial).recentlyClosedIssues(FE, SINCE), /incomplete/);
+});
+
+test('GitHubConformanceSource: production containment reuses the completion receipt rules', async () => {
+  const head = 'f'.repeat(40);
+  const receipt = M2;
+  const responses = (statusState) => async path => {
+    if (path === `/repos/${FE}/commits/master`) return { sha: head };
+    if (path.startsWith(`/repos/${FE}/deployments?environment=Production`)) return [{ id: 7, sha: receipt, environment: 'Production', creator: { login: 'vercel[bot]' }, created_at: RECENT }];
+    if (path.startsWith(`/repos/${FE}/deployments/7/statuses`)) return [{ id: 1, state: statusState, creator: { login: 'vercel[bot]' }, created_at: RECENT }];
+    const compare = /\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/.exec(path);
+    if (compare) return compare[2] === head || compare[1] === M1 ? { status: 'ahead', merge_base_commit: { sha: compare[1] } } : { status: 'diverged', merge_base_commit: { sha: '0'.repeat(40) } };
+    throw new Error(`unexpected ${path}`);
+  };
+  const ok = await new GitHubConformanceSource({ request: responses('success') }).productionContainment(profile(FE));
+  assert.equal(await ok.contains(M1), true);
+  assert.equal(await ok.contains('3'.repeat(40)), false);
+  const none = await new GitHubConformanceSource({ request: responses('failure') }).productionContainment(profile(FE));
+  await assert.rejects(none.contains(M1), /no valid Production receipt/);
+  await assert.rejects(new GitHubConformanceSource({ request: async () => { throw new Error('GET x -> 403'); } }).productionContainment(profile(FE)), /403/);
 });
