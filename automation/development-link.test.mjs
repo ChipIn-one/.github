@@ -288,13 +288,65 @@ test("read-back failure never reports success", async () => {
   assert.equal(mutationCalls(client).length, 1);
 });
 
-test("unrelated task repository is never linked", async () => {
+test("a cross-repository task identity is never linked: advisory skip without reads or writes (.github#247)", async () => {
   const client = makeClient({ bodies: { 10: "Task identity: ChipIn-one/chipin-backend#7" } });
-  await assert.rejects(
-    reconcileDevelopmentLink(client, { repository: REPOSITORY, pullRequestNumber: 10 }),
-    /does not belong to pull request repository/u,
-  );
+  let admissionReads = 0;
+  let statusWrites = 0;
+  const receipt = await reconcileDevelopmentLink(client, {
+    repository: REPOSITORY,
+    pullRequestNumber: 10,
+    expectedHeadSha: "a".repeat(40),
+    admission: { read: async () => { admissionReads += 1; return {}; } },
+    inProgress: { enabled: true, write: async () => { statusWrites += 1; return {}; } },
+  });
+  assert.equal(receipt.result, "cross-repository-skipped");
+  assert.equal(receipt.taskIdentity, "ChipIn-one/chipin-backend#7");
+  assert.equal(receipt.repository, REPOSITORY);
+  assert.equal(receipt.issueNumber, 7);
+  assert.equal(receipt.readBackConfirmed, false);
+  assert.match(receipt.detail, /no native Development link is created/u);
+  assert.equal(receipt.projectStatus, undefined);
   assert.equal(mutationCalls(client).length, 0);
+  assert.deepEqual(client.calls.map(({ query }) => /query (\w+)/u.exec(query)[1]), ["DevelopmentLinkPullRequest"]);
+  assert.equal(admissionReads, 0);
+  assert.equal(statusWrites, 0);
+
+  const meta = makeClient({ bodies: { 10: "Task identity: ChipIn-one/.github#247" } });
+  assert.equal((await reconcileDevelopmentLink(meta, { repository: REPOSITORY, pullRequestNumber: 10 })).result, "cross-repository-skipped");
+  const explicit = makeClient({ bodies: { 10: "No marker" } });
+  assert.equal((await reconcileDevelopmentLink(explicit, {
+    repository: REPOSITORY, pullRequestNumber: 10, explicitTaskIdentity: "ChipIn-one/chipin-knowledge-base#3",
+  })).result, "cross-repository-skipped");
+});
+
+test("cross-repository markers outside the registry allow-list still fail closed", async () => {
+  for (const marker of ["ChipIn-one/chipin-notifications#7", "other-org/chipin-backend#7", "chipin-one/chipin-backend#7"]) {
+    const client = makeClient({ bodies: { 10: `Task identity: ${marker}` } });
+    await assert.rejects(
+      reconcileDevelopmentLink(client, { repository: REPOSITORY, pullRequestNumber: 10 }),
+      { message: "Task identity must be exactly ChipIn-one/<supported-repository>#<issue-number>." },
+      marker,
+    );
+    assert.equal(mutationCalls(client).length, 0);
+  }
+  const conflict = makeClient({ bodies: { 10: "Task identity: ChipIn-one/chipin-backend#7" } });
+  await assert.rejects(
+    reconcileDevelopmentLink(conflict, { repository: REPOSITORY, pullRequestNumber: 10, explicitTaskIdentity: `${REPOSITORY}#7` }),
+    /explicit input ChipIn-one\/chipin-frontend#7 conflicts with PR body ChipIn-one\/chipin-backend#7/u,
+  );
+});
+
+test("a same-repository identity keeps the exact link receipt", async () => {
+  const client = makeClient();
+  assert.deepEqual(await reconcileDevelopmentLink(client, { repository: REPOSITORY, pullRequestNumber: 10 }), {
+    result: "linked",
+    taskIdentity: `${REPOSITORY}#7`,
+    repository: REPOSITORY,
+    issueNumber: 7,
+    pullRequestNumber: 10,
+    readBackConfirmed: true,
+  });
+  assert.equal(mutationCalls(client).length, 1);
 });
 
 test("unreadable Issue, PR, or native relationship fails closed", async () => {

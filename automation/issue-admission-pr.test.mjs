@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { preflightPr, taskIdentitiesForPr, selectedOwnerForPr } from './issue-admission-pr.mjs';
+import { preflightPr, taskIdentitiesForPr, selectedOwnerForPr, isCrossRepositoryTaskRepository } from './issue-admission-pr.mjs';
 import { loadRegistry } from './registry.mjs';
 
 const FE = 'ChipIn-one/chipin-frontend';
@@ -23,7 +23,8 @@ test('implementation needs one exact same-repository identity before PR handoff'
   assert.deepEqual(taskIdentitiesForPr(FE, pr()).map(x => x.canonical), [FE + '#71']);
   assert.deepEqual(taskIdentitiesForPr(BE, pr(BE, 'develop')).map(x => x.canonical), [BE + '#71']);
   assert.throws(() => taskIdentitiesForPr(FE, pr(FE, 'master', 'feature', 'refs #71')), /Missing/);
-  assert.throws(() => taskIdentitiesForPr(FE, pr(FE, 'master', 'feature', 'Task identity: ' + BE + '#71')), /mismatched/);
+  // a BE marker in an FE PR is a cross-repository identity since .github#247 (tested below), no longer a mismatch
+  assert.deepEqual(taskIdentitiesForPr(FE, pr(FE, 'master', 'feature', 'Task identity: ' + BE + '#71')).map(x => x.canonical), [BE + '#71']);
   assert.throws(() => taskIdentitiesForPr(FE, pr(FE, 'master', 'feature', 'Task identity: ' + FE + '#71\nTask identity: ' + FE + '#72')), /ambiguous/);
   const fork = pr(); fork.head.repo.full_name = 'other/fork';
   assert.throws(() => taskIdentitiesForPr(FE, fork), /Untrusted fork/);
@@ -133,4 +134,87 @@ test('current PR SHA is mandatory and a stale event blocks before metadata read'
   await assert.rejects(() => preflightPr({ ...input }), /expected current PR head SHA/);
   await assert.rejects(() => preflightPr({ ...input, expectedHeadSha: 'b'.repeat(40) }), /STALE.*PR head SHA/);
   assert.equal(reads, 0);
+});
+
+// Cross-repository Task identity (.github#247).
+const KB = 'ChipIn-one/chipin-knowledge-base';
+const META = 'ChipIn-one/.github';
+const receiptFor = issue => ({ blockers: [], receipt: {
+  contractVersion: 'chipin-issue-admission/v1', status: 'INTAKE_COMPLETE',
+  issue, revision: 'rev', checkedAt: new Date().toISOString(), blockers: [],
+} });
+
+test('same-repository identity keeps its decisions and messages byte-identical', () => {
+  assert.deepEqual(taskIdentitiesForPr(FE, pr()), [{ canonical: FE + '#71', repository: FE, issueNumber: 71 }]);
+  assert.deepEqual(taskIdentitiesForPr(BE, pr(BE, 'develop')), [{ canonical: BE + '#71', repository: BE, issueNumber: 71 }]);
+  assert.throws(() => taskIdentitiesForPr(FE, pr(FE, 'master', 'feature', 'refs #71')),
+    { message: 'Missing or mismatched single Task identity in implementation PR.' });
+  assert.throws(() => taskIdentitiesForPr(FE, pr(FE, 'master', 'feature', 'Task identity: ' + FE + '#0')),
+    { message: 'Task identity must be exactly ChipIn-one/<supported-repository>#<issue-number>.' });
+  assert.throws(() => selectedOwnerForPr(KB, 'Task identity: ' + KB + '#5'), { message: 'KB PR requires one explicit Task owner: @login line.' });
+  assert.equal(selectedOwnerForPr(FE, 'Task identity: ' + FE + '#71'), null);
+});
+
+test('an allow-listed cross-repository identity is accepted and read from its own repository', async () => {
+  for (const [repo, base, target] of [[FE, 'master', META], [BE, 'develop', FE], [META, 'master', BE], [KB, 'master', META]]) {
+    const body = 'Task identity: ' + target + '#9' + (repo === KB ? '\nTask owner: @writer-user' : '');
+    assert.deepEqual(taskIdentitiesForPr(repo, pr(repo, base, 'feat/x', body)), [{ canonical: target + '#9', repository: target, issueNumber: 9 }]);
+  }
+  const reads = [];
+  const output = await preflightPr({
+    client: { request: async () => pr(FE, 'master', 'feat/x', 'Task identity: ' + META + '#247') }, config: {},
+    repository: FE, number: 10, expectedHeadSha: 'a'.repeat(40),
+    read: async input => { reads.push(input); return receiptFor(META + '#247'); },
+  });
+  assert.deepEqual(reads.map(r => [r.repository, r.number, r.selectedOwner]), [[META, 247, null]]);
+  assert.equal(output.receipts[0].issue, META + '#247');
+});
+
+test('owner policy of a cross-repository identity is the Issue repository rule', async () => {
+  // KB Issue (registry owner null) from an FE PR needs the explicit Task owner line; an FE Issue from a KB PR does not.
+  const reads = [];
+  const read = async input => { reads.push(input); return receiptFor(input.repository + '#' + input.number); };
+  await preflightPr({ client: { request: async () => pr(FE, 'master', 'feat/x', 'Task identity: ' + KB + '#5\nTask owner: @writer-user') },
+    config: {}, repository: FE, number: 10, expectedHeadSha: 'a'.repeat(40), read });
+  await preflightPr({ client: { request: async () => pr(KB, 'master', 'feat/x', 'Task identity: ' + FE + '#5') },
+    config: {}, repository: KB, number: 10, expectedHeadSha: 'a'.repeat(40), read });
+  assert.deepEqual(reads.map(r => [r.repository, r.selectedOwner]), [[KB, 'writer-user'], [FE, null]]);
+  await assert.rejects(() => preflightPr({ client: { request: async () => pr(FE, 'master', 'feat/x', 'Task identity: ' + KB + '#5') },
+    config: {}, repository: FE, number: 10, expectedHeadSha: 'a'.repeat(40), read }), /Task owner/);
+  assert.equal(reads.length, 2);
+});
+
+test('a non-allow-listed, other-owner or malformed cross-repository identity is rejected before any Issue read', async () => {
+  const offRegistry = (() => {
+    const registry = loadRegistry();
+    return { ...registry, repositories: registry.repositories.map(profile => (profile.repository === BE
+      ? { ...profile, capabilities: { ...profile.capabilities, admission: 'off' } } : profile)) };
+  })();
+  assert.throws(() => taskIdentitiesForPr(FE, pr(FE, 'master', 'feat/x', 'Task identity: ' + BE + '#7'), offRegistry),
+    /Cross-repository Task identity ChipIn-one\/chipin-backend#7 is not allowed/);
+  for (const marker of ['ChipIn-one/chipin-notifications#7', 'ChipIn-one/slack-rofls#7', 'other-org/chipin-frontend#7',
+    'chipin-one/chipin-backend#7', 'ChipIn-one/chipin-backend', 'ChipIn-one/chipin-backend#07', 'ChipIn-one/../chipin-backend#7',
+    'https://github.com/ChipIn-one/chipin-backend/issues/7']) {
+    assert.throws(() => taskIdentitiesForPr(FE, pr(FE, 'master', 'feat/x', 'Task identity: ' + marker)), /Task identity/, marker);
+  }
+  assert.equal(isCrossRepositoryTaskRepository(BE), true);
+  assert.equal(isCrossRepositoryTaskRepository(META), true);
+  for (const repo of ['ChipIn-one/chipin-notifications', 'ChipIn-one/slack-rofls', 'other-org/chipin-backend', 'chipin-one/chipin-backend', '', null]) {
+    assert.equal(isCrossRepositoryTaskRepository(repo), false, String(repo));
+  }
+  let reads = 0;
+  await assert.rejects(() => preflightPr({ client: { request: async () => pr(FE, 'master', 'feat/x', 'Task identity: other-org/x#7') },
+    config: {}, repository: FE, number: 10, expectedHeadSha: 'a'.repeat(40), read: async () => { reads++; return receiptFor('x'); } }), /Task identity/);
+  assert.equal(reads, 0);
+});
+
+test('an unreadable or blocked cross-repository Issue fails closed', async () => {
+  const client = { request: async () => pr(FE, 'master', 'feat/x', 'Task identity: ' + BE + '#7') };
+  const input = { client, config: {}, repository: FE, number: 10, expectedHeadSha: 'a'.repeat(40) };
+  await assert.rejects(() => preflightPr({ ...input, read: async () => { throw new Error('GET /repos/' + BE + '/issues/7 -> 404'); } }), /404/);
+  await assert.rejects(() => preflightPr({ ...input,
+    read: async () => ({ blockers: ['Unreadable or mismatched native Issue identity.'], receipt: { status: 'BLOCKED' } }) }),
+  /ChipIn-one\/chipin-backend#7 BLOCKED: Unreadable or mismatched native Issue identity/);
+  // a receipt for another Issue than the marker never admits the PR
+  await assert.rejects(() => preflightPr({ ...input, read: async () => receiptFor(FE + '#7') }), /Admission identity\/revision mismatch/);
 });

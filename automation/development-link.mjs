@@ -617,9 +617,20 @@ export async function reconcileDevelopmentLink(client, {
 
   assertSupportedRepository(task.repository);
   if (task.repository !== repository) {
-    throw new Error(
-      `Task identity ${task.canonical} does not belong to pull request repository ${repository}; cross-repository guessing is not allowed.`,
-    );
+    // Cross-repository Task identity (.github#247): admitted by issue-admission-pr.mjs under the Issue repository's
+    // rules, but never natively linked. A native link would let GitHub auto-close the Issue at the merge, outside the
+    // Issue repository's completion strategy, and the completion engine rejects cross-repository linked PRs. Nothing
+    // is read or written here; the result is advisory and the Issue's completion and Status stay manual.
+    return {
+      result: "cross-repository-skipped",
+      taskIdentity: task.canonical,
+      repository,
+      issueNumber: task.issueNumber,
+      pullRequestNumber: prNumber,
+      readBackConfirmed: false,
+      detail: `Task identity ${task.canonical} is in another repository than ${repository}; no native Development link is created `
+        + "(cross-repository identity is admission-only). Close the Issue and move its Project Status by hand.",
+    };
   }
 
   const before = await readNativeState(client, {
@@ -818,6 +829,7 @@ async function main() {
     inProgress,
   });
   process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
+  if (receipt.result === "cross-repository-skipped") process.stdout.write(`::warning::${receipt.detail}\n`);
   // The native link above is done and read back in every case; only the Status move is reported here.
   reportInProgressOutcome(receipt);
 }

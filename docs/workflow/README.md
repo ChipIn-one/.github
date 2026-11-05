@@ -197,6 +197,30 @@ Summary; the full contract is in [relationships.md](relationships.md).
 | `Parent: owner/repo#N` | `parent` / `subIssues` | decomposition; cross-repository product parents live in KB (per schema), process epics in `.github` | none; Project shows `Sub-issues progress` |
 | Development link | `closedByPullRequestsReferences` | implementation | already exists |
 
+### Task identity
+
+An implementation PR names its Task with exactly one PR-body line `Task identity: ChipIn-one/<repository>#<issue-number>`. The line is identity transport only, never
+implementation evidence; closing keywords, URLs, branch names and titles are never a fallback.
+
+**Cross-repository identity is supported** ([#247](https://github.com/ChipIn-one/.github/issues/247)): a PR in repository X may name an Issue in repository Y. Rules and limits:
+
+- **Allow-list.** Y must be a `ChipIn-one/<name>` record of `workflow-registry.yaml` with `developmentLink` and `admission` not `off`, spelled exactly (case included).
+  Today: `chipin-frontend`, `chipin-backend`, `chipin-knowledge-base`, `.github`. Any other owner, repository, spelling or form fails closed before any Issue is read
+  (`Task identity must be exactly ...` or `Cross-repository Task identity ... is not allowed`). The PR body is untrusted input; the admission token is never pointed outside the allow-list.
+- **Admission** (`issue-admission-pr.mjs`) reads the Issue from Y and applies Y's rules: required owner, Type, Priority, Project #5 item, blockers, revision and the
+  120-second freshness window. A Y with `owner: null` (knowledge base) needs the `Task owner: @login` line in the PR body, also when X is another repository.
+  An unreadable or blocked Issue blocks the PR. The PR itself must still be a same-repository PR (no forks) on X's registry route.
+- **No native Development link.** `development-link.mjs` returns `cross-repository-skipped` (a warning, exit 0) and writes nothing: a native link would let GitHub
+  auto-close the Issue at the merge, outside Y's completion strategy, and the completion engine accepts only same-repository linked PRs. So for a cross-repository Task the
+  Project #5 `In Progress` move and the close are done by hand until the completion follow-ups of #247 land.
+- **Release PR inventories** (`Included Issues:`) stay same-repository only.
+- **`.github` Issues** (`kind: meta`) may be Task identities for org-level work, under the same admission. Conformance drift Issues may be named too; the audit still owns
+  their lifecycle and closes them at zero drift.
+- **Not covered yet** (follow-ups of #247): the frontend `pr-metadata` gate and `scripts/create-pr.mjs` accept only a frontend identity, so a frontend PR cannot carry a
+  cross-repository identity until they change.
+
+The child-Issue workaround (one mirror Issue per product repository, as in #240-#243) is no longer required for repositories where the follow-ups are done; it remains valid.
+
 ## 6. Conformance audit
 
 Implemented in [#154](https://github.com/ChipIn-one/.github/issues/154); the checks are listed in [conformance.md](conformance.md).

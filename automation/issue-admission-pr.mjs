@@ -20,7 +20,11 @@ export function taskIdentitiesForPr(repository, pr, registry = undefined) {
   const head = pr.head.ref, base = pr.base.ref;
   if (base === integration && head !== integration) {
     const marker = readTaskIdentityMarker(pr.body);
-    if (!marker || marker.repository !== repository) throw new Error('Missing or mismatched single Task identity in implementation PR.');
+    if (!marker) throw new Error('Missing or mismatched single Task identity in implementation PR.');
+    if (marker.repository !== repository && !isCrossRepositoryTaskRepository(marker.repository, registry)) {
+      throw new Error('Cross-repository Task identity ' + marker.canonical + ' is not allowed: the Issue repository must be a ChipIn-one '
+        + 'repository in workflow-registry.yaml with admission enabled (.github#247).');
+    }
     return [marker];
   }
   if (promotion && base === promotion && head === integration) {
@@ -37,6 +41,13 @@ export function taskIdentitiesForPr(repository, pr, registry = undefined) {
     + integration + (promotion ? ', release ' + integration + ' -> ' + promotion : '') + ').');
 }
 
+// Cross-repository Task identity (.github#247): the marker may name an Issue in another repository only when that
+// repository is a ChipIn-one record of the registry with admission on (exact spelling). The PR body is untrusted, so
+// nothing outside this allow-list is ever read; the Issue is then admitted under its own repository's rules.
+export function isCrossRepositoryTaskRepository(repository, registry = undefined) {
+  return /^ChipIn-one\/[A-Za-z0-9_.-]+$/.test(String(repository ?? '')) && admissionProfile(repository, registry) !== null;
+}
+
 export function selectedOwnerForPr(repository, body) {
   if (!requiresExplicitOwner(repository)) return null;
   return readKBTaskOwnerMarker(body);
@@ -48,7 +59,8 @@ export async function preflightPr({ client, config, repository, number, expected
   if (pr?.number !== number || pr?.state !== 'open') throw new Error('PR identity/state mismatch or unreadable.');
   if (pr.head?.sha !== expectedHeadSha) throw new Error('STALE: PR head SHA changed since the invoking workflow event.');
   const ids = taskIdentitiesForPr(repository, pr, registry);
-  const owner = selectedOwnerForPr(repository, pr.body);
+  // Owner policy is the Issue repository's (.github#247); for a same-repository identity that is `repository`.
+  const owner = selectedOwnerForPr(ids[0].repository, pr.body);
   const receipts = [];
   for (const id of ids) {
     const result = await read({ client, config, repository: id.repository, number: id.issueNumber, selectedOwner: owner });
