@@ -32,3 +32,26 @@ The record alone is not trusted: anyone with write access can create an identica
 2. [chipin-backend#213](https://github.com/ChipIn-one/chipin-backend/issues/213): the evidence step in `deploy-production`, reviewed and merged by olegbal.
 3. Before the engine is turned on, olegbal disables "Auto-close issues with merged linked pull requests" in chipin-backend.
 4. Registry switch to `completion: deployment-receipt` with `productionEvidence`, plus a completion caller using the same fail-closed read-back model as `frontend-production-completion`, as a separate PR merged by olegbal.
+
+Step **A1** of [chipin-backend#184](https://github.com/ChipIn-one/chipin-backend/issues/184), the engine, is done once its `.github` PR merges: `deployment-receipt` accepts `productionEvidence.verifier: workflow-run` and verifies the receipt against its run as described in [completion.md](completion.md#workflow-run-verifier-backend) (only the latest receipt counts, and its run must be the newest run of `deploy-production.yml`, on any branch, of any event or status; an untrusted latest receipt keeps Issues open as `production-evidence-untrusted`). It changes no backend behaviour: the record stays `completion: manual` / `capabilities.completion: manual`.
+
+### Trust boundary
+
+Users with write access to chipin-backend are trusted. The verifier stops forged or stray receipts: a Deployment written by hand, by another workflow or by a workflow on another branch or tag, a receipt the deploy run never wrote, a re-run citing an old run, and an older deploy made to look current by deleting a newer receipt. It does not stop a malicious writer. Known, accepted limits:
+
+- a writer deletes the newer Deploy Production runs (with their receipt Deployments): the previous deploy looks current again, and Issues contained only in it could close although a rollback removed them (the audit log shows the deletion; the verifier cannot);
+- a writer re-runs an older Deploy Production run that redeploys and cancels it before `record-receipt`: a re-run keeps its `run_number`, so no newer run exists and the newest receipt still names the later deploy;
+- a deploy outside Deploy Production, for example another workflow on the self-hosted production runner, writes no receipt and is invisible to the verifier;
+- `develop` is unprotected (`protected: false`; rulesets and branch protection need a paid plan for this private repository, [#161](https://github.com/ChipIn-one/.github/issues/161)): a writer can push a changed `deploy-production.yml` or `record-receipt` to `develop` and dispatch it, and every check passes. The verifier proves that a receipt came from the newest Deploy Production run on a `develop` commit, not that the commit was reviewed.
+
+### Preconditions before the registry switch (step A3)
+
+- [ ] `develop` protected with required review ([#161](https://github.com/ChipIn-one/.github/issues/161); deferred: needs a paid plan).
+- [ ] The `deploy` job of chipin-backend's `deploy-production.yml` guarded by `if: github.run_attempt == 1`, so a re-run never redeploys.
+- [ ] The self-hosted production runner restricted to `deploy-production.yml` on `develop` (runner group with selected workflows, if the plan allows).
+- [ ] olegbal disables "Auto-close issues with merged linked pull requests" in chipin-backend (step 3 above).
+- [ ] The runner token can read Actions runs and jobs and check-run annotations on chipin-backend (plus Deployments read and Issues write); a failed read leaves every Issue `production-evidence-unreadable`.
+- [ ] The backend caller (decided: a repository caller, not only the org sweep) triggers on `workflow_run` `completed` of Deploy Production (plus `push` to `develop`), not on `deployment_status`: the receipt's status is written while the run is still `in_progress` ([completion.md](completion.md#workflow-run-verifier-backend)), and it pins an org tag containing A1.
+
+The switch itself (step A3) uses exactly this evidence line:
+`productionEvidence: { environment: production-receipt, creator: "github-actions[bot]", task: "deploy:image-receipt", verifier: workflow-run, workflow: .github/workflows/deploy-production.yml, branch: develop, job: record-receipt }`

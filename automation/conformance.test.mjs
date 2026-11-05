@@ -1014,7 +1014,7 @@ test('GitHubConformanceSource: production containment reuses the completion rece
   const head = 'f'.repeat(40);
   const receipt = M2;
   const responses = (statusState) => async path => {
-    if (path === `/repos/${FE}/commits/master`) return { sha: head };
+    if (path === `/repos/${FE}/commits/heads/master`) return { sha: head };
     if (path.startsWith(`/repos/${FE}/deployments?environment=Production`)) return [{ id: 7, sha: receipt, environment: 'Production', creator: { login: 'vercel[bot]' }, created_at: RECENT }];
     if (path.startsWith(`/repos/${FE}/deployments/7/statuses`)) return [{ id: 1, state: statusState, creator: { login: 'vercel[bot]' }, created_at: RECENT }];
     const compare = /\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/.exec(path);
