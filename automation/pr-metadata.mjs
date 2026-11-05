@@ -55,6 +55,66 @@ export function bodyGaps(body) {
     key=>!new RegExp("^## "+key+"\\s*$","miu").test(String(body??""))
   ).map(key=>"BODY: missing ## "+key+" (preserve human edits; add manually)");
 }
+// chipin-frontend#635 / .github#268: the release QA Issue takes its steps from merged PR bodies, so an
+// implementation PR that changes what a tester sees must carry QA steps. The UI-affecting path policy
+// mirrors chipin-frontend scripts/release-qa/ui-paths.mjs and lives in pr-metadata.config.json.
+const QA_SECTION = /^QA(?:\s*\([^)]*\))?$/iu;
+const QA_LINE = /^\s*-\s*\[[ xX]\]\s*QA:\s*\S/u;
+const QA_ITEM = /^\s*(?:[-*+]|\d+[.)])\s+(.*)$/u;
+const NO_QA_STEP = /^(?:none|n\/a|no qa(?: needed)?)(?:\s*[.!]?|\s*(?:[(\u2014\u2013,:;-]|=>).*)$/iu;
+const TEST_FILE = /\.test\.[^/]+$/u;
+export function isUiAffectingPath(path, qa) {
+  if (typeof path !== "string" || !path) return false;
+  if (qa.files.includes(path)) return true;
+  if (!qa.prefixes.some(prefix => path.startsWith(prefix))) return false;
+  if (qa.excludePrefixes.some(prefix => path.startsWith(prefix))) return false;
+  return !(qa.testFilePrefixes.some(prefix => path.startsWith(prefix)) && TEST_FILE.test(path));
+}
+// True when the body has a `- [ ] QA:` line, or a `## QA` / `## QA (owner)` section with one real list
+// item. Code blocks and HTML comments never count; neither do empty checkboxes or None/n/a items.
+export function hasQaSteps(body) {
+  let inSection = false, fence = null, comment = false;
+  for (const raw of String(body ?? "").split("\n")) {
+    const line = raw.replace(/\r$/u, "");
+    if (fence) {
+      const close = /^\s*(`{3,}|~{3,})\s*$/u.exec(line)?.[1];
+      if (close && close[0] === fence[0] && close.length >= fence.length) fence = null;
+      continue;
+    }
+    if (comment) { if (line.includes("-->")) comment = false; continue; }
+    const open = /^\s*(`{3,}(?=[^`]*$)|~{3,})/u.exec(line)?.[1];
+    if (open) { fence = open; continue; }
+    if (/^\s*<!--/u.test(line)) { comment = !line.includes("-->"); continue; }
+    const heading = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/u.exec(line);
+    if (heading) { if (heading[1].length <= 2) inSection = QA_SECTION.test(heading[2]); continue; }
+    if (QA_LINE.test(line)) return true;
+    const item = inSection ? QA_ITEM.exec(line) : null;
+    if (!item) continue;
+    const text = item[1].replace(/^\[[ xX]\](?:\s+|$)/u, "").replace(/^QA:\s*/iu, "").trim();
+    if (text && !/^(?:[-*_]\s*){2,}$/u.test(text) && !NO_QA_STEP.test(text)) return true;
+  }
+  return false;
+}
+export function qaGap(files, body, qa) {
+  const ui = files.filter(path => isUiAffectingPath(path, qa));
+  if (ui.length === 0 || hasQaSteps(body)) return null;
+  const shown = ui.slice(0, 3).join(", ") + (ui.length > 3 ? ", +" + (ui.length - 3) + " more" : "");
+  return "QA: PR changes UI-affecting paths (" + shown + ") but its body has no QA steps; add a ## QA (owner)"
+    + " section with checklist steps a tester can follow (or - [ ] QA: <step> => <expected> lines)";
+}
+// Renamed files count under both names: moving a file out of src/ still changes the shipped UI.
+export async function prQaBlocker(client, pullUrl, body, qa) {
+  const changed = await client.listAll(pullUrl + "/files");
+  if (!Array.isArray(changed) || changed.length === 0 || changed.length >= 3000)
+    throw new Error("QA: PR changed files are unreadable");
+  const paths = changed.flatMap(file => [file?.filename, file?.previous_filename]).filter(path => typeof path === "string");
+  return qaGap(paths, body, qa);
+}
+function assertQaPolicy(qa) {
+  const strings = value => Array.isArray(value) && value.every(item => typeof item === "string" && item);
+  if (!strings(qa?.prefixes) || !strings(qa.files) || !strings(qa.excludePrefixes) || !strings(qa.testFilePrefixes))
+    throw new Error("CONFIG: qaPolicy needs prefixes, files, excludePrefixes and testFilePrefixes");
+}
 export function chooseOwner({manual=[],issue=[],approved=null,author=null,allowAuthor=false}) {
   if (manual.length) return null;
   // Multiple native Issue assignees are valid under #53. Use the explicitly
@@ -269,6 +329,7 @@ export async function reconcilePR(client,policy,number,expectedSha,{admissionCli
   if (policy?.repository!==REPO || policy.project!==PROJECT || policy.ownerPolicy?.allowIssueOwner!==true
       || !Array.isArray(policy.reviewerPolicy?.implementation) || !Array.isArray(policy.reviewerPolicy?.release))
     throw new Error("CONFIG: explicit FE Project #5, owner and reviewer policy required");
+  if (policy.qaPolicy!==undefined) assertQaPolicy(policy.qaPolicy);
   const n=Number(number);
   if (!Number.isSafeInteger(n)||n<=0) throw new Error("PR: invalid PR number");
   const url=ROOT+"/pulls/"+n;
@@ -307,6 +368,10 @@ export async function reconcilePR(client,policy,number,expectedSha,{admissionCli
     issue=await client.request(ROOT+"/issues/"+identity.issueNumber);
     if (issue?.number!==identity.issueNumber || issue.pull_request) throw new Error("IDENTITY: target is not an Issue");
     taskIdentity=identity.canonical;
+    if (policy.qaPolicy) {
+      const gap=await prQaBlocker(client,url,pr.body,policy.qaPolicy);
+      if (gap) blockers.push(gap);
+    }
   } else {
     await verifyRelease(client,releaseReferences(pr.body),branches);
   }

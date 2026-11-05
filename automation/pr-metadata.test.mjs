@@ -371,3 +371,57 @@ test("#214 unknown or prototype-named target branches are rejected",async()=>{
   for (const ref of ["release","__proto__","constructor","toString"])
     await assert.rejects(requiredShaCIGreen(masterClient(),{...masterPR,base:{ref,sha:CI_BASE}}),/unsupported target branch/u);
 });
+
+// .github#268: UI-affecting frontend PRs must carry QA steps for the release QA Issue (chipin-frontend#635).
+import {isUiAffectingPath,hasQaSteps,qaGap,prQaBlocker} from "./pr-metadata.mjs";
+const shippedConfig=JSON.parse(await (await import("node:fs/promises")).readFile(new URL("./pr-metadata.config.json",import.meta.url),"utf8"));
+const qa=shippedConfig.qaPolicy;
+test("the shipped QA policy mirrors chipin-frontend scripts/release-qa/ui-paths.mjs",()=>{
+  assert.deepEqual(qa,{prefixes:["src/","public/"],files:["index.html","app.html","vercel.json","vite.config.ts",
+    "pwa-assets.config.ts","scripts/prerender-before-workbox.mjs","scripts/prerender-public.mjs",
+    "scripts/private-spa-navigation.ts"],excludePrefixes:["src/test/"],testFilePrefixes:["src/"]});
+});
+test("UI-affecting paths follow the frontend release QA list",()=>{
+  for (const path of ["src/App.tsx","src/i18n/locales/en/common.json","public/robots.txt","index.html","vercel.json",
+    "scripts/private-spa-navigation.ts","public/x.test.js"]) assert.equal(isUiAffectingPath(path,qa),true,path);
+  for (const path of ["src/App.test.tsx","src/test/setup.ts","docs/help.md",".github/workflows/frontend-ci.yml",
+    "package.json","scripts/release-qa/core.mjs","srcx/a.ts","",null]) assert.equal(isUiAffectingPath(path,qa),false,String(path));
+});
+test("QA steps are a QA: line or a real item of a ## QA section, never a placeholder",()=>{
+  assert.equal(hasQaSteps("## Summary\nx\n- [ ] QA: Open settings => Settings appear"),true);
+  assert.equal(hasQaSteps("## QA (owner)\r\n- [ ] Create an expense: the balance changes\r\n"),true);
+  assert.equal(hasQaSteps("## QA\n1. Open the landing"),true);
+  assert.equal(hasQaSteps("## QA\n- None of the rows overflow at 320px"),true);
+  for (const body of ["","## Summary\n- [ ] Open settings","## QA (owner)\n- [ ]\n- [ ] QA:\n- None\n- n/a (CI only)\n- None, docs only\n- - -",
+    "## QA\n```\n- [ ] in a fence\n```","## QA\n<!--\n- [ ] example\n-->","## QA\n## Tests\n- [ ] npm test",
+    "### QA\n- [ ] sub-heading is not the section","```\n- [ ] QA: in a fence => x\n```",null])
+    assert.equal(hasQaSteps(body),false,JSON.stringify(body));
+});
+test("only a UI-affecting PR without QA steps gets a QA blocker",()=>{
+  assert.equal(qaGap(["docs/help.md",".github/workflows/x.yml","src/App.test.tsx"],"",qa),null);
+  assert.equal(qaGap(["src/App.tsx"],"## QA (owner)\n- [ ] Open the app: it loads",qa),null);
+  const gap=qaGap(["src/a.ts","src/b.ts","public/c.svg","index.html","docs/d.md"],"## Summary\nx",qa);
+  assert.match(gap,/^QA: PR changes UI-affecting paths \(src\/a\.ts, src\/b\.ts, public\/c\.svg, \+1 more\) but its body has no QA steps; add a ## QA \(owner\) section/u);
+});
+test("the QA blocker reads every changed file, including the old name of a renamed file, and fails closed",async()=>{
+  const client=files=>({calls:[],async listAll(path){this.calls.push(path);return files;}});
+  const renamed=client([{filename:"legacy/App.tsx",previous_filename:"src/App.tsx"}]);
+  assert.match(await prQaBlocker(renamed,"/repos/"+repo+"/pulls/7","",qa),/src\/App\.tsx/u);
+  assert.deepEqual(renamed.calls,["/repos/"+repo+"/pulls/7/files"]);
+  assert.equal(await prQaBlocker(client([{filename:"docs/a.md"}]),"/p","",qa),null);
+  await assert.rejects(prQaBlocker(client([]),"/p","",qa),/QA: PR changed files are unreadable/u);
+  await assert.rejects(prQaBlocker(client(null),"/p","",qa),/unreadable/u);
+});
+test("an invalid QA policy fails closed before any read",async()=>{
+  const policy={repository:repo,project:5,ownerPolicy:{allowIssueOwner:true,allowAuthorFallback:false},
+    reviewerPolicy:{implementation:[],release:[]},qaPolicy:{prefixes:["src/"]}};
+  let reads=0;
+  await assert.rejects(reconcilePR({async request(){reads++;}},policy,1,"a".repeat(40)),/CONFIG: qaPolicy/u);
+  assert.equal(reads,0);
+});
+test("reconcilePR runs the QA blocker only for implementation PRs",async()=>{
+  const {readFile}=await import("node:fs/promises");
+  const source=await readFile(new URL("./pr-metadata.mjs",import.meta.url),"utf8");
+  const impl=source.slice(source.indexOf('if (kind==="implementation")'),source.indexOf("await verifyRelease("));
+  assert.match(impl,/prQaBlocker\(client,url,pr\.body,policy\.qaPolicy\)/u);
+});
