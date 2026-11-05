@@ -5,9 +5,10 @@ import test from 'node:test';
 import {
   GitHubConformanceSource, GitHubConformanceStore, RELEASE_TAGS_CHECKED, audit, checkCallers, checkRelease, checkCompletionCaller, checkCompletionSweep, checkDependabot, checkIntake, checkMergedPastRed,
   checkPins, checkProjectPullRequests, checkClosedBeforeProduction, closedBeforeProductionCandidates, CLOSED_SCAN_MAX_PAGES, CLOSED_SCAN_PAGE_SIZE, checkProtection, checkRouting, extractPins, extractRoutingBlock, loadContextPaths, main, parseMarker, renderIssue,
-  completionSweepCovers, readReleaseFacts, releaseBranchOf, renderSummary, sortTags, touchesCapability, upsertIssues, workflowTriggers,
+  checkProductionRelease, completionSweepCovers, readProductionReleaseFacts, readReleaseFacts, releaseBranchOf, renderSummary, sortTags, touchesCapability, upsertIssues, workflowTriggers,
 } from './conformance.mjs';
 import { getRepositoryProfile, loadRegistry, validateRegistry } from './registry.mjs';
+import { ReleaseBlocked } from './release.mjs';
 
 const FE = 'ChipIn-one/chipin-frontend';
 const BE = 'ChipIn-one/chipin-backend';
@@ -452,6 +453,9 @@ function fakeSource(over = {}) {
     versionTags: async repo => (repo === BE ? [] : [{ name: 'v1.0.0', sha: V1 }]),
     branchStatus: async () => 'ahead',
     release: async () => ({ draft: false }),
+    // production state (.github#254): FE and .github run the tagged V1; no release plan is needed
+    productionState: async () => ({ sha: V1, label: 'test' }),
+    releasePlan: async () => { throw new Error('a tagged production SHA needs no release plan'); },
     branchRules: async repo => (repo === META ? { state: 'ok', rules: ['pull_request', 'required_status_checks'], requiredChecks: ['evaluate-fixtures'] } : repo === FE ? { state: 'ok', rules: [], requiredChecks: [] } : na),
     classicProtection: async repo => (repo === FE ? { state: 'ok', requiredChecks: ['frontend-ci'] } : repo === META ? { state: 'unprotected' } : na),
     openIssues: async () => [],
@@ -684,6 +688,116 @@ test('release: a compare 404 is RELEASE_TAG_OFF_BRANCH drift, not an unreadable 
   const report = await audit({ source: fakeSource({ branchStatus: async repo => (repo === FE ? 'not-found' : 'ahead') }), repositories: [FE] });
   assert.equal(report.repositories[0].status, 'DRIFT');
   assert.ok(checks(report.repositories[0].findings).includes('RELEASE_TAG_OFF_BRANCH'));
+});
+
+// --- production release state (.github#254) ----------------------------------------------------------------
+const PROD = 'e'.repeat(40);
+const planOf = (outcome, detail = 'x') => ({ outcome, detail });
+test('production release: tagged, untagged NO_RELEASE (note), pending release or blocked engine (drift), unverifiable (note)', () => {
+  const at = { sha: PROD, label: 'Production deployment 7' };
+  assert.deepEqual(checkProductionRelease(profile(FE), null), []);
+  assert.deepEqual(checkProductionRelease(profile(FE), { ...at, tag: 'v1.1.0' }), []);
+  const none = checkProductionRelease(profile(BE), { ...at, plan: planOf('NO_RELEASE', '2 included pull request(s) since v1.0.0 all have Version impact none') });
+  assert.deepEqual(none.map(f => [f.check, f.severity]), [['RELEASE_PRODUCTION_NO_RELEASE', 'note']]);
+  assert.match(none[0].message, /eeeeeee without a vX\.Y\.Z tag; the release plan is NO_RELEASE: 2 included/);
+  const pending = checkProductionRelease(profile(FE), { ...at, plan: planOf('PLANNED', 'Impact patch over 1 pull request(s) since v1.1.0: create tag v1.1.1') });
+  assert.deepEqual(pending.map(f => [f.check, f.severity]), [['RELEASE_PRODUCTION_UNTAGGED', 'drift']]);
+  assert.match(pending[0].message, /Production \(Production deployment 7\) runs eeeeeee, which has no vX\.Y\.Z tag, and the release plan is PLANNED: Impact patch/);
+  assert.match(pending[0].remediation, new RegExp(`release\\.mjs apply --ref ${PROD}`));
+  const stuck = checkProductionRelease(profile(META), { sha: PROD, label: 'the head of master', blocked: { code: 'INVALID_VERSION_IMPACT', message: 'Included pull request(s) have no valid `## Version impact`: #9' } });
+  assert.deepEqual(stuck.map(f => [f.check, f.severity]), [['RELEASE_PRODUCTION_UNTAGGED', 'drift']]);
+  assert.match(stuck[0].message, /blocked \(INVALID_VERSION_IMPACT\)/);
+  assert.match(stuck[0].remediation, /^Fix what INVALID_VERSION_IMPACT names/);
+  const unknown = checkProductionRelease(profile(FE), { unverifiable: 'GET deployments -> 403' });
+  assert.deepEqual(unknown.map(f => [f.check, f.severity]), [['RELEASE_PRODUCTION_UNVERIFIABLE', 'note']]);
+  assert.match(unknown[0].message, /production state could not be read: GET deployments -> 403/);
+});
+
+test('production release facts: no plan for a tagged SHA, at most one plan per repository, failures classified', async () => {
+  const tagged = [{ name: 'v1.1.0', sha: V11 }, { name: 'v1.0.0', sha: V1 }];
+  const calls = [];
+  const src = (sha, plan = async () => planOf('NO_RELEASE')) => ({
+    productionState: async p => { calls.push(['state', p.repository]); if (sha instanceof Error) throw sha; return { sha, label: 'L' }; },
+    releasePlan: async (p, at) => { calls.push(['plan', p.repository, at]); return plan(); },
+  });
+  assert.equal(await readProductionReleaseFacts(profile(KB), src(PROD), []), null, 'none reads nothing');
+  assert.equal(await readProductionReleaseFacts(profile(BE), src(PROD), []), null, 'no tags is RELEASE_NO_TAGS, nothing read');
+  assert.deepEqual(calls, []);
+  assert.equal((await readProductionReleaseFacts(profile(FE), src(V1), tagged)).tag, 'v1.0.0', 'a rollback to an older tag is tagged');
+  assert.deepEqual(calls, [['state', FE]]);
+  calls.length = 0;
+  assert.equal((await readProductionReleaseFacts(profile(BE), src(PROD), tagged)).plan.outcome, 'NO_RELEASE');
+  assert.deepEqual(calls, [['state', BE], ['plan', BE, PROD]], 'one plan, for the production SHA');
+  const blocked = await readProductionReleaseFacts(profile(META), src(PROD, async () => { throw new ReleaseBlocked('NO_INCLUDED_PULL_REQUESTS', 'direct push'); }), tagged);
+  assert.deepEqual(blocked.blocked, { code: 'NO_INCLUDED_PULL_REQUESTS', message: 'direct push' });
+  assert.match((await readProductionReleaseFacts(profile(FE), src(Object.assign(new Error('no valid Production deployment'), { code: 'RELEASE_PRODUCTION_UNVERIFIABLE' })), tagged)).unverifiable, /no valid/);
+  assert.match((await readProductionReleaseFacts(profile(FE), src(PROD, async () => { throw new Error('GET pulls -> 403'); }), tagged)).unverifiable, /403/);
+  await assert.rejects(readProductionReleaseFacts(profile(FE), src(new Error('GET deployments -> 502')), tagged), /502/, 'other read errors are UNREADABLE');
+  await assert.rejects(readProductionReleaseFacts(profile(FE), src(PROD, async () => { throw new Error('GET compare -> 502'); }), tagged), /502/);
+});
+
+test('audit: an untagged production state is drift unless the plan is NO_RELEASE; a failed read is UNREADABLE', async () => {
+  const run = over => audit({ source: fakeSource({ productionState: async () => ({ sha: PROD, label: 'L' }), ...over }), repositories: [FE] });
+  const pending = await run({ releasePlan: async () => planOf('PLANNED') });
+  assert.equal(pending.repositories[0].status, 'DRIFT');
+  assert.deepEqual(checks(pending.repositories[0].findings), ['RELEASE_PRODUCTION_UNTAGGED']);
+  const none = await run({ releasePlan: async () => planOf('NO_RELEASE') });
+  assert.equal(none.repositories[0].status, 'CONFORMANT');
+  assert.ok(checks(none.repositories[0].notes).includes('RELEASE_PRODUCTION_NO_RELEASE'));
+  const unreadable = await run({ productionState: async () => { throw new Error('GET deployments -> 502'); } });
+  assert.equal(unreadable.repositories[0].status, 'UNREADABLE');
+});
+
+test('GitHubConformanceSource.productionState: release branch head, Production receipts, production deployments, latest receipt only', async () => {
+  const head = 'f'.repeat(40);
+  const deployments = {
+    Production: [
+      { id: 9, sha: '9'.repeat(40), environment: 'Production', creator: { login: 'vercel[bot]' }, created_at: '2026-11-05T09:00:00Z' },
+      { id: 8, sha: PROD, environment: 'Production', creator: { login: 'vercel[bot]' }, created_at: '2026-11-05T08:00:00Z' },
+      { id: 7, sha: V1, environment: 'Production', creator: { login: 'someone' }, created_at: '2026-11-05T10:00:00Z' },
+    ],
+    production: [
+      { id: 5, sha: PROD, environment: 'production', creator: { login: 'olegbal' }, created_at: '2026-11-04T15:26:12Z' },
+    ],
+  };
+  const statusOf = { 9: ['failure', 'vercel[bot]'], 8: ['success', 'vercel[bot]'], 7: ['success', 'someone'], 5: ['success', 'olegbal'] };
+  const request = async path => {
+    const branch = /\/commits\/heads\/(.+)$/.exec(path);
+    if (branch) return { sha: head };
+    const list = /\/deployments\?environment=([^&]+)&/.exec(path);
+    if (list) return deployments[decodeURIComponent(list[1])] ?? [];
+    const statuses = /\/deployments\/(\d+)\/statuses/.exec(path);
+    if (statuses) { const [state, login] = statusOf[statuses[1]]; return [{ id: 1, state, creator: { login }, created_at: '2026-11-05T10:00:00Z' }]; }
+    if (/\/compare\//.test(path)) return { status: 'ahead', merge_base_commit: { sha: path.split('/compare/')[1].split('...')[0] } };
+    throw new Error(`unexpected ${path}`);
+  };
+  const src = new GitHubConformanceSource({ request });
+  assert.deepEqual(await src.productionState(profile(META)), { sha: head, label: 'the head of master' }, 'semver-by-impact: release branch head');
+  assert.deepEqual(await src.productionState(profile(FE)), { sha: PROD, label: 'Production deployment 8' }, 'newest valid receipt by the evidence creator');
+  assert.deepEqual(await src.productionState(profile(BE)), { sha: PROD, label: 'production deployment 5' }, 'no productionEvidence: the production environment');
+  const verified = { ...profile(FE), productionEvidence: { environment: 'Production', creator: 'vercel[bot]', verifier: 'workflow-run' } };
+  await assert.rejects(src.productionState(verified), e => e.code === 'RELEASE_PRODUCTION_UNVERIFIABLE' && /only the newest receipt counts/.test(e.message), 'workflow-run: an invalid newest receipt is never replaced by an older one');
+  await assert.rejects(new GitHubConformanceSource({ request: async path => (/deployments\?/.test(path) ? [] : request(path)) }).productionState(profile(BE)), e => e.code === 'RELEASE_PRODUCTION_UNVERIFIABLE');
+});
+
+test('GitHubConformanceSource.releasePlan runs the release engine plan on the production SHA', async () => {
+  const PR_MERGE = PROD;
+  const pulls = impact => [{ number: 3, title: 't', body: `## Version impact\n\n${impact}\n`, merged_at: '2026-11-04T10:00:00Z', base: { ref: 'develop' }, user: { login: 'olegbal' }, head: { ref: 'x' }, merge_commit_sha: PR_MERGE }];
+  const client = impact => ({
+    request: async (path, options) => {
+      if (path === `/repos/${BE}/commits/${PROD}`) return { sha: PROD };
+      if (path === `/repos/${BE}/git/matching-refs/tags/v`) return [{ ref: 'refs/tags/v1.0.0', object: { type: 'commit', sha: V1 } }];
+      if (path.startsWith(`/repos/${BE}/compare/${V1}...${PROD}`)) return { status: 'ahead', total_commits: 1, commits: [{ sha: PROD }] };
+      if (options?.allow404) return null;
+      throw new Error(`unexpected ${path}`);
+    },
+    listAll: async path => { assert.equal(path, `/repos/${BE}/commits/${PROD}/pulls`); return pulls(impact); },
+  });
+  const none = await new GitHubConformanceSource(client('none')).releasePlan(profile(BE), PROD);
+  assert.equal(none.outcome, 'NO_RELEASE');
+  const patch = await new GitHubConformanceSource(client('patch')).releasePlan(profile(BE), PROD);
+  assert.deepEqual([patch.outcome, patch.tag], ['PLANNED', 'v1.0.1']);
+  await assert.rejects(new GitHubConformanceSource(client('')).releasePlan(profile(BE), PROD), e => e instanceof ReleaseBlocked && e.code === 'INVALID_VERSION_IMPACT');
 });
 
 test('release: the release caller must run on the trigger the registry declares', () => {

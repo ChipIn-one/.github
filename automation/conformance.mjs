@@ -9,8 +9,8 @@ import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { GitHubClient, projectReadBudget, readProjectItemsPage } from './github-metadata.mjs';
 import { getRepositoryProfile, loadRegistry, parseYamlSubset } from './registry.mjs';
-import { githubStore, sortedVersionTags } from './release.mjs';
-import { RECEIPT_STATUS_PAGE_SIZE, createReceiptResolver, readBranchHead, readProductionDeployments } from './completion.mjs';
+import { ReleaseBlocked, githubStore, planRelease, sortedVersionTags } from './release.mjs';
+import { RECEIPT_STATUS_PAGE_SIZE, createReceiptResolver, readBranchHead, readProductionDeployments, validateProductionReceipt } from './completion.mjs';
 import { compareContainsCommit, readProductionReleases } from './frontend-production-completion.mjs';
 import { INTEGRATION_BRANCH as FRONTEND_INTEGRATION_BRANCH, PRODUCTION_BRANCH as FRONTEND_PRODUCTION_BRANCH } from './frontend-production-completion-policy.mjs';
 
@@ -303,6 +303,51 @@ export async function readReleaseFacts(profile, source) {
   return { tags, latestStatus, releases };
 }
 
+// Production release state (.github#254): the production SHA (source.productionState) carries a release tag, or
+// the release engine's own plan for it (planRelease, at most one per repository and only when the SHA is untagged)
+// is NO_RELEASE. Read only when a tag exists (no tags is RELEASE_NO_TAGS). A 403 or a production SHA that cannot
+// be determined is the note RELEASE_PRODUCTION_UNVERIFIABLE; any other read error makes the repository UNREADABLE.
+export const PRODUCTION_UNVERIFIABLE = 'RELEASE_PRODUCTION_UNVERIFIABLE';
+const productionUnverifiable = error => error?.code === PRODUCTION_UNVERIFIABLE || /\b403\b/.test(String(error?.message ?? error));
+export async function readProductionReleaseFacts(profile, source, tags) {
+  if (profile.release.strategy === 'none' || !tags.length) return null;
+  let production;
+  try {
+    production = await source.productionState(profile);
+  } catch (error) {
+    if (!productionUnverifiable(error)) throw error;
+    return { unverifiable: String(error?.message ?? error).slice(0, 300) };
+  }
+  const tag = tags.find(t => t.sha === production.sha);
+  if (tag) return { ...production, tag: tag.name };
+  try {
+    return { ...production, plan: await source.releasePlan(profile, production.sha) };
+  } catch (error) {
+    if (error instanceof ReleaseBlocked) return { ...production, blocked: { code: error.code, message: error.message } };
+    if (!productionUnverifiable(error)) throw error;
+    return { ...production, unverifiable: String(error?.message ?? error).slice(0, 300) };
+  }
+}
+
+// facts: null (not checked) | { unverifiable } | { sha, label, tag | plan | blocked | unverifiable }
+export function checkProductionRelease(profile, facts) {
+  if (!facts || facts.tag) return [];
+  const { tagPrefix } = profile.release;
+  const where = facts.sha ? `Production (${facts.label}) runs ${facts.sha.slice(0, 7)}` : null;
+  if (facts.unverifiable) {
+    return [finding(PRODUCTION_UNVERIFIABLE, 'note', `${where ? `${where}, untagged; its release plan` : 'The production state'} could not be read: ${facts.unverifiable}`,
+      'Grant the audit token Deployments: Read-only; check that the newest production deployment carries a successful status (docs/workflow/conformance.md).')];
+  }
+  const { plan, blocked } = facts;
+  if (plan && ['NO_RELEASE', 'ALREADY_RELEASED', 'RELEASE_MISSING'].includes(plan.outcome)) {
+    // NO_RELEASE: every included PR says Version impact none, an explained "no new version"
+    return plan.outcome === 'NO_RELEASE' ? [finding('RELEASE_PRODUCTION_NO_RELEASE', 'note', `${where} without a ${tagPrefix}X.Y.Z tag; the release plan is NO_RELEASE: ${plan.detail}`, 'None.')] : [];
+  }
+  const state = blocked ? `the release engine is blocked (${blocked.code}): ${blocked.message}` : `the release plan is ${plan.outcome}: ${plan.detail}`;
+  return [finding('RELEASE_PRODUCTION_UNTAGGED', 'drift', `${where}, which has no ${tagPrefix}X.Y.Z tag, and ${state}`,
+    `${blocked ? `Fix what ${blocked.code} names, then rerun` : 'Rerun'} the release caller for ${facts.sha.slice(0, 7)} (release.mjs apply --ref ${facts.sha}; docs/workflow/release.md).`)];
+}
+
 export async function checkPins(profile, pins, source, tags) {
   const findings = [];
   const latest = tags[0] ?? null;
@@ -574,11 +619,13 @@ export async function auditRepository(profile, source, shared) {
     const contextPath = shared.contextPaths?.get(profile.repository) ?? null;
     const workflows = await source.workflowFiles(profile.repository, ref);
     const pins = extractPins(workflows);
+    const releaseFacts = await readReleaseFacts(profile, source);
     const findings = [
       ...checkCallers(profile, pins),
       ...checkCompletionCaller(profile, workflows, pins),
       ...checkCompletionSweep(profile, shared.workflows),
-      ...checkRelease(profile, pins, await readReleaseFacts(profile, source), workflows),
+      ...checkRelease(profile, pins, releaseFacts, workflows),
+      ...checkProductionRelease(profile, await readProductionReleaseFacts(profile, source, releaseFacts.tags)),
       ...await checkPins(profile, pins, source, shared.tags),
       ...checkDependabot(profile, profile.capabilities.dependabot === 'required' ? await source.repoFile(profile.repository, '.github/dependabot.yml', ref) ?? await source.repoFile(profile.repository, '.github/dependabot.yaml', ref) : null),
       ...checkRouting(profile, routing ? await source.repoFile(profile.repository, 'AGENTS.md', ref) : null, routing && contextPath ? await source.repoFile(profile.repository, contextPath, ref) : null, shared.routingCanon, contextPath),
@@ -824,6 +871,37 @@ export class GitHubConformanceSource {
     if (!data?.status) throw new Error(`compare ${base.slice(0, 7)}...${branch} of ${repository} unreadable`);
     return data.status;
   }
+  // Production SHA of a versioned record (checkProductionRelease). semver-by-impact: the release branch head.
+  // deploy-tag: the newest valid Deployment of the newest 100 (readProductionDeployments), validated with the
+  // completion engine's receipt rules (validateProductionReceipt: newest status success by the same creator, SHA on the
+  // integration branch). With productionEvidence: its environment, creator and task; with verifier workflow-run only
+  // the newest receipt counts (as in the engine; the run proof itself is not repeated here). Without productionEvidence
+  // (chipin-backend while completion is manual): the `production` environment (deploymentProfile), any creator, the
+  // status written by the Deployment's own creator.
+  async productionState(profile) {
+    const repository = profile.repository;
+    if (profile.release.strategy !== 'deploy-tag') {
+      const branch = releaseBranchOf(profile);
+      return { sha: await readBranchHead(this.client, repository, branch), label: `the head of ${branch}` };
+    }
+    const evidence = profile.productionEvidence ?? null;
+    const environment = evidence?.environment ?? profile.deploymentProfile;
+    const integrationHeadSha = await readBranchHead(this.client, repository, profile.branches.integration);
+    const window = await readProductionDeployments(this.client, repository, { environment });
+    const candidates = window.deployments.filter(d => d?.environment === environment
+      && (!evidence || d?.creator?.login === evidence.creator) && (!evidence?.task || d?.task === evidence.task));
+    for (const deployment of evidence?.verifier ? candidates.slice(0, 1) : candidates) {
+      const verdict = await validateProductionReceipt(deployment, {
+        environment, creator: evidence?.creator ?? deployment?.creator?.login, integrationHeadSha,
+        containsCommit: (commit, head) => compareContainsCommit(this.client, repository, commit, head),
+        readStatuses: id => this.client.request(`/repos/${repository}/deployments/${id}/statuses?per_page=${RECEIPT_STATUS_PAGE_SIZE}`),
+      });
+      if (verdict.valid) return { sha: verdict.receipt.sha, label: `${environment} deployment ${verdict.receipt.deploymentId}` };
+    }
+    throw Object.assign(new Error(`no valid ${environment} deployment${evidence ? ` by ${evidence.creator}` : ''} among the newest ${window.read} deployment(s) of ${repository}${evidence?.verifier ? ' (only the newest receipt counts)' : ''}`), { code: PRODUCTION_UNVERIFIABLE });
+  }
+  // the release engine's own plan for the production SHA (read-only)
+  async releasePlan(profile, sha) { return planRelease(githubStore(this.client, profile.repository), { repository: profile.repository, profile, ref: sha }); }
   async branchRules(repository, branch) {
     try {
       const rules = await this.client.request(`/repos/${repository}/rules/branches/${encodeURIComponent(branch)}`);
