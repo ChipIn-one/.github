@@ -48,7 +48,11 @@ repositories:
     completion: manual                  # deployment-receipt decided (#156); manual until the evidence step (chipin-backend#213), see docs/workflow/backend.md
     protection: unavailable             # until the Team upgrade (#161)
     requiredChecks: [Unit and integration tests]
-    release: { strategy: deploy-tag, trigger: production-deploy, tagPrefix: v }       # tag + GitHub Release after every successful Deploy Production
+    release:                            # tag + GitHub Release after every successful Deploy Production
+      strategy: deploy-tag
+      trigger: production-deploy
+      tagPrefix: v
+      productionSource: { environment: production-receipt, creator: "github-actions[bot]", task: "deploy:image-receipt" }   # the deployed image SHA (record-receipt), read by conformance (#254)
     capabilities: { admission: advisory, developmentLink: required, prMetadata: required, relationships: required, completion: manual, milestones: enabled, dependabot: required, agentRouting: required }
   - repository: ChipIn-one/chipin-knowledge-base
     kind: docs

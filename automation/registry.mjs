@@ -341,7 +341,7 @@ function normalizeRepository(record, index) {
     fail('REGISTRY_VALUE', `${where}.requiredChecks: duplicate check name`);
   }
 
-  assertKeys(`${where}.release`, record.release, ['strategy'], ['trigger', 'tagPrefix']);
+  assertKeys(`${where}.release`, record.release, ['strategy'], ['trigger', 'tagPrefix', 'productionSource']);
   assertEnum(`${where}.release.strategy`, record.release.strategy, RELEASE_STRATEGIES);
   const trigger = record.release.trigger ?? null;
   if (record.release.strategy === 'none') {
@@ -356,6 +356,22 @@ function normalizeRepository(record, index) {
   }
   const tagPrefix = record.release.tagPrefix ?? 'v';
   if (typeof tagPrefix !== 'string' || !/^[a-z]{0,8}$/.test(tagPrefix)) fail('REGISTRY_VALUE', `${where}.release.tagPrefix: invalid value ${JSON.stringify(tagPrefix)}`);
+  // release.productionSource (.github#254, optional, deploy-tag only): the GitHub Deployments whose newest record names
+  // the SHA running in production, for a record without productionEvidence (chipin-backend: the production-receipt
+  // written by record-receipt). Read by the conformance audit only; the release caller gets its SHA from its own event.
+  let productionSource = null;
+  if (Object.hasOwn(record.release, 'productionSource')) {
+    if (record.release.strategy !== 'deploy-tag') fail('REGISTRY_VALUE', `${where}.release.productionSource: only strategy deploy-tag has a production source`);
+    assertKeys(`${where}.release.productionSource`, record.release.productionSource, ['environment', 'creator'], ['task']);
+    const { environment, creator, task } = record.release.productionSource;
+    if (typeof environment !== 'string' || environment.trim() !== environment) {
+      fail('REGISTRY_VALUE', `${where}.release.productionSource.environment: invalid value ${JSON.stringify(environment)}`);
+    }
+    assertString(`${where}.release.productionSource.environment`, environment);
+    assertString(`${where}.release.productionSource.creator`, creator, DEPLOYMENT_CREATOR);
+    if (task !== undefined) assertString(`${where}.release.productionSource.task`, task, DEPLOYMENT_TASK);
+    productionSource = { environment, creator, ...(task !== undefined ? { task } : {}) };
+  }
 
   const declared = record.capabilities ?? {};
   assertKeys(`${where}.capabilities`, declared, [], Object.keys(CAPABILITY_VALUES));
@@ -391,7 +407,8 @@ function normalizeRepository(record, index) {
     ...(productionEvidence ? { productionEvidence: deepFreeze(productionEvidence) } : {}),
     protection: record.protection,
     requiredChecks: deepFreeze([...record.requiredChecks]),
-    release: deepFreeze({ strategy: record.release.strategy, trigger, tagPrefix }),
+    // productionSource only when declared, so the other release blocks keep their exact shape
+    release: deepFreeze({ strategy: record.release.strategy, trigger, tagPrefix, ...(productionSource ? { productionSource } : {}) }),
     capabilities: deepFreeze(capabilities),
   });
 }

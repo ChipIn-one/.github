@@ -692,9 +692,10 @@ test('release: a compare 404 is RELEASE_TAG_OFF_BRANCH drift, not an unreadable 
 
 // --- production release state (.github#254) ----------------------------------------------------------------
 const PROD = 'e'.repeat(40);
+const OLD = new Date(Date.now() - 2 * 3_600_000).toISOString();
 const planOf = (outcome, detail = 'x') => ({ outcome, detail });
-test('production release: tagged, untagged NO_RELEASE (note), pending release or blocked engine (drift), unverifiable (note)', () => {
-  const at = { sha: PROD, label: 'Production deployment 7' };
+test('production release: tagged, untagged NO_RELEASE (note), pending release or blocked engine (drift), grace, rollback, untrusted, unverifiable', () => {
+  const at = { sha: PROD, label: 'Production deployment 7', successAt: OLD };
   assert.deepEqual(checkProductionRelease(profile(FE), null), []);
   assert.deepEqual(checkProductionRelease(profile(FE), { ...at, tag: 'v1.1.0' }), []);
   const none = checkProductionRelease(profile(BE), { ...at, plan: planOf('NO_RELEASE', '2 included pull request(s) since v1.0.0 all have Version impact none') });
@@ -703,81 +704,162 @@ test('production release: tagged, untagged NO_RELEASE (note), pending release or
   const pending = checkProductionRelease(profile(FE), { ...at, plan: planOf('PLANNED', 'Impact patch over 1 pull request(s) since v1.1.0: create tag v1.1.1') });
   assert.deepEqual(pending.map(f => [f.check, f.severity]), [['RELEASE_PRODUCTION_UNTAGGED', 'drift']]);
   assert.match(pending[0].message, /Production \(Production deployment 7\) runs eeeeeee, which has no vX\.Y\.Z tag, and the release plan is PLANNED: Impact patch/);
-  assert.match(pending[0].remediation, new RegExp(`release\\.mjs apply --ref ${PROD}`));
+  assert.match(pending[0].remediation, /^Re-run all jobs of the release caller run for the deploy of eeeeeee \(chipin-frontend release-on-production\.yml, chipin-backend release-after-deploy\.yml\) at its current pin, or raise the pin; the audit plans with the current engine/);
+  assert.doesNotMatch(pending[0].remediation, /release\.mjs apply/);
+  const young = checkProductionRelease(profile(FE), { ...at, successAt: new Date(Date.now() - 10 * 60_000).toISOString(), plan: planOf('PLANNED') });
+  assert.deepEqual(young.map(f => [f.check, f.severity]), [['RELEASE_PRODUCTION_PENDING', 'note']], 'grace: the release caller may still be running');
   const stuck = checkProductionRelease(profile(META), { sha: PROD, label: 'the head of master', blocked: { code: 'INVALID_VERSION_IMPACT', message: 'Included pull request(s) have no valid `## Version impact`: #9' } });
   assert.deepEqual(stuck.map(f => [f.check, f.severity]), [['RELEASE_PRODUCTION_UNTAGGED', 'drift']]);
   assert.match(stuck[0].message, /blocked \(INVALID_VERSION_IMPACT\)/);
-  assert.match(stuck[0].remediation, /^Fix what INVALID_VERSION_IMPACT names/);
-  const unknown = checkProductionRelease(profile(FE), { unverifiable: 'GET deployments -> 403' });
+  assert.match(stuck[0].remediation, /^Fix what INVALID_VERSION_IMPACT names, then re-run all jobs of the release caller run for the push of eeeeeee \(\.github release-on-master\.yml\)/);
+  const rollback = checkProductionRelease(profile(FE), { ...at, rollback: { tag: 'v1.1.0', status: 'behind' } });
+  assert.deepEqual(rollback.map(f => [f.check, f.severity]), [['RELEASE_PRODUCTION_ROLLBACK', 'note']]);
+  const untrusted = checkProductionRelease(profile(FE), { ...at, untrusted: 'not-on-integration-branch' });
+  assert.deepEqual(untrusted.map(f => [f.check, f.severity]), [['RELEASE_PRODUCTION_UNTRUSTED', 'drift']]);
+  assert.match(untrusted[0].message, /runs eeeeeee, .*not-on-integration-branch: the SHA is not on master/);
+  const unknown = checkProductionRelease(profile(FE), { unverifiable: 'GET deployments -> 403', phase: 'production' });
   assert.deepEqual(unknown.map(f => [f.check, f.severity]), [['RELEASE_PRODUCTION_UNVERIFIABLE', 'note']]);
   assert.match(unknown[0].message, /production state could not be read: GET deployments -> 403/);
+  assert.match(unknown[0].remediation, /Deployments: Read-only/);
+  assert.match(checkProductionRelease(profile(META), { unverifiable: 'x', phase: 'production' })[0].remediation, /Contents: Read-only to read the head of master/);
+  assert.match(checkProductionRelease(profile(FE), { ...at, unverifiable: 'x', phase: 'plan' })[0].remediation, /release plan reads tags/);
+  assert.match(checkProductionRelease(profile(BE), { unverifiable: 'x', phase: 'undeclared' })[0].remediation, /Declare release\.productionSource/);
 });
 
-test('production release facts: no plan for a tagged SHA, at most one plan per repository, failures classified', async () => {
+test('production release facts: no plan for a tagged SHA, a rollback or an untrusted deploy; at most one plan; failures classified', async () => {
   const tagged = [{ name: 'v1.1.0', sha: V11 }, { name: 'v1.0.0', sha: V1 }];
   const calls = [];
-  const src = (sha, plan = async () => planOf('NO_RELEASE')) => ({
-    productionState: async p => { calls.push(['state', p.repository]); if (sha instanceof Error) throw sha; return { sha, label: 'L' }; },
+  const src = (state, plan = async () => planOf('NO_RELEASE'), status = 'ahead') => ({
+    productionState: async p => { calls.push(['state', p.repository]); if (state instanceof Error) throw state; return typeof state === 'string' ? { sha: state, label: 'L' } : state; },
+    branchStatus: async (repo, base, head) => { calls.push(['compare', repo, base, head]); if (status instanceof Error) throw status; return status; },
     releasePlan: async (p, at) => { calls.push(['plan', p.repository, at]); return plan(); },
   });
   assert.equal(await readProductionReleaseFacts(profile(KB), src(PROD), []), null, 'none reads nothing');
   assert.equal(await readProductionReleaseFacts(profile(BE), src(PROD), []), null, 'no tags is RELEASE_NO_TAGS, nothing read');
   assert.deepEqual(calls, []);
-  assert.equal((await readProductionReleaseFacts(profile(FE), src(V1), tagged)).tag, 'v1.0.0', 'a rollback to an older tag is tagged');
+  assert.equal((await readProductionReleaseFacts(profile(FE), src(V1), tagged)).tag, 'v1.0.0', 'a rollback to an older release tag is tagged');
   assert.deepEqual(calls, [['state', FE]]);
   calls.length = 0;
+  assert.equal((await readProductionReleaseFacts(profile(FE), src({ sha: PROD, label: 'L', untrusted: 'not-on-integration-branch' }), tagged)).untrusted, 'not-on-integration-branch');
+  assert.deepEqual(calls, [['state', FE]], 'an untrusted deploy is not planned');
+  calls.length = 0;
   assert.equal((await readProductionReleaseFacts(profile(BE), src(PROD), tagged)).plan.outcome, 'NO_RELEASE');
-  assert.deepEqual(calls, [['state', BE], ['plan', BE, PROD]], 'one plan, for the production SHA');
+  assert.deepEqual(calls, [['state', BE], ['compare', BE, V11, PROD], ['plan', BE, PROD]], 'one compare with the newest tag, one plan, for the production SHA');
+  calls.length = 0;
+  assert.deepEqual((await readProductionReleaseFacts(profile(FE), src(PROD, undefined, 'behind'), tagged)).rollback, { tag: 'v1.1.0', status: 'behind' });
+  assert.equal((await readProductionReleaseFacts(profile(FE), src(PROD, undefined, 'diverged'), tagged)).rollback.status, 'diverged');
+  assert.ok(!calls.some(c => c[0] === 'plan'), 'a rollback is never planned');
+  calls.length = 0;
+  await readProductionReleaseFacts(profile(META), src(PROD), tagged);
+  assert.deepEqual(calls.map(c => c[0]), ['state', 'plan'], 'semver-by-impact has no rollback compare');
   const blocked = await readProductionReleaseFacts(profile(META), src(PROD, async () => { throw new ReleaseBlocked('NO_INCLUDED_PULL_REQUESTS', 'direct push'); }), tagged);
   assert.deepEqual(blocked.blocked, { code: 'NO_INCLUDED_PULL_REQUESTS', message: 'direct push' });
-  assert.match((await readProductionReleaseFacts(profile(FE), src(Object.assign(new Error('no valid Production deployment'), { code: 'RELEASE_PRODUCTION_UNVERIFIABLE' })), tagged)).unverifiable, /no valid/);
-  assert.match((await readProductionReleaseFacts(profile(FE), src(PROD, async () => { throw new Error('GET pulls -> 403'); }), tagged)).unverifiable, /403/);
+  await assert.rejects(readProductionReleaseFacts(profile(META), src(PROD, async () => { throw new ReleaseBlocked('UNREADABLE_COMPARE', 'incomplete'); }), tagged), e => e.code === 'UNREADABLE_COMPARE');
+  const undeclared = await readProductionReleaseFacts(profile(FE), src(Object.assign(new Error('no source'), { code: 'RELEASE_PRODUCTION_UNVERIFIABLE', phase: 'undeclared' })), tagged);
+  assert.deepEqual([undeclared.unverifiable, undeclared.phase], ['no source', 'undeclared']);
+  const planForbidden = await readProductionReleaseFacts(profile(FE), src(PROD, async () => { throw new Error('GET /repos/x/commits/y/pulls -> 403: Resource not accessible'); }), tagged);
+  assert.deepEqual([planForbidden.phase, planForbidden.sha], ['plan', PROD]);
+  assert.equal((await readProductionReleaseFacts(profile(FE), src(new Error('GET deployments -> 403: Resource not accessible')), tagged)).phase, 'production');
+  await assert.rejects(readProductionReleaseFacts(profile(FE), src(new Error('GET deployments -> 403: API rate limit exceeded')), tagged), /rate limit/, 'a rate limit is UNREADABLE');
+  await assert.rejects(readProductionReleaseFacts(profile(FE), src(new Error('403 forbidden')), tagged), /403/, 'only the client shape "-> 403" is a permission');
   await assert.rejects(readProductionReleaseFacts(profile(FE), src(new Error('GET deployments -> 502')), tagged), /502/, 'other read errors are UNREADABLE');
-  await assert.rejects(readProductionReleaseFacts(profile(FE), src(PROD, async () => { throw new Error('GET compare -> 502'); }), tagged), /502/);
+  await assert.rejects(readProductionReleaseFacts(profile(FE), src(PROD, undefined, new Error('GET compare -> 502')), tagged), /502/);
 });
 
-test('audit: an untagged production state is drift unless the plan is NO_RELEASE; a failed read is UNREADABLE', async () => {
-  const run = over => audit({ source: fakeSource({ productionState: async () => ({ sha: PROD, label: 'L' }), ...over }), repositories: [FE] });
+test('audit: an untagged production state is drift unless explained; 403 evidence is a note, rate limits and UNREADABLE_* are UNREADABLE', async () => {
+  const run = over => audit({ source: fakeSource({ productionState: async () => ({ sha: PROD, label: 'L', successAt: OLD }), ...over }), repositories: [FE] });
   const pending = await run({ releasePlan: async () => planOf('PLANNED') });
   assert.equal(pending.repositories[0].status, 'DRIFT');
   assert.deepEqual(checks(pending.repositories[0].findings), ['RELEASE_PRODUCTION_UNTAGGED']);
   const none = await run({ releasePlan: async () => planOf('NO_RELEASE') });
   assert.equal(none.repositories[0].status, 'CONFORMANT');
   assert.ok(checks(none.repositories[0].notes).includes('RELEASE_PRODUCTION_NO_RELEASE'));
+  const rollback = await run({ branchStatus: async (repo, base, head) => (head === PROD ? 'behind' : 'ahead'), releasePlan: async () => { throw new Error('a rollback is not planned'); } });
+  assert.equal(rollback.repositories[0].status, 'CONFORMANT');
+  assert.ok(checks(rollback.repositories[0].notes).includes('RELEASE_PRODUCTION_ROLLBACK'));
+  // the completion reader wraps a Deployments 403 as PRODUCTION_EVIDENCE_UNREADABLE with the client message
+  const wrapped = Object.assign(new Error('Deployments of ChipIn-one/chipin-frontend are unreadable: GET /repos/ChipIn-one/chipin-frontend/deployments -> 403: Resource not accessible by personal access token'), { code: 'PRODUCTION_EVIDENCE_UNREADABLE' });
+  const forbiddenRun = await run({ productionState: async () => { throw wrapped; } });
+  assert.equal(forbiddenRun.repositories[0].status, 'CONFORMANT');
+  assert.ok(checks(forbiddenRun.repositories[0].notes).includes('RELEASE_PRODUCTION_UNVERIFIABLE'));
+  const limited = await run({ productionState: async () => { throw new Error('GET deployments -> 403: API rate limit exceeded for user'); } });
+  assert.equal(limited.repositories[0].status, 'UNREADABLE');
+  const compare = await run({ releasePlan: async () => { throw new ReleaseBlocked('UNREADABLE_COMPARE', 'Comparison is incomplete'); } });
+  assert.equal(compare.repositories[0].status, 'UNREADABLE');
   const unreadable = await run({ productionState: async () => { throw new Error('GET deployments -> 502'); } });
   assert.equal(unreadable.repositories[0].status, 'UNREADABLE');
 });
 
-test('GitHubConformanceSource.productionState: release branch head, Production receipts, production deployments, latest receipt only', async () => {
-  const head = 'f'.repeat(40);
-  const deployments = {
-    Production: [
-      { id: 9, sha: '9'.repeat(40), environment: 'Production', creator: { login: 'vercel[bot]' }, created_at: '2026-11-05T09:00:00Z' },
-      { id: 8, sha: PROD, environment: 'Production', creator: { login: 'vercel[bot]' }, created_at: '2026-11-05T08:00:00Z' },
-      { id: 7, sha: V1, environment: 'Production', creator: { login: 'someone' }, created_at: '2026-11-05T10:00:00Z' },
-    ],
-    production: [
-      { id: 5, sha: PROD, environment: 'production', creator: { login: 'olegbal' }, created_at: '2026-11-04T15:26:12Z' },
-    ],
-  };
-  const statusOf = { 9: ['failure', 'vercel[bot]'], 8: ['success', 'vercel[bot]'], 7: ['success', 'someone'], 5: ['success', 'olegbal'] };
-  const request = async path => {
-    const branch = /\/commits\/heads\/(.+)$/.exec(path);
-    if (branch) return { sha: head };
+// fake client for productionState: deployments per environment (newest created first) and statuses per deployment
+const productionClient = ({ deployments, statuses, onBranch = () => true, calls = [] }) => ({
+  request: async path => {
+    calls.push(path);
+    if (/\/commits\/heads\//.test(path)) return { sha: 'f'.repeat(40) };
     const list = /\/deployments\?environment=([^&]+)&/.exec(path);
     if (list) return deployments[decodeURIComponent(list[1])] ?? [];
-    const statuses = /\/deployments\/(\d+)\/statuses/.exec(path);
-    if (statuses) { const [state, login] = statusOf[statuses[1]]; return [{ id: 1, state, creator: { login }, created_at: '2026-11-05T10:00:00Z' }]; }
-    if (/\/compare\//.test(path)) return { status: 'ahead', merge_base_commit: { sha: path.split('/compare/')[1].split('...')[0] } };
+    const st = /\/deployments\/(\d+)\/statuses/.exec(path);
+    if (st) return statuses[st[1]];
+    const compare = /\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/.exec(path);
+    if (compare) return onBranch(compare[1]) ? { status: 'ahead', merge_base_commit: { sha: compare[1] } } : { status: 'diverged', merge_base_commit: { sha: '0'.repeat(40) } };
     throw new Error(`unexpected ${path}`);
+  },
+});
+const dep = (id, sha, environment, login, created_at, task = 'deploy') => ({ id, sha, environment, creator: { login }, created_at, task });
+const st = (state, login, created_at, id = 1) => [{ id, state, creator: { login }, created_at }];
+
+test('GitHubConformanceSource.productionState: release branch head; Vercel newest success status wins, in-progress newer passed over', async () => {
+  const P = 'Production';
+  const vercel = 'vercel[bot]';
+  const S9 = '9'.repeat(40);
+  const src = (deployments, statuses, onBranch) => new GitHubConformanceSource(productionClient({ deployments: { [P]: deployments }, statuses, onBranch }));
+  assert.deepEqual(await src([], {}).productionState(profile(META)), { sha: 'f'.repeat(40), label: 'the head of master' }, 'semver-by-impact: release branch head');
+  // newest in progress -> the older successful one; a foreign creator is ignored
+  const progress = await src([dep(10, V1, P, 'someone', '2026-11-05T11:00:00Z'), dep(9, S9, P, vercel, '2026-11-05T10:00:00Z'), dep(8, PROD, P, vercel, '2026-11-05T08:00:00Z')],
+    { 9: st('in_progress', vercel, '2026-11-05T10:01:00Z'), 8: st('success', vercel, '2026-11-05T08:05:00Z') }).productionState(profile(FE));
+  assert.deepEqual(progress, { sha: PROD, label: 'Production deployment 8', successAt: '2026-11-05T08:05:00Z' });
+  // Vercel re-posted success on an older deployment (rollback / redeploy): the newest success status wins
+  const redeploy = await src([dep(9, S9, P, vercel, '2026-11-05T10:00:00Z'), dep(8, PROD, P, vercel, '2026-11-05T08:00:00Z')],
+    { 9: st('success', vercel, '2026-11-05T10:05:00Z'), 8: st('success', vercel, '2026-11-05T12:00:00Z') }).productionState(profile(FE));
+  assert.equal(redeploy.sha, PROD);
+  // the newest successful deployment off the integration branch is drift, never skipped for an older one
+  const off = await src([dep(9, S9, P, vercel, '2026-11-05T10:00:00Z'), dep(8, PROD, P, vercel, '2026-11-05T08:00:00Z')],
+    { 9: st('success', vercel, '2026-11-05T10:05:00Z'), 8: st('success', vercel, '2026-11-05T08:05:00Z') }, sha => sha !== S9).productionState(profile(FE));
+  assert.deepEqual([off.sha, off.untrusted], [S9, 'not-on-integration-branch']);
+  // a success status written by another creator than the evidence creator is untrusted
+  const foreign = await src([dep(9, S9, P, vercel, '2026-11-05T10:00:00Z')], { 9: st('success', 'someone', '2026-11-05T10:05:00Z') }).productionState(profile(FE));
+  assert.equal(foreign.untrusted, 'status-creator-mismatch');
+  await assert.rejects(src([dep(9, S9, P, vercel, '2026-11-05T10:00:00Z')], { 9: st('failure', vercel, '2026-11-05T10:05:00Z') }).productionState(profile(FE)), e => e.code === 'RELEASE_PRODUCTION_UNVERIFIABLE' && e.phase === 'production');
+});
+
+test('GitHubConformanceSource.productionState: the backend reads release.productionSource, newest receipt only; nothing declared is never guessed', async () => {
+  const R = 'production-receipt';
+  const bot = 'github-actions[bot]';
+  const S9 = '9'.repeat(40);
+  const calls = [];
+  const receipt = (id, sha, at, task = 'deploy:image-receipt') => dep(id, sha, R, bot, at, task);
+  const deployments = {
+    // the implicit `production` Deployment carries the develop head at dispatch: never read for the SHA
+    production: [dep(50, 'd'.repeat(40), 'production', 'olegbal', '2026-11-04T15:26:12Z')],
+    [R]: [receipt(60, S9, '2026-11-04T16:00:00Z', 'deploy'), receipt(55, PROD, '2026-11-04T15:26:55Z'), receipt(40, V1, '2026-11-03T09:21:48Z')],
   };
-  const src = new GitHubConformanceSource({ request });
-  assert.deepEqual(await src.productionState(profile(META)), { sha: head, label: 'the head of master' }, 'semver-by-impact: release branch head');
-  assert.deepEqual(await src.productionState(profile(FE)), { sha: PROD, label: 'Production deployment 8' }, 'newest valid receipt by the evidence creator');
-  assert.deepEqual(await src.productionState(profile(BE)), { sha: PROD, label: 'production deployment 5' }, 'no productionEvidence: the production environment');
+  const statuses = { 55: st('success', bot, '2026-11-04T15:26:56Z'), 40: st('success', bot, '2026-11-03T09:21:49Z'), 60: st('success', bot, '2026-11-04T16:00:01Z') };
+  const be = await new GitHubConformanceSource(productionClient({ deployments, statuses, calls })).productionState(profile(BE));
+  assert.deepEqual(be, { sha: PROD, label: 'production-receipt deployment 55', successAt: '2026-11-04T15:26:56Z' }, 'a receipt with another task is ignored');
+  assert.ok(!calls.some(path => /environment=production&/.test(path)), 'the implicit production environment is not read');
+  assert.ok(!calls.some(path => /deployments\/40\/statuses/.test(path)), 'older receipts are not read');
+  // newest receipt not successful (or its status by another creator): no fallback to an older receipt
+  await assert.rejects(new GitHubConformanceSource(productionClient({ deployments, statuses: { ...statuses, 55: st('in_progress', bot, '2026-11-04T15:26:56Z') } })).productionState(profile(BE)),
+    e => e.code === 'RELEASE_PRODUCTION_UNVERIFIABLE' && /newest receipt only/.test(e.message));
+  const foreign = await new GitHubConformanceSource(productionClient({ deployments, statuses: { ...statuses, 55: st('success', 'olegbal', '2026-11-04T15:26:56Z') } })).productionState(profile(BE));
+  assert.deepEqual([foreign.sha, foreign.untrusted], [PROD, 'status-creator-mismatch']);
+  // productionEvidence with a verifier is a receipt source too
   const verified = { ...profile(FE), productionEvidence: { environment: 'Production', creator: 'vercel[bot]', verifier: 'workflow-run' } };
-  await assert.rejects(src.productionState(verified), e => e.code === 'RELEASE_PRODUCTION_UNVERIFIABLE' && /only the newest receipt counts/.test(e.message), 'workflow-run: an invalid newest receipt is never replaced by an older one');
-  await assert.rejects(new GitHubConformanceSource({ request: async path => (/deployments\?/.test(path) ? [] : request(path)) }).productionState(profile(BE)), e => e.code === 'RELEASE_PRODUCTION_UNVERIFIABLE');
+  await assert.rejects(new GitHubConformanceSource(productionClient({ deployments: { Production: [dep(9, S9, 'Production', 'vercel[bot]', 'x'), dep(8, PROD, 'Production', 'vercel[bot]', 'x')] }, statuses: { 9: st('failure', 'vercel[bot]', 'x'), 8: st('success', 'vercel[bot]', 'x') } })).productionState(verified),
+    e => e.code === 'RELEASE_PRODUCTION_UNVERIFIABLE');
+  // a deploy-tag record without productionEvidence or productionSource
+  const { productionSource, ...release } = profile(BE).release;
+  await assert.rejects(new GitHubConformanceSource(productionClient({ deployments, statuses })).productionState({ ...profile(BE), release }),
+    e => e.code === 'RELEASE_PRODUCTION_UNVERIFIABLE' && e.phase === 'undeclared');
 });
 
 test('GitHubConformanceSource.releasePlan runs the release engine plan on the production SHA', async () => {
