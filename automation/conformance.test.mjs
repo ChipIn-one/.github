@@ -704,7 +704,7 @@ test('production release: tagged, untagged NO_RELEASE (note), pending release or
   const pending = checkProductionRelease(profile(FE), { ...at, plan: planOf('PLANNED', 'Impact patch over 1 pull request(s) since v1.1.0: create tag v1.1.1') });
   assert.deepEqual(pending.map(f => [f.check, f.severity]), [['RELEASE_PRODUCTION_UNTAGGED', 'drift']]);
   assert.match(pending[0].message, /Production \(Production deployment 7\) runs eeeeeee, which has no vX\.Y\.Z tag, and the release plan is PLANNED: Impact patch/);
-  assert.match(pending[0].remediation, /^Re-run all jobs of the release caller run for the deploy of eeeeeee \(chipin-frontend release-on-production\.yml, chipin-backend release-after-deploy\.yml\) at its current pin, or raise the pin; the audit plans with the current engine/);
+  assert.match(pending[0].remediation, /^Re-run all jobs of the release caller run for the deploy of eeeeeee \(chipin-frontend release-on-production\.yml, chipin-backend release-after-deploy\.yml\) at its current pin, or raise the pin; if the caller skips it as a rollback of the previous production commit, the next forward deploy releases it\. The audit plans with the current engine/);
   assert.doesNotMatch(pending[0].remediation, /release\.mjs apply/);
   const young = checkProductionRelease(profile(FE), { ...at, successAt: new Date(Date.now() - 10 * 60_000).toISOString(), plan: planOf('PLANNED') });
   assert.deepEqual(young.map(f => [f.check, f.severity]), [['RELEASE_PRODUCTION_PENDING', 'note']], 'grace: the release caller may still be running');
@@ -761,6 +761,7 @@ test('production release facts: no plan for a tagged SHA, a rollback or an untru
   assert.deepEqual([planForbidden.phase, planForbidden.sha], ['plan', PROD]);
   assert.equal((await readProductionReleaseFacts(profile(FE), src(new Error('GET deployments -> 403: Resource not accessible')), tagged)).phase, 'production');
   await assert.rejects(readProductionReleaseFacts(profile(FE), src(new Error('GET deployments -> 403: API rate limit exceeded')), tagged), /rate limit/, 'a rate limit is UNREADABLE');
+  await assert.rejects(readProductionReleaseFacts(profile(FE), src(new Error('GET deployments -> 403: You have triggered an abuse detection mechanism')), tagged), /abuse/);
   await assert.rejects(readProductionReleaseFacts(profile(FE), src(new Error('403 forbidden')), tagged), /403/, 'only the client shape "-> 403" is a permission');
   await assert.rejects(readProductionReleaseFacts(profile(FE), src(new Error('GET deployments -> 502')), tagged), /502/, 'other read errors are UNREADABLE');
   await assert.rejects(readProductionReleaseFacts(profile(FE), src(PROD, undefined, new Error('GET compare -> 502')), tagged), /502/);
@@ -829,6 +830,20 @@ test('GitHubConformanceSource.productionState: release branch head; Vercel newes
   const foreign = await src([dep(9, S9, P, vercel, '2026-11-05T10:00:00Z')], { 9: st('success', 'someone', '2026-11-05T10:05:00Z') }).productionState(profile(FE));
   assert.equal(foreign.untrusted, 'status-creator-mismatch');
   await assert.rejects(src([dep(9, S9, P, vercel, '2026-11-05T10:00:00Z')], { 9: st('failure', vercel, '2026-11-05T10:05:00Z') }).productionState(profile(FE)), e => e.code === 'RELEASE_PRODUCTION_UNVERIFIABLE' && e.phase === 'production');
+});
+
+test('GitHubConformanceSource.productionState: status reads are bounded by the lookahead once a success is found', async () => {
+  const vercel = 'vercel[bot]';
+  const reads = async firstSuccess => {
+    const calls = [];
+    const deployments = { Production: Array.from({ length: 8 }, (_, i) => dep(100 - i, String(i).repeat(40), 'Production', vercel, `2026-11-05T1${9 - i}:00:00Z`)) };
+    const statuses = Object.fromEntries(deployments.Production.map((d, i) => [d.id, st(i >= firstSuccess ? 'success' : 'failure', vercel, d.created_at)]));
+    const state = await new GitHubConformanceSource(productionClient({ deployments, statuses, calls })).productionState(profile(FE));
+    assert.equal(state.sha, String(firstSuccess).repeat(40));
+    return calls.filter(path => /\/statuses/.test(path)).length;
+  };
+  assert.equal(await reads(0), 5, 'first success at index 0: the newest 5');
+  assert.equal(await reads(6), 7, 'first success at index 6: one by one until it, then stop');
 });
 
 test('GitHubConformanceSource.productionState: the backend reads release.productionSource, newest receipt only; nothing declared is never guessed', async () => {

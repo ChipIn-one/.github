@@ -1570,8 +1570,11 @@ async function backendReceiptRegistry() {
   const capability = /(prMetadata: required, relationships: required, )completion: manual(, milestones: enabled, dependabot: required, agentRouting: required \})/u;
   assert.match(live, strategy, "the live backend record is completion: manual");
   assert.match(live, capability);
+  // the switch replaces release.productionSource (conformance, .github#254) by productionEvidence: only one is allowed
+  const productionSource = /^      productionSource: [^\n]*\n/mu;
+  assert.match(live, productionSource);
   return loadRegistry({
-    text: live.replace(strategy, "    completion: deployment-receipt\n" + BE_EVIDENCE_LINE).replace(capability, "$1completion: automatic$2"),
+    text: live.replace(strategy, "    completion: deployment-receipt\n" + BE_EVIDENCE_LINE).replace(capability, "$1completion: automatic$2").replace(productionSource, ""),
   });
 }
 

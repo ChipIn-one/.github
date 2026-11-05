@@ -313,7 +313,7 @@ export const PRODUCTION_UNVERIFIABLE = 'RELEASE_PRODUCTION_UNVERIFIABLE';
 export const PRODUCTION_PENDING_MINUTES = 30;
 // deploy-tag without a receipt source: newest candidates whose statuses are read to find the newest success
 export const PRODUCTION_STATUS_LOOKAHEAD = 5;
-const forbidden = error => /-> 403\b/.test(String(error?.message ?? error)) && !/rate limit/i.test(String(error?.message ?? error));
+const forbidden = error => /-> 403\b/.test(String(error?.message ?? error)) && !/rate limit|abuse detection/i.test(String(error?.message ?? error));
 const productionUnverifiable = error => error?.code === PRODUCTION_UNVERIFIABLE || forbidden(error);
 const unverifiableFacts = (error, phase) => ({ unverifiable: String(error?.message ?? error).slice(0, 300), phase: error?.phase ?? phase });
 export async function readProductionReleaseFacts(profile, source, tags) {
@@ -381,7 +381,7 @@ export function checkProductionRelease(profile, facts, now = Date.now()) {
   }
   const state = blocked ? `the release engine is blocked (${blocked.code}): ${blocked.message}` : `the release plan is ${plan.outcome}: ${plan.detail}`;
   return [finding('RELEASE_PRODUCTION_UNTAGGED', 'drift', `${where}, which has no ${tagPrefix}X.Y.Z tag, and ${state}`,
-    `${blocked ? `Fix what ${blocked.code} names, then re-run` : 'Re-run'} all jobs of ${run} at its current pin, or raise the pin; the audit plans with the current engine, not the caller's pin (docs/workflow/release.md).`)];
+    `${blocked ? `Fix what ${blocked.code} names, then re-run` : 'Re-run'} all jobs of ${run} at its current pin, or raise the pin; if the caller skips it as a rollback of the previous production commit, the next forward deploy releases it. The audit plans with the current engine, not the caller's pin (docs/workflow/release.md).`)];
 }
 
 export async function checkPins(profile, pins, source, tags) {

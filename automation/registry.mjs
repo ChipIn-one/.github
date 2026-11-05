@@ -370,6 +370,10 @@ function normalizeRepository(record, index) {
     assertString(`${where}.release.productionSource.environment`, environment);
     assertString(`${where}.release.productionSource.creator`, creator, DEPLOYMENT_CREATOR);
     if (task !== undefined) assertString(`${where}.release.productionSource.task`, task, DEPLOYMENT_TASK);
+    if (productionEvidence) fail('REGISTRY_VALUE', `${where}.release.productionSource: the record declares productionEvidence, which is the production source; declare only one`);
+    if (environment === record.deploymentProfile) {
+      fail('REGISTRY_VALUE', `${where}.release.productionSource.environment: "${environment}" is the implicit deploymentProfile environment, whose Deployments carry the dispatch ref, not the deployed SHA`);
+    }
     productionSource = { environment, creator, ...(task !== undefined ? { task } : {}) };
   }
 

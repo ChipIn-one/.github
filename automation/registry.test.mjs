@@ -410,6 +410,9 @@ test('release.productionSource (.github#254): deploy-tag only, environment and c
   rejects(() => ok(deploy({ environment: ' p', creator: 'x' })), 'REGISTRY_VALUE');
   rejects(() => ok(deploy({ environment: 'p', creator: 'not a login' })), 'REGISTRY_VALUE');
   rejects(() => ok(deploy({ environment: 'p', creator: 'x', task: 'has space' })), 'REGISTRY_VALUE');
+  rejects(() => ok(deploy({ environment: 'production', creator: 'olegbal' })), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ deploymentProfile: 'production', completion: 'deployment-receipt', productionEvidence: { environment: 'Production', creator: 'vercel[bot]' },
+    release: deploy({ environment: 'production-receipt', creator: 'github-actions[bot]' }) })])), 'REGISTRY_VALUE');
 });
 
 test('release decisions of 2026-10-21 are recorded for every registered repository', () => {
