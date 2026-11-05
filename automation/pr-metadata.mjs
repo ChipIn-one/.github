@@ -73,7 +73,8 @@ export function isUiAffectingPath(path, qa) {
 const qaText = value => String(value).replace(/[<>]/gu, "").replace(/\s+/gu, " ").trim();
 const itemText = text => text.replace(/^\[[ xX]\](?:\s+|$)/u, "").replace(/^QA:\s*/iu, "").trim();
 // The QA steps the release QA Issue would list for this body. Same parse as chipin-frontend
-// scripts/release-qa/core.mjs prQaSteps (without its display limits); keep the two in step.
+// scripts/release-qa/core.mjs prQaSteps (without its display limits and dedupe, which never empty the
+// list); keep the two in step.
 export function qaSteps(body) {
   const items = [];
   let inSection = false, fence = null, comment = false, parent = null;
