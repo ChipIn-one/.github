@@ -55,3 +55,5 @@ Users with write access to chipin-backend are trusted. The verifier stops forged
 
 The switch itself (step A3) uses exactly this evidence line:
 `productionEvidence: { environment: production-receipt, creator: "github-actions[bot]", task: "deploy:image-receipt", verifier: workflow-run, workflow: .github/workflows/deploy-production.yml, branch: develop, job: record-receipt }`
+
+The same PR removes `release.productionSource` from the record: the registry allows only one production source, and conformance then reads `productionEvidence` ([#254](https://github.com/ChipIn-one/.github/issues/254)).

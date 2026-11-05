@@ -93,7 +93,8 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
     branches: { default: 'develop', integration: 'develop', promotion: null },
     deploymentProfile: 'production', completion: 'manual', completionRunner: 'repository', protection: 'unavailable',
     requiredChecks: ['Unit and integration tests'],
-    release: { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v' },
+    release: { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v',
+      productionSource: { environment: 'production-receipt', creator: 'github-actions[bot]', task: 'deploy:image-receipt' } },
     capabilities: { admission: 'advisory', developmentLink: 'required', prMetadata: 'required',
       relationships: 'required', completion: 'manual', milestones: 'enabled',
       dependabot: 'required', agentRouting: 'required' },
@@ -395,11 +396,31 @@ test('release block: strategy and trigger must agree and fit the repository', ()
   rejects(() => ok({ strategy: 'deploy-tag', trigger: 'production-deploy' }, { deploymentProfile: 'staging' }), 'REGISTRY_VALUE');
 });
 
+test('release.productionSource (.github#254): deploy-tag only, environment and creator required, task optional', () => {
+  const ok = release => validateRegistry(document([record({ deploymentProfile: 'production', release })])).repositories[0].release;
+  const deploy = productionSource => ({ strategy: 'deploy-tag', trigger: 'production-deploy', productionSource });
+  assert.deepEqual(ok(deploy({ environment: 'production-receipt', creator: 'github-actions[bot]', task: 'deploy:image-receipt' })).productionSource,
+    { environment: 'production-receipt', creator: 'github-actions[bot]', task: 'deploy:image-receipt' });
+  assert.deepEqual(ok(deploy({ environment: 'Production', creator: 'vercel[bot]' })).productionSource, { environment: 'Production', creator: 'vercel[bot]' });
+  assert.equal(Object.hasOwn(ok({ strategy: 'deploy-tag', trigger: 'production-deploy' }), 'productionSource'), false);
+  rejects(() => ok({ strategy: 'semver-by-impact', trigger: 'integration-merge', productionSource: { environment: 'p', creator: 'x' } }), 'REGISTRY_VALUE');
+  rejects(() => ok({ strategy: 'none', productionSource: { environment: 'p', creator: 'x' } }), 'REGISTRY_VALUE');
+  rejects(() => ok(deploy({ environment: 'p' })), 'REGISTRY_SCHEMA');
+  rejects(() => ok(deploy({ environment: 'p', creator: 'x', job: 'y' })), 'REGISTRY_SCHEMA');
+  rejects(() => ok(deploy({ environment: ' p', creator: 'x' })), 'REGISTRY_VALUE');
+  rejects(() => ok(deploy({ environment: 'p', creator: 'not a login' })), 'REGISTRY_VALUE');
+  rejects(() => ok(deploy({ environment: 'p', creator: 'x', task: 'has space' })), 'REGISTRY_VALUE');
+  rejects(() => ok(deploy({ environment: 'production', creator: 'olegbal' })), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ deploymentProfile: 'production', completion: 'deployment-receipt', productionEvidence: { environment: 'Production', creator: 'vercel[bot]' },
+    release: deploy({ environment: 'production-receipt', creator: 'github-actions[bot]' }) })])), 'REGISTRY_VALUE');
+});
+
 test('release decisions of 2026-10-21 are recorded for every registered repository', () => {
   const by = Object.fromEntries(loadRegistry().repositories.map(p => [p.repository, p.release]));
   // FE moved from semver-by-impact / promotion-merge to deploy tags with the master cutover (.github#216)
   assert.deepEqual(by[FE], { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v' });
-  assert.deepEqual(by[BE], { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v' });
+  assert.deepEqual(by[BE], { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v',
+    productionSource: { environment: 'production-receipt', creator: 'github-actions[bot]', task: 'deploy:image-receipt' } });
   assert.deepEqual(by[META], { strategy: 'semver-by-impact', trigger: 'integration-merge', tagPrefix: 'v' });
   assert.equal(by[KB].strategy, 'none');
   assert.equal(by[NOTIF].strategy, 'none');
