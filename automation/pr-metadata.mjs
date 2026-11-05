@@ -59,9 +59,9 @@ export function bodyGaps(body) {
 // implementation PR that changes what a tester sees must carry QA steps. The UI-affecting path policy
 // mirrors chipin-frontend scripts/release-qa/ui-paths.mjs and lives in pr-metadata.config.json.
 const QA_SECTION = /^QA(?:\s*\([^)]*\))?$/iu;
-const QA_LINE = /^\s*-\s*\[[ xX]\]\s*QA:\s*\S/u;
-const QA_ITEM = /^\s*(?:[-*+]|\d+[.)])\s+(.*)$/u;
+const QA_ITEM = /^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$/u;
 const NO_QA_STEP = /^(?:none|n\/a|no qa(?: needed)?)(?:\s*[.!]?|\s*(?:[(\u2014\u2013,:;-]|=>).*)$/iu;
+const THEMATIC_BREAK = /^\s*(?:[-*_]\s*){3,}$/u;
 const TEST_FILE = /\.test\.[^/]+$/u;
 export function isUiAffectingPath(path, qa) {
   if (typeof path !== "string" || !path) return false;
@@ -70,10 +70,13 @@ export function isUiAffectingPath(path, qa) {
   if (qa.excludePrefixes.some(prefix => path.startsWith(prefix))) return false;
   return !(qa.testFilePrefixes.some(prefix => path.startsWith(prefix)) && TEST_FILE.test(path));
 }
-// True when the body has a `- [ ] QA:` line, or a `## QA` / `## QA (owner)` section with one real list
-// item. Code blocks and HTML comments never count; neither do empty checkboxes or None/n/a items.
-export function hasQaSteps(body) {
-  let inSection = false, fence = null, comment = false;
+const qaText = value => String(value).replace(/[<>]/gu, "").replace(/\s+/gu, " ").trim();
+const itemText = text => text.replace(/^\[[ xX]\](?:\s+|$)/u, "").replace(/^QA:\s*/iu, "").trim();
+// The QA steps the release QA Issue would list for this body. Same parse as chipin-frontend
+// scripts/release-qa/core.mjs prQaSteps (without its display limits); keep the two in step.
+export function qaSteps(body) {
+  const items = [];
+  let inSection = false, fence = null, comment = false, parent = null;
   for (const raw of String(body ?? "").split("\n")) {
     const line = raw.replace(/\r$/u, "");
     if (fence) {
@@ -83,18 +86,35 @@ export function hasQaSteps(body) {
     }
     if (comment) { if (line.includes("-->")) comment = false; continue; }
     const open = /^\s*(`{3,}(?=[^`]*$)|~{3,})/u.exec(line)?.[1];
-    if (open) { fence = open; continue; }
+    if (open) { fence = open; parent = null; continue; }
     if (/^\s*<!--/u.test(line)) { comment = !line.includes("-->"); continue; }
     const heading = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/u.exec(line);
-    if (heading) { if (heading[1].length <= 2) inSection = QA_SECTION.test(heading[2]); continue; }
-    if (QA_LINE.test(line)) return true;
-    const item = inSection ? QA_ITEM.exec(line) : null;
-    if (!item) continue;
-    const text = item[1].replace(/^\[[ xX]\](?:\s+|$)/u, "").replace(/^QA:\s*/iu, "").trim();
-    if (text && !/^(?:[-*_]\s*){2,}$/u.test(text) && !NO_QA_STEP.test(text)) return true;
+    if (heading) { if (heading[1].length <= 2) inSection = QA_SECTION.test(heading[2]); parent = null; continue; }
+    if (!line.trim() || THEMATIC_BREAK.test(line)) { parent = null; continue; }
+    const listed = QA_ITEM.exec(line);
+    if (inSection) {
+      if (listed && (!parent || listed[1].length <= parent.indent)) {
+        parent = { indent: listed[1].length, text: itemText(listed[2]) };
+        items.push(parent);
+      } else if (parent) {
+        const extra = itemText(listed ? listed[2] : line.trim());
+        if (extra) parent.text = parent.text ? parent.text + "; " + extra : extra;
+      }
+      continue;
+    }
+    const qaLine = /^\s*-\s*\[[ xX]\]\s*QA:\s*(.+?)\s*$/u.exec(line);
+    if (qaLine) items.push({ text: qaLine[1] });
   }
-  return false;
+  const steps = [];
+  for (const { text } of items) {
+    if (!text || NO_QA_STEP.test(text)) continue;
+    const at = text.indexOf("=>");
+    const step = qaText(at < 0 ? text : text.slice(0, at));
+    if (step) steps.push(step);
+  }
+  return steps;
 }
+export const hasQaSteps = body => qaSteps(body).length > 0;
 export function qaGap(files, body, qa) {
   const ui = files.filter(path => isUiAffectingPath(path, qa));
   if (ui.length === 0 || hasQaSteps(body)) return null;

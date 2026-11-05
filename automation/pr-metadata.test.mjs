@@ -373,7 +373,7 @@ test("#214 unknown or prototype-named target branches are rejected",async()=>{
 });
 
 // .github#268: UI-affecting frontend PRs must carry QA steps for the release QA Issue (chipin-frontend#635).
-import {isUiAffectingPath,hasQaSteps,qaGap,prQaBlocker} from "./pr-metadata.mjs";
+import {isUiAffectingPath,hasQaSteps,qaSteps,qaGap,prQaBlocker} from "./pr-metadata.mjs";
 const shippedConfig=JSON.parse(await (await import("node:fs/promises")).readFile(new URL("./pr-metadata.config.json",import.meta.url),"utf8"));
 const qa=shippedConfig.qaPolicy;
 test("the shipped QA policy mirrors chipin-frontend scripts/release-qa/ui-paths.mjs",()=>{
@@ -397,6 +397,23 @@ test("QA steps are a QA: line or a real item of a ## QA section, never a placeho
     "### QA\n- [ ] sub-heading is not the section","```\n- [ ] QA: in a fence => x\n```",null])
     assert.equal(hasQaSteps(body),false,JSON.stringify(body));
 });
+// Step counts chipin-frontend scripts/release-qa/core.mjs prQaSteps returns for the same bodies; a body
+// passes this check exactly when the release QA Issue would list a step from it.
+const QA_PARITY = [
+  ["- [ ] QA: None", 0], ["- [ ] QA: n/a", 0], ["## QA\n- [ ] QA: None — docs", 0], ["- [x] QA: <>", 0],
+  ["## QA\n- None\n  - Open settings", 0], ["## QA\n- <>", 0], ["## QA\n- [ ] => shows", 0],
+  ["## QA\n- [ ]\n  Open settings => ok", 1], ["## QA\n1. ---", 1], ["## QA\n- a\n  - b\n- c", 2],
+  ["## QA\n- a\n    ```\n    - fake\n    ```\n- c\n- - -", 2], ["## QA\n- a\n  ```npm run x``` then check\n- b", 2],
+  ["## QA\n````\n```\n- x\n```\n````\n- after", 1], ["## QA\n<!--\n- hidden\n-->\n- real", 1],
+  ["## Summary\n- [ ] QA: Open => ok\n## QA (owner)\n- [x] QA: Reload => no flash\n* plain\n### Sub\n- nested section item", 4],
+  ["## QA\n- None of the rows overflow", 1], ["## QA\n- None, docs only\n- No QA needed: CI\n- None => x", 0],
+];
+test("QA step parsing agrees with the frontend release QA parser",()=>{
+  for (const [body,count] of QA_PARITY) {
+    assert.equal(qaSteps(body).length,count,JSON.stringify(body));
+    assert.equal(hasQaSteps(body),count>0,JSON.stringify(body));
+  }
+});
 test("only a UI-affecting PR without QA steps gets a QA blocker",()=>{
   assert.equal(qaGap(["docs/help.md",".github/workflows/x.yml","src/App.test.tsx"],"",qa),null);
   assert.equal(qaGap(["src/App.tsx"],"## QA (owner)\n- [ ] Open the app: it loads",qa),null);
@@ -411,6 +428,8 @@ test("the QA blocker reads every changed file, including the old name of a renam
   assert.equal(await prQaBlocker(client([{filename:"docs/a.md"}]),"/p","",qa),null);
   await assert.rejects(prQaBlocker(client([]),"/p","",qa),/QA: PR changed files are unreadable/u);
   await assert.rejects(prQaBlocker(client(null),"/p","",qa),/unreadable/u);
+  await assert.rejects(prQaBlocker(client(Array.from({length:3000},()=>({filename:"docs/a.md"}))),"/p","",qa),/unreadable/u);
+  assert.match(await prQaBlocker(client([{filename:"src/a.ts",previous_filename:null},{filename:"docs/b.md"}]),"/p","",qa),/src\/a\.ts/u);
 });
 test("an invalid QA policy fails closed before any read",async()=>{
   const policy={repository:repo,project:5,ownerPolicy:{allowIssueOwner:true,allowAuthorFallback:false},
