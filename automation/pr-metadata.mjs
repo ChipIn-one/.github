@@ -120,7 +120,7 @@ export function qaGap(files, body, qa) {
   const ui = files.filter(path => isUiAffectingPath(path, qa));
   if (ui.length === 0 || hasQaSteps(body)) return null;
   const shown = ui.slice(0, 3).join(", ") + (ui.length > 3 ? ", +" + (ui.length - 3) + " more" : "");
-  return "QA: PR changes UI-affecting paths (" + shown + ") but its body has no QA steps; add a ## QA (owner)"
+  return "QA: PR changes UI-affecting paths (" + shown + ") but its body has no QA steps; add a ## QA"
     + " section with checklist steps a tester can follow (or - [ ] QA: <step> => <expected> lines)";
 }
 // Renamed files count under both names: moving a file out of src/ still changes the shipped UI.
