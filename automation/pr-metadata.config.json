@@ -8,5 +8,27 @@
   "reviewerPolicy": {
     "implementation": [],
     "release": []
+  },
+  "qaPolicy": {
+    "prefixes": [
+      "src/",
+      "public/"
+    ],
+    "files": [
+      "index.html",
+      "app.html",
+      "vercel.json",
+      "vite.config.ts",
+      "pwa-assets.config.ts",
+      "scripts/prerender-before-workbox.mjs",
+      "scripts/prerender-public.mjs",
+      "scripts/private-spa-navigation.ts"
+    ],
+    "excludePrefixes": [
+      "src/test/"
+    ],
+    "testFilePrefixes": [
+      "src/"
+    ]
   }
 }
