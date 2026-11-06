@@ -418,7 +418,8 @@ test("only a UI-affecting PR without QA steps gets a QA blocker",()=>{
   assert.equal(qaGap(["docs/help.md",".github/workflows/x.yml","src/App.test.tsx"],"",qa),null);
   assert.equal(qaGap(["src/App.tsx"],"## QA (owner)\n- [ ] Open the app: it loads",qa),null);
   const gap=qaGap(["src/a.ts","src/b.ts","public/c.svg","index.html","docs/d.md"],"## Summary\nx",qa);
-  assert.match(gap,/^QA: PR changes UI-affecting paths \(src\/a\.ts, src\/b\.ts, public\/c\.svg, \+1 more\) but its body has no QA steps; add a ## QA \(owner\) section/u);
+  assert.match(gap,/^QA: PR changes UI-affecting paths \(src\/a\.ts, src\/b\.ts, public\/c\.svg, \+1 more\) but its body has no QA steps; add a ## QA section with checklist steps a tester can follow/u);
+  assert.doesNotMatch(gap,/owner/u);
 });
 test("the QA blocker reads every changed file, including the old name of a renamed file, and fails closed",async()=>{
   const client=files=>({calls:[],async listAll(path){this.calls.push(path);return files;}});
