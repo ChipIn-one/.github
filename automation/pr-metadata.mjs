@@ -346,7 +346,7 @@ export async function requiredShaCIGreen(client, pr) {
   return {ok: blockers.length === 0, blockers, branch, headSha: sha,
     required: checks.map(x => x.context)};
 }
-export async function reconcilePR(client,policy,number,expectedSha,{admissionClient,admissionConfig,admit=preflightPr,branches=FE_BRANCHES}={}) {
+export async function reconcilePR(client,policy,number,expectedSha,{admissionClient,admissionConfig,admit=preflightPr,branches=FE_BRANCHES,readAdmission:readLiveAdmission}={}) {
   if (policy?.repository!==REPO || policy.project!==PROJECT || policy.ownerPolicy?.allowIssueOwner!==true
       || !Array.isArray(policy.reviewerPolicy?.implementation) || !Array.isArray(policy.reviewerPolicy?.release))
     throw new Error("CONFIG: explicit FE Project #5, owner and reviewer policy required");
@@ -382,7 +382,8 @@ export async function reconcilePR(client,policy,number,expectedSha,{admissionCli
     const native=await reconcileDevelopmentLink(client,{
       repository:REPO,pullRequestNumber:n,expectedHeadSha:expectedSha,
       admission:{client:admissionClient,config:admissionConfig,
-        expectedRevision:receipt.revision,selectedOwner:"syllik"}
+        expectedRevision:receipt.revision,selectedOwner:"syllik",
+        ...(readLiveAdmission?{read:readLiveAdmission}:{})}
     });
     await assertSingleNativeIssue(client,n,identity.issueNumber,true);
     if (!native.readBackConfirmed || native.issueNumber!==identity.issueNumber) throw new Error("NATIVE_LINK: missing exact userLinkedOnly read-back");
@@ -454,6 +455,141 @@ export async function reconcilePR(client,policy,number,expectedSha,{admissionCli
   }
   return {number:n,kind,headSha:pr.head.sha,taskIdentity,project,blockers,issueStateUnchanged:true};
 }
+// .github#278: bounded retry of the whole reconcilePR call, and superseded-head runs.
+// reconcilePR re-reads everything on each call and its writes are idempotent (link guarded by
+// read-back, labels/assignees/reviewers are additive and skipped once present), so a retry
+// is a fresh run. Only races and transient transport failures are retried; real blockers,
+// policy, identity and permission errors fail on the first attempt.
+export const RETRY_DELAYS_MS=Object.freeze([2000,5000]);
+export const MAX_ATTEMPTS=RETRY_DELAYS_MS.length+1;
+export const RETRY_AFTER_CAP_MS=30_000;
+export const REQUEST_TIMEOUT_MS=30_000;
+// No new attempt starts when elapsed time plus its wait would pass this budget (job timeout: 10 min).
+export const RETRY_BUDGET_MS=6*60_000;
+const HEX_SHA=/^[0-9a-f]{40}$/u;
+// Never retried, even when a wrapped cause looks transient: the reconciler's own fail-closed codes.
+const HARD_PREFIX=/^(?:CONFIG|IDENTITY|NATIVE_LINK|NATIVE_IDENTITY|ISSUE_STATE|SCOPE|ROUTE|RELEASE|LABEL_CONFLICT|OWNER_POLICY|REVIEWER_POLICY|PR|SHA|ADMISSION|QA):/u;
+// GitHubClient errors: REST "METHOD path -> STATUS: body", GraphQL HTTP "GraphQL -> STATUS: body",
+// GraphQL payload errors as their joined messages only (no type field survives).
+const TRANSIENT_TEXT=/\bfetch failed\b|\b(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|UND_ERR_[A-Z_]+)\b|\b(?:AbortError|TimeoutError)\b|\bsocket hang up\b|operation was aborted due to timeout|-> (?:500|502|503|504|429)(?::|$|\s)|-> 403: [^\n]*secondary rate limit|Something went wrong while executing your query|\bRATE_LIMITED\b/iu;
+const RATE_LIMIT_TEXT=/-> 429(?::|$|\s)|-> 403: [^\n]*secondary rate limit|\bRATE_LIMITED\b|secondary rate limit/iu;
+// A GraphQL payload rate-limit error carries no HTTP status; a REST 403 primary limit does and stays non-retryable.
+const graphqlRateLimited=text=>/API rate limit (?:already )?exceeded/iu.test(text) && !/-> \d{3}\b/u.test(text);
+const transientText=text=>TRANSIENT_TEXT.test(text) || graphqlRateLimited(text);
+const TRANSIENT_CODES=new Set(["ECONNRESET","ETIMEDOUT","EAI_AGAIN","ECONNREFUSED","TRANSPORT_ERROR"]);
+// Admission blockers surface as "<owner/repo#n> BLOCKED: a; b; c" (issue-admission-pr.mjs preflightPr).
+const ADMISSION_BLOCKED=/^[\w.-]+\/[\w.-]+#\d+ BLOCKED: (.*)$/su;
+function transientError(error) {
+  const code=error?.code??error?.cause?.code;
+  if (typeof code==="string" && (TRANSIENT_CODES.has(code) || code.startsWith("UND_ERR_"))) return true;
+  if (error?.name==="AbortError" || error?.name==="TimeoutError") return true;
+  return transientText(String(error?.message??""));
+}
+export function isRetryableError(error) {
+  const message=String(error?.message??"");
+  if (HARD_PREFIX.test(message)) return false;
+  if (/^(?:STALE\b|PR_DRIFT:)/u.test(message)) return true;
+  const admission=ADMISSION_BLOCKED.exec(message);
+  if (admission) {
+    const parts=admission[1].split("; ");
+    // A changed canonical read-back is the sole top-level blocker (later parts are its own detail).
+    if (parts[0].startsWith("STALE: canonical state changed during admission read-back")) return true;
+    // A transient read failure explains the blockers that follow from the missing data.
+    if (parts.some(transientText)) return true;
+    return parts.every(part=>part.startsWith("STALE"));
+  }
+  return transientError(error);
+}
+const isRateLimited=error=>{
+  const message=String(error?.message??"");
+  return RATE_LIMIT_TEXT.test(message) || graphqlRateLimited(message);
+};
+// A run for an older head is superseded only when the PR is open and provably has a newer valid head.
+export async function supersededHead(client,number,expectedSha) {
+  const n=Number(number);
+  if (!Number.isSafeInteger(n) || n<=0 || !HEX_SHA.test(expectedSha??"")) return null;
+  let pr;
+  try { pr=await client.request(ROOT+"/pulls/"+n); } catch { return null; }
+  const current=pr?.head?.sha;
+  if (pr?.number!==n || pr.state!=="open" || !HEX_SHA.test(current??"") || current===expectedSha) return null;
+  return {eventSha:expectedSha,currentSha:current};
+}
+// fetch for GitHubClient in this CLI only: a per-request timeout (TimeoutError is transient) and the
+// Retry-After hint of a 429/403 response, handed to onRetryAfter in milliseconds.
+export function githubFetch({fetchImpl=fetch,timeoutMs=REQUEST_TIMEOUT_MS,onRetryAfter=null,timeoutSignal=ms=>AbortSignal.timeout(ms)}={}) {
+  return async (url,init={})=>{
+    const response=await fetchImpl(url,init.signal?init:{...init,signal:timeoutSignal(timeoutMs)});
+    if (onRetryAfter && (response?.status===429 || response?.status===403)) {
+      const raw=response.headers?.get?.("retry-after");
+      const seconds=raw==null||String(raw).trim()==="" ? NaN : Number(raw);
+      if (Number.isFinite(seconds) && seconds>=0) onRetryAfter(seconds*1000);
+    }
+    return response;
+  };
+}
+const sleepMs=ms=>new Promise(done=>setTimeout(done,ms));
+// Workflow commands are line-based: escape so no interpolated text can start its own `::command::` line.
+export const escapeCommand=value=>String(value).replace(/%/gu,"%25").replace(/\r/gu,"%0D").replace(/\n/gu,"%0A");
+export async function runReconcile(client,policy,number,expectedSha,{sleep=sleepMs,random=Math.random,
+    log=console.log,delays=RETRY_DELAYS_MS,reconcile=reconcilePR,retryAfter=()=>null,eventName=null,now=Date.now,budgetMs=RETRY_BUDGET_MS,...options}={}) {
+  const maxAttempts=delays.length+1;
+  const started=now();
+  // workflow_dispatch names its SHA by hand: a wrong SHA must fail, never end as superseded.
+  const supersedable=eventName!=="workflow_dispatch";
+  for (let attempt=1;;attempt++) {
+    let receipt;
+    retryAfter(); // drop a hint left from an earlier attempt
+    try {
+      receipt=await reconcile(client,policy,number,expectedSha,options);
+    } catch (error) {
+      const hint=retryAfter();
+      const superseded=supersedable ? await supersededHead(client,number,expectedSha) : null;
+      if (superseded) return {outcome:"superseded",number:Number(number),attempts:attempt,...superseded,error};
+      const retryable=isRetryableError(error);
+      if (!retryable || attempt>=maxAttempts)
+        return {outcome:"blocked",number:Number(number),attempts:attempt,retryable,error};
+      let wait=delays[attempt-1]+Math.floor(random()*500);
+      if (hint!=null && isRateLimited(error)) wait=Math.max(wait,Math.min(hint,RETRY_AFTER_CAP_MS));
+      if (now()-started+wait>budgetMs)
+        return {outcome:"blocked",number:Number(number),attempts:attempt,retryable,budgetExhausted:true,error};
+      log("::warning title=PR metadata retry::"+escapeCommand("attempt "+attempt+" of "+maxAttempts+
+        " failed with a retryable error, retrying the whole reconciliation in "+wait+" ms: "+error.message));
+      await sleep(wait);
+      continue;
+    }
+    if (receipt.status==="SKIPPED") return {outcome:"ok",number:receipt.number,attempts:attempt,receipt};
+    // Body/link/owner/review blockers are a returned receipt, not a race: never retried.
+    return {outcome:receipt.blockers.length?"blocked":"ok",number:receipt.number,attempts:attempt,receipt};
+  }
+}
+// Prints the result and returns the process exit code. Every human-readable line is escaped; the
+// receipt is printed only through JSON.stringify.
+export function reportOutcome(result,{log=console.log,error=console.error}={}) {
+  if (result.outcome==="superseded") {
+    log("::notice title=PR metadata superseded::"+escapeCommand("PR METADATA SUPERSEDED: PR #"+result.number+
+      " event head "+result.eventSha+" is no longer the PR head; current head is "+result.currentSha+
+      ". The PR metadata run for the current head decides (this run stopped on: "+result.error.message+")"));
+    return 0;
+  }
+  const tries=result.attempts+" attempt"+(result.attempts===1?"":"s");
+  if (result.error) {
+    error(escapeCommand("PR METADATA BLOCKED: "+result.error.message+" (after "+tries+
+      (result.budgetExhausted?"; retry budget exhausted":result.retryable?"; retries exhausted":"; not retryable")+")"));
+    return 1;
+  }
+  log(JSON.stringify(result.receipt,null,2));
+  if (result.receipt.status==="SKIPPED") {
+    const line=escapeCommand("PR METADATA SKIPPED: PR #"+result.receipt.number+" is a "+result.receipt.reason);
+    log(line);
+    log("::notice title=PR metadata skipped::"+line);
+    return 0;
+  }
+  if (result.receipt.blockers.length) {
+    error(escapeCommand("PR METADATA BLOCKED: receipt blockers (after "+tries+"; not retryable): "+result.receipt.blockers.join("; ")));
+    return 1;
+  }
+  return 0;
+}
 async function main(){
   const {readFile}=await import("node:fs/promises");
   const config=JSON.parse(await readFile(new URL("./pr-metadata.config.json",import.meta.url),"utf8"));
@@ -462,17 +598,14 @@ async function main(){
   if (profile.capabilities.prMetadata==="off") throw new Error("CONFIG: prMetadata is off for "+config.repository+" in workflow-registry.yaml");
   const policy={...config,ownerPolicy:{...config.ownerPolicy,implementationOwner:profile.owner,releaseOwner:profile.owner}};
   const admissionConfig=JSON.parse(await readFile(new URL("./metadata-migration.config.json",import.meta.url),"utf8"));
-  const client=new GitHubClient(process.env.CHIPIN_PR_METADATA_TOKEN);
-  const admissionClient=new GitHubClient(process.env.CHIPIN_ADMISSION_READ_TOKEN);
-  const receipt=await reconcilePR(client,policy,process.env.CHIPIN_PR_NUMBER,process.env.CHIPIN_PR_SHA,{admissionClient,admissionConfig});
-  console.log(JSON.stringify(receipt,null,2));
-  if (receipt.status==="SKIPPED") {
-    const line="PR METADATA SKIPPED: PR #"+receipt.number+" is a "+receipt.reason;
-    console.log(line);
-    console.log("::notice title=PR metadata skipped::"+line);
-    return;
-  }
-  if (receipt.blockers.length) process.exitCode=1;
+  let hint=null;
+  const fetchImpl=githubFetch({onRetryAfter:ms=>{hint=ms;}});
+  const client=new GitHubClient(process.env.CHIPIN_PR_METADATA_TOKEN,fetchImpl);
+  const admissionClient=new GitHubClient(process.env.CHIPIN_ADMISSION_READ_TOKEN,fetchImpl);
+  const result=await runReconcile(client,policy,process.env.CHIPIN_PR_NUMBER,process.env.CHIPIN_PR_SHA,{
+    admissionClient,admissionConfig,eventName:process.env.GITHUB_EVENT_NAME??null,
+    retryAfter:()=>{const value=hint;hint=null;return value;}});
+  process.exitCode=reportOutcome(result);
 }
 if(process.argv[1]&&pathToFileURL(resolve(process.argv[1])).href===import.meta.url)
-  main().catch(e=>{console.error("PR METADATA BLOCKED: "+e.message);process.exitCode=1;});
+  main().catch(e=>{console.error(escapeCommand("PR METADATA BLOCKED: "+e.message));process.exitCode=1;});

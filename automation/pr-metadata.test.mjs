@@ -445,3 +445,324 @@ test("reconcilePR runs the QA blocker only for implementation PRs",async()=>{
   const impl=source.slice(source.indexOf('if (kind==="implementation")'),source.indexOf("await verifyRelease("));
   assert.match(impl,/prQaBlocker\(client,url,pr\.body,policy\.qaPolicy\)/u);
 });
+
+// .github#278: bounded retry of the whole reconciliation and superseded-head runs.
+import {runReconcile,isRetryableError,supersededHead,reportOutcome,MAX_ATTEMPTS} from "./pr-metadata.mjs";
+const RUN_SHA="a".repeat(40), NEW_SHA="f".repeat(40);
+const goodBody="Included implementation PRs: "+repo+"#10\nIncluded Issues: "+repo+"#5\n"
+  +"## Summary\nrelease\n## Tests\nCI\n## Version impact\nnone\n## Dependencies\nnone";
+// A release PR on the dev/main layout: the smallest full reconcilePR path with real writes.
+function releaseRun({body=goodBody,failRequest=null}={}){
+  const P="/repos/"+repo;
+  const pr={number:20,node_id:"PR_20",state:"open",body,user:{login:"pr-author"},
+    head:{ref:"dev",sha:RUN_SHA,repo:{full_name:repo}},base:{ref:"main",repo:{full_name:repo}},requested_reviewers:[]};
+  const impl={number:10,merged_at:"2026-10-08T12:00:00Z",base:{ref:"dev"},body:"Task identity: "+repo+"#5"};
+  const labels=[];const writes=[];
+  const client={pr,writes,
+    async graphql(){return {repository:{nameWithOwner:repo,pullRequest:{number:10,closingIssuesReferences:{totalCount:1,
+      pageInfo:{hasNextPage:false,endCursor:null},nodes:[{id:"ISSUE_5",number:5,repository:{nameWithOwner:repo}}]}}}};},
+    async listAll(){return [...labels];},
+    async request(path,opts={}){
+      const fail=failRequest?.(path,opts);if(fail)throw fail;
+      if(opts.method)writes.push(opts.method+" "+path);
+      if(path===P+"/pulls/20")return pr;
+      if(path===P+"/pulls/10")return impl;
+      if(path===P+"/issues/20")return{number:20,assignees:[{login:"human-owner"}]};
+      if(path===P+"/labels/pr%3Arelease")return{name:"pr:release"};
+      if(path===P+"/issues/20/labels"&&opts.method==="POST"){if(!labels.length)labels.push({name:"pr:release"});return labels;}
+      throw new Error("unexpected REST request "+path);
+    }};
+  return client;
+}
+const relPolicy={repository:repo,project:5,ownerPolicy:{allowIssueOwner:true,allowAuthorFallback:false,
+  implementationOwner:null,releaseOwner:null},reviewerPolicy:{implementation:[],release:[]}};
+function runOpts(client,admit,extra={}){
+  const sleeps=[],logs=[];
+  return {sleeps,logs,opts:{admissionClient:client,admissionConfig:{},branches:LEGACY_BRANCHES,admit,
+    sleep:async ms=>{sleeps.push(ms);},random:()=>0,log:line=>logs.push(line),...extra}};
+}
+const admitOk=async()=>({status:"INTAKE_COMPLETE",receipts:[]});
+
+test("#278 retry classifier: races and transient transport only",()=>{
+  const yes=["STALE: Issue admission changed before Development mutation: STALE: Issue/metadata/ownership/Project revision changed.",
+    "STALE: PR identity/body/owner or branch changed during admission.","STALE admission receipt.",
+    "PR_DRIFT: metadata changed mid-run",
+    repo+"#5 BLOCKED: Second canonical read-back failed: fetch failed",
+    repo+"#5 BLOCKED: STALE: canonical state changed during admission read-back: Missing Priority",
+    repo+"#5 BLOCKED: STALE: admission read-back outside freshness window.",
+    repo+"#5 BLOCKED: Project #5 unreadable: GET /orgs/x -> 502: bad gateway; Issue is not in Project #5",
+    "fetch failed","GET /repos/x -> 503: unavailable","GraphQL -> 504: timeout","POST /repos/x -> 429: slow down",
+    "GET /repos/x -> 403: {\"message\":\"You have exceeded a secondary rate limit\"}",
+    "read ECONNRESET","getaddrinfo EAI_AGAIN api.github.com","connect ETIMEDOUT","UND_ERR_SOCKET other side closed",
+    "Native Development link mutation failed for x: fetch failed. Check Issues write permission"];
+  for (const message of yes) assert.equal(isRetryableError(new Error(message)),true,message);
+  const abort=new Error("This operation was aborted");abort.name="AbortError";
+  assert.equal(isRetryableError(abort),true);
+  assert.equal(isRetryableError(Object.assign(new TypeError("x"),{cause:{code:"UND_ERR_CONNECT_TIMEOUT"}})),true);
+  const no=["IDENTITY: exactly one canonical frontend Task identity line required",
+    "CONFIG: explicit FE Project #5, owner and reviewer policy required","NATIVE_LINK: missing exact userLinkedOnly read-back",
+    "ISSUE_STATE: changed during reconciliation","ADMISSION: read-only org credential and canonical config required",
+    "SHA: event head no longer matches PR","PR: unreadable or not open","NATIVE_IDENTITY: PR linked-Issue read is unavailable",
+    repo+"#5 BLOCKED: Missing Priority; STALE: admission read-back outside freshness window.",
+    repo+"#5 BLOCKED: Native Issue unreadable: GET /repos/x/issues/5 -> 403: Resource not accessible",
+    "GET /repos/x -> 404: Not Found","POST /repos/x -> 422: Validation Failed","GET /repos/x -> 403: Forbidden",
+    "GET /rate_limit -> 403: API rate limit exceeded","LABEL: failed read-back"];
+  for (const message of no) assert.equal(isRetryableError(new Error(message)),false,message);
+});
+test("#278 a STALE race is retried and the next attempt succeeds",async()=>{
+  const client=releaseRun();let calls=0;
+  const {sleeps,logs,opts}=runOpts(client,async()=>{
+    if(++calls===1)throw new Error(repo+"#5 BLOCKED: STALE: canonical state changed during admission read-back: x");
+    return admitOk();});
+  const result=await runReconcile(client,relPolicy,20,RUN_SHA,opts);
+  assert.equal(result.outcome,"ok");assert.equal(result.attempts,2);
+  assert.deepEqual(result.receipt.blockers,[]);
+  assert.deepEqual(sleeps,[2000]);
+  assert.equal(logs.length,1);assert.match(logs[0],/^::warning title=PR metadata retry::attempt 1 of 3 failed/u);
+  assert.equal(reportOutcome(result,{log:()=>{},error:()=>{}}),0);
+});
+test("#278 a transient fetch failure is retried and the next attempt succeeds",async()=>{
+  let failed=false;
+  const client=releaseRun({failRequest:(path,opts)=>{
+    if(!failed&&opts.method==="POST"&&path.endsWith("/issues/20/labels")){failed=true;return new TypeError("fetch failed");}
+    return null;}});
+  const {sleeps,opts}=runOpts(client,admitOk);
+  const result=await runReconcile(client,relPolicy,20,RUN_SHA,opts);
+  assert.equal(result.outcome,"ok");assert.equal(result.attempts,2);assert.deepEqual(sleeps,[2000]);
+  assert.deepEqual(client.writes,["POST /repos/"+repo+"/issues/20/labels"]); // idempotent: one successful add
+});
+test("#278 retries stop after exactly MAX_ATTEMPTS and still fail with the attempt count",async()=>{
+  const client=releaseRun();let calls=0;
+  const {sleeps,logs,opts}=runOpts(client,async()=>{calls++;throw new Error("STALE: PR identity/body/owner or branch changed during admission.");});
+  const result=await runReconcile(client,relPolicy,20,RUN_SHA,opts);
+  assert.equal(MAX_ATTEMPTS,3);
+  assert.equal(result.outcome,"blocked");assert.equal(result.attempts,3);assert.equal(calls,3);
+  assert.deepEqual(sleeps,[2000,5000]);assert.equal(logs.length,2);
+  const errors=[];
+  assert.equal(reportOutcome(result,{log:()=>{},error:x=>errors.push(x)}),1);
+  assert.match(errors[0],/^PR METADATA BLOCKED: STALE: PR identity.* \(after 3 attempts; retries exhausted\)$/u);
+});
+test("#278 a receipt with blockers is never retried",async()=>{
+  const client=releaseRun({body:goodBody.replace("## Tests\nCI\n","")});
+  const {sleeps,opts}=runOpts(client,admitOk);
+  const result=await runReconcile(client,relPolicy,20,RUN_SHA,opts);
+  assert.equal(result.outcome,"blocked");assert.equal(result.attempts,1);assert.deepEqual(sleeps,[]);
+  assert.match(result.receipt.blockers.join("\n"),/BODY: missing ## Tests/u);
+  const errors=[];
+  assert.equal(reportOutcome(result,{log:()=>{},error:x=>errors.push(x)}),1);
+  assert.match(errors[0],/^PR METADATA BLOCKED: receipt blockers \(after 1 attempt; not retryable\)/u);
+});
+test("#278 a non-retryable IDENTITY error fails on the first attempt",async()=>{
+  const pr=dependencyPR({login:"human",ref:"feat/issue-9-no-marker",sha:RUN_SHA});
+  const client=recordingClient(pr);
+  const {sleeps,opts}=runOpts(client,admitOk,{branches:undefined});
+  const result=await runReconcile(client,feOnlyPolicy,463,RUN_SHA,opts);
+  assert.equal(result.outcome,"blocked");assert.equal(result.attempts,1);assert.deepEqual(sleeps,[]);
+  assert.match(result.error.message,/^IDENTITY:/u);
+  const errors=[];reportOutcome(result,{log:()=>{},error:x=>errors.push(x)});
+  assert.match(errors[0],/^PR METADATA BLOCKED: IDENTITY: .* \(after 1 attempt; not retryable\)$/u);
+});
+test("#278 a newer PR head at the early SHA gate ends the run as superseded (exit 0)",async()=>{
+  const client=recordingClient(dependencyPR({login:"human",ref:"feat/x",sha:NEW_SHA}));
+  const {sleeps,opts}=runOpts(client,async()=>{throw new Error("must not admit");},{branches:undefined});
+  const result=await runReconcile(client,feOnlyPolicy,463,RUN_SHA,opts);
+  assert.equal(result.outcome,"superseded");assert.equal(result.attempts,1);assert.deepEqual(sleeps,[]);
+  assert.equal(result.eventSha,RUN_SHA);assert.equal(result.currentSha,NEW_SHA);
+  assert.equal(client.calls.filter(x=>x.method!=="GET").length,0);
+  const logs=[];
+  assert.equal(reportOutcome(result,{log:x=>logs.push(x),error:()=>assert.fail("no error line")}),0);
+  assert.equal(logs.length,1);
+  assert.match(logs[0],new RegExp("^::notice title=PR metadata superseded::PR METADATA SUPERSEDED: PR #463 event head "+RUN_SHA+" .*current head is "+NEW_SHA+"\\. The PR metadata run for the current head decides","u"));
+});
+test("#278 a head change during the run (STALE) is detected as superseded, not retried",async()=>{
+  const pr=dependencyPR({login:"human",ref:"feat/x",sha:RUN_SHA});
+  const client=recordingClient(pr);
+  const {sleeps,opts}=runOpts(client,async()=>{pr.head={...pr.head,sha:NEW_SHA};
+    throw new Error("STALE: PR head SHA changed since the invoking workflow event.");},{branches:undefined});
+  const result=await runReconcile(client,feOnlyPolicy,463,RUN_SHA,opts);
+  assert.equal(result.outcome,"superseded");assert.equal(result.attempts,1);assert.deepEqual(sleeps,[]);
+  assert.equal(result.currentSha,NEW_SHA);
+});
+test("#278 an invalid event SHA, a closed PR or an unreadable PR still fails",async()=>{
+  for (const expected of ["","not-a-sha","A".repeat(40),undefined]) {
+    const client=recordingClient(dependencyPR({login:"human",ref:"feat/x",sha:NEW_SHA}));
+    const {opts}=runOpts(client,admitOk,{branches:undefined});
+    const result=await runReconcile(client,feOnlyPolicy,463,expected,opts);
+    assert.equal(result.outcome,"blocked",String(expected));assert.equal(result.attempts,1);
+    assert.match(result.error.message,/^SHA:/u);
+  }
+  const closed=recordingClient({...dependencyPR({login:"human",ref:"feat/x",sha:NEW_SHA}),state:"closed"});
+  const {opts}=runOpts(closed,admitOk,{branches:undefined});
+  const result=await runReconcile(closed,feOnlyPolicy,463,RUN_SHA,opts);
+  assert.equal(result.outcome,"blocked");assert.match(result.error.message,/^PR: unreadable or not open/u);
+  assert.equal(await supersededHead({async request(){throw new TypeError("fetch failed");}},463,RUN_SHA),null);
+  assert.equal(await supersededHead(recordingClient(dependencyPR({login:"human",ref:"feat/x",sha:"zz"})),463,RUN_SHA),null);
+});
+
+// .github#278 review R1.
+import {githubFetch,escapeCommand,RETRY_AFTER_CAP_MS} from "./pr-metadata.mjs";
+import {ADMISSION_CONTRACT} from "./issue-admission.mjs";
+test("#278 output lines cannot inject workflow commands",()=>{
+  const lines=[];const out={log:x=>lines.push(...String(x).split("\n")),error:x=>lines.push(...String(x).split("\n"))};
+  const evil="QA: PR changes UI-affecting paths (src/a\n::error::x.tsx%0A) but its body has no QA steps";
+  reportOutcome({outcome:"blocked",number:20,attempts:1,receipt:{number:20,blockers:[evil,"BODY: x\r\n::warning::y"]}},out);
+  reportOutcome({outcome:"blocked",number:20,attempts:3,retryable:true,error:new Error("STALE: a\n::error::x")},out);
+  reportOutcome({outcome:"superseded",number:20,attempts:1,eventSha:RUN_SHA,currentSha:NEW_SHA,error:new Error("SHA: x\n::error::x")},out);
+  reportOutcome({outcome:"ok",number:463,attempts:1,receipt:{number:463,status:"SKIPPED",blockers:[],
+    reason:"dependabot PR (author dependabot[bot], head dependabot/x%0A::error::y\n::error::z)"}},out);
+  const commands=lines.filter(line=>line.startsWith("::"));
+  assert.ok(commands.length===2,JSON.stringify(commands));
+  assert.match(commands[0],/^::notice title=PR metadata superseded::/u);
+  assert.match(commands[1],/^::notice title=PR metadata skipped::/u);
+  assert.ok(lines.some(line=>line.includes("src/a%0A::error::x.tsx%250A")),"newline and % are escaped");
+  assert.equal(escapeCommand("a%b\r\nc"),"a%25b%0D%0Ac");
+});
+test("#278 workflow_dispatch with a wrong SHA still fails instead of ending as superseded",async()=>{
+  const client=recordingClient(dependencyPR({login:"human",ref:"feat/x",sha:NEW_SHA}));
+  const {opts}=runOpts(client,admitOk,{branches:undefined,eventName:"workflow_dispatch"});
+  const result=await runReconcile(client,feOnlyPolicy,463,RUN_SHA,opts);
+  assert.equal(result.outcome,"blocked");assert.equal(result.attempts,1);
+  assert.match(result.error.message,/^SHA: event head no longer matches PR/u);
+  const pr2=recordingClient(dependencyPR({login:"human",ref:"feat/x",sha:NEW_SHA}));
+  const other=await runReconcile(pr2,feOnlyPolicy,463,RUN_SHA,runOpts(pr2,admitOk,{branches:undefined,eventName:"pull_request"}).opts);
+  assert.equal(other.outcome,"superseded");
+});
+test("#278 HTTP 500, GraphQL 'Something went wrong' and GraphQL rate limits are transient",()=>{
+  for (const message of ["GET /repos/x -> 500: oops","GraphQL -> 500: oops",
+    "Something went wrong while executing your query. Please include `ABC` when reporting this issue.",
+    "Native Development relationship state is unreadable: API rate limit already exceeded for user ID 1.",
+    "RATE_LIMITED: API rate limit exceeded"])
+    assert.equal(isRetryableError(new Error(message)),true,message);
+  assert.equal(isRetryableError(new Error("GET /repos/x -> 403: {\"message\":\"API rate limit exceeded for x\"}")),false);
+});
+test("#278 Retry-After is honoured for rate limits, capped, otherwise the normal backoff",async()=>{
+  for (const [message,hint,expected] of [
+    ["GET /repos/x -> 429: slow",12000,12000],
+    ["GET /repos/x -> 403: You have exceeded a secondary rate limit",90000,RETRY_AFTER_CAP_MS],
+    ["GET /repos/x -> 429: slow",null,2000],
+    ["GET /repos/x -> 429: slow",500,2000],
+    ["fetch failed",12000,2000]]) {
+    let calls=0,hints=[null,hint];
+    const sleeps=[];
+    await runReconcile({async request(){return null;}},relPolicy,20,RUN_SHA,{sleep:async ms=>{sleeps.push(ms);},random:()=>0,log:()=>{},
+      retryAfter:()=>hints.shift()??null,
+      reconcile:async()=>{if(++calls===1)throw new Error(message);return {number:20,blockers:[]};}});
+    assert.deepEqual(sleeps,[expected],message+" "+hint);
+  }
+});
+test("#278 githubFetch adds a request timeout only when no signal is given and reports Retry-After",async()=>{
+  const seen=[],hints=[];
+  const fake=async(url,init)=>{seen.push(init);return {status:url.endsWith("/limited")?429:200,headers:new Headers({"retry-after":"7"})};};
+  const wrapped=githubFetch({fetchImpl:fake,timeoutMs:1000,onRetryAfter:ms=>hints.push(ms)});
+  await wrapped("https://api.github.com/x",{method:"GET"});
+  assert.ok(seen[0].signal instanceof AbortSignal);assert.equal(seen[0].method,"GET");
+  const own=new AbortController().signal;
+  await wrapped("https://api.github.com/y",{signal:own});
+  assert.equal(seen[1].signal,own);
+  assert.deepEqual(hints,[]);
+  await wrapped("https://api.github.com/limited");
+  assert.deepEqual(hints,[7000]);
+  // deterministic timeout: a fake signal that is already aborted with the TimeoutError AbortSignal.timeout uses
+  const timedOut=()=>{const c=new AbortController();c.abort(new DOMException("The operation was aborted due to timeout","TimeoutError"));return c.signal;};
+  const slow=githubFetch({fetchImpl:(url,init)=>Promise.reject(init.signal.reason),timeoutMs:30000,timeoutSignal:ms=>{assert.equal(ms,30000);return timedOut();}});
+  await assert.rejects(slow("https://api.github.com/z"),error=>error.name==="TimeoutError" && isRetryableError(error));
+});
+
+// The implementation path with the real reconcileDevelopmentLink under retry.
+const REVISION="1".repeat(64);
+const implBody="Task identity: "+repo+"#5\n## Summary\nx\n## Tests\nx\n## Version impact\nnone\n## Dependencies\nnone";
+function implementationRun({failFirstMutation=false}={}){
+  const P="/repos/"+repo;
+  const pr={number:30,node_id:"PR_30",state:"open",body:implBody,user:{login:"syllik"},
+    head:{ref:"feat/issue-5-x",sha:RUN_SHA,repo:{full_name:repo}},base:{ref:"master",sha:"d".repeat(40),repo:{full_name:repo}},
+    requested_reviewers:[],requested_teams:[]};
+  const state={linked:false,mutations:0};const labels=[];
+  const prNode={id:"PR_30",number:30,url:"https://github.com/"+repo+"/pull/30",repository:{nameWithOwner:repo},body:implBody};
+  const client={state,
+    async graphql(query){
+      if (query.includes("mutation AddNativeDevelopmentLink")) {
+        state.mutations++;state.linked=true;
+        if (failFirstMutation && state.mutations===1) throw new Error("GraphQL -> 502: Bad Gateway");
+        return {addCloseIssueReferences:{issue:{id:"ISSUE_5",number:5,url:"u",repository:{nameWithOwner:repo}}}};
+      }
+      const links=state.linked?[prNode]:[];
+      if (query.includes("query PRNativeIdentity")) return {repository:{nameWithOwner:repo,pullRequest:{number:30,
+        closingIssuesReferences:{totalCount:links.length,pageInfo:{hasNextPage:false,endCursor:null},
+          nodes:state.linked?[{id:"ISSUE_5",number:5,repository:{nameWithOwner:repo}}]:[]}}}};
+      if (query.includes("query DevelopmentLinkPullRequest")) return {repository:{nameWithOwner:repo,pullRequest:prNode}};
+      if (query.includes("query DevelopmentLinkTarget")) return {repository:{nameWithOwner:repo,
+        taskIssue:{id:"ISSUE_5",number:5,url:"u",repository:{nameWithOwner:repo},
+          closedByPullRequestsReferences:{totalCount:links.length,pageInfo:{hasNextPage:false,endCursor:null},nodes:links}},
+        implementationPr:prNode}};
+      throw new Error("unexpected graphql "+query.slice(0,60));
+    },
+    async listAll(){return [...labels];},
+    async request(path,opts={}){
+      if(path===P+"/pulls/30")return pr;
+      if(path===P+"/issues/5")return {number:5,state:"open",state_reason:null,assignees:[{login:"syllik"}]};
+      if(path===P+"/issues/30")return {number:30,assignees:[{login:"syllik"}]};
+      if(path===P+"/labels/pr%3Aimplementation")return {name:"pr:implementation"};
+      if(path===P+"/issues/30/labels"&&opts.method==="POST"){if(!labels.length)labels.push({name:"pr:implementation"});return labels;}
+      throw new Error("unexpected REST request "+path);
+    }};
+  return client;
+}
+const liveReceipt=()=>({contractVersion:ADMISSION_CONTRACT,status:"INTAKE_COMPLETE",issue:repo+"#5",revision:REVISION,
+  checkedAt:new Date().toISOString(),blockers:[]});
+const admitImpl=async()=>({status:"INTAKE_COMPLETE",receipts:[liveReceipt()]});
+test("#278 implementation: a 502 after the link mutation applied retries into the already-linked path",async()=>{
+  const client=implementationRun({failFirstMutation:true});
+  const {sleeps,opts}=runOpts(client,admitImpl,{branches:undefined,readAdmission:async()=>({blockers:[],receipt:liveReceipt()})});
+  const result=await runReconcile(client,feOnlyPolicy,30,RUN_SHA,opts);
+  assert.equal(result.outcome,"ok",result.error?.message);
+  assert.equal(result.attempts,2);assert.deepEqual(sleeps,[2000]);
+  assert.equal(client.state.mutations,1,"exactly one addCloseIssueReferences across attempts");
+  assert.equal(result.receipt.taskIdentity,repo+"#5");
+});
+test("#278 implementation: a dev-link STALE with a real admission blocker is retried once, then fails",async()=>{
+  const client=implementationRun();let admits=0;
+  const {sleeps,opts}=runOpts(client,async()=>{
+    if(++admits===1)return admitImpl();
+    throw new Error(repo+"#5 BLOCKED: Issue Priority is missing");
+  },{branches:undefined,readAdmission:async()=>({blockers:["Issue Priority is missing"],receipt:liveReceipt()})});
+  const result=await runReconcile(client,feOnlyPolicy,30,RUN_SHA,opts);
+  assert.equal(result.outcome,"blocked");assert.equal(result.attempts,2);assert.equal(result.retryable,false);
+  assert.deepEqual(sleeps,[2000]);
+  assert.equal(client.state.mutations,0);
+  assert.match(result.error.message,/BLOCKED: Issue Priority is missing$/u);
+});
+test("#278 reportOutcome prints the SKIPPED receipt and exits 0",async()=>{
+  const client=recordingClient(dependencyPR());
+  const result=await runReconcile(client,feOnlyPolicy,463,RUN_SHA,runOpts(client,admitOk,{branches:undefined}).opts);
+  assert.equal(result.outcome,"ok");
+  const logs=[];
+  assert.equal(reportOutcome(result,{log:x=>logs.push(x),error:()=>assert.fail("no error")}),0);
+  assert.equal(JSON.parse(logs[0]).status,"SKIPPED");
+  assert.match(logs[1],/^PR METADATA SKIPPED: PR #463 is a dependabot PR/u);
+  assert.match(logs[2],/^::notice title=PR metadata skipped::PR METADATA SKIPPED: /u);
+});
+
+test("#278 a Retry-After hint from an earlier attempt is not reused",async()=>{
+  // per attempt retryAfter() is read twice: at the start (discarded) and after the failure
+  const hints=[null,20000,15000,null];const sleeps=[];let calls=0;
+  const result=await runReconcile({async request(){return null;}},relPolicy,20,RUN_SHA,{sleep:async ms=>{sleeps.push(ms);},
+    random:()=>0,log:()=>{},retryAfter:()=>hints.shift()??null,
+    reconcile:async()=>{calls++;throw new Error("GET /repos/x -> 429: slow down");}});
+  assert.deepEqual(sleeps,[20000,5000]);
+  assert.equal(calls,3);assert.equal(result.outcome,"blocked");assert.equal(result.attempts,3);
+});
+test("#278 no new attempt starts past the retry budget",async()=>{
+  let clock=0;const sleeps=[];let calls=0;
+  const result=await runReconcile({async request(){return null;}},relPolicy,20,RUN_SHA,{sleep:async ms=>{sleeps.push(ms);clock+=ms;},
+    random:()=>0,log:()=>{},now:()=>clock,budgetMs:6*60_000,
+    reconcile:async()=>{calls++;clock+=6*60_000-1000;throw new Error("fetch failed");}}); // 5:59 elapsed + 2 s wait > 6 min
+  assert.equal(calls,1);assert.deepEqual(sleeps,[]);
+  assert.equal(result.outcome,"blocked");assert.equal(result.budgetExhausted,true);
+  const errors=[];reportOutcome(result,{log:()=>{},error:x=>errors.push(x)});
+  assert.match(errors[0],/^PR METADATA BLOCKED: fetch failed \(after 1 attempt; retry budget exhausted\)$/u);
+  clock=0;calls=0;
+  const within=await runReconcile({async request(){return null;}},relPolicy,20,RUN_SHA,{sleep:async ms=>{clock+=ms;},
+    random:()=>0,log:()=>{},now:()=>clock,
+    reconcile:async()=>{if(++calls===1){clock+=60_000;throw new Error("fetch failed");}return {number:20,blockers:[]};}});
+  assert.equal(within.outcome,"ok");assert.equal(within.attempts,2);
+});

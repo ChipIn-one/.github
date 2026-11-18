@@ -75,6 +75,11 @@ export const touchesCapability = (name, files) => {
   return files.filter(f => !IGNORED_CHANGE.test(f)).some(f => patterns.some(p => p.test(f)));
 };
 
+// pr-metadata-action is FE-only: it reconciles the Development link only for the repository of its config
+// (any other repository fails with SCOPE:), so only that repository may count it as its developmentLink caller.
+const PR_METADATA_REPOSITORY = JSON.parse(readFileSync(new URL('./pr-metadata.config.json', import.meta.url), 'utf8')).repository;
+const prMetadataLinks = p => p.capabilities.prMetadata === 'required' && p.repository === PR_METADATA_REPOSITORY;
+
 const semver = tag => TAG.exec(tag.name).slice(1).map(Number);
 export const sortTags = tags => tags.filter(t => TAG.test(t.name)).sort((a, b) => {
   const [x, y] = [semver(a), semver(b)];
@@ -87,7 +92,10 @@ export const sortTags = tags => tags.filter(t => TAG.test(t.name)).sort((a, b) =
 
 const REQUIRED_USES = [
   ['admission', ['issue-admission-action', 'development-link-action', 'pr-gate'], p => p.capabilities.admission !== 'off'],
-  ['developmentLink', ['development-link-action', 'pr-gate'], p => p.capabilities.developmentLink !== 'off'],
+  // pr-metadata-action reconciles the Development link too (reconcilePR -> reconcileDevelopmentLink), so the repository it
+  // serves may drop its separate development-link caller when it requires PR metadata (chipin-frontend#760).
+  ['developmentLink', p => ['development-link-action', 'pr-gate', ...(prMetadataLinks(p) ? ['pr-metadata-action'] : [])],
+    p => p.capabilities.developmentLink !== 'off'],
   ['prMetadata', ['pr-metadata-action', 'pr-gate'], p => p.capabilities.prMetadata === 'required'],
   ['milestones', ['create-milestone-action'], p => p.capabilities.milestones === 'enabled'],
   // the accepted caller follows the registry strategy (docs/workflow/completion.md); integration-merge and
