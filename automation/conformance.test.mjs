@@ -66,6 +66,19 @@ test('caller presence follows the registry capabilities', () => {
   // the same record with the default runner still requires the repository caller
   const feRepositoryRunner = { ...profile(FE), completionRunner: 'repository' };
   assert.deepEqual(checks(checkCallers(feRepositoryRunner, extractPins([workflow(...feBase)]))), ['CALLER_MISSING']);
+  // chipin-frontend#760: pr-metadata-action reconciles the Development link, so it covers developmentLink when prMetadata is required
+  const feNoLink = [uses('issue-admission-action', V1), uses('pr-metadata-action', V1), uses('create-milestone-action', V1)];
+  assert.equal(profile(FE).capabilities.prMetadata, 'required');
+  assert.deepEqual(checkCallers(profile(FE), extractPins([workflow(...feNoLink)])), [], 'FE without development-link-action but with pr-metadata-action conforms');
+  const notRequired = { ...profile(FE), capabilities: Object.freeze({ ...profile(FE).capabilities, prMetadata: 'advisory' }) };
+  const noLink = checkCallers(notRequired, extractPins([workflow(...feNoLink)]));
+  assert.deepEqual(checks(noLink), ['CALLER_MISSING'], 'pr-metadata-action covers developmentLink only when prMetadata is required');
+  assert.match(noLink[0].message, /Capability developmentLink is required but no workflow uses development-link-action or pr-gate from/);
+  // the action is FE-only (pr-metadata.config.json repository; SCOPE: elsewhere): it never covers another repository's link
+  assert.equal(profile(BE).capabilities.prMetadata, 'required');
+  const beNoLink = checkCallers(profile(BE), extractPins([workflow(uses('issue-admission-action', V1), uses('pr-metadata-action', V1), uses('create-milestone-action', V1))]));
+  assert.deepEqual(checks(beNoLink), ['CALLER_MISSING'], 'BE pr-metadata-action does not cover developmentLink');
+  assert.match(beNoLink[0].message, /Capability developmentLink is required/);
   const gate = extractPins([{ path: 'p', text: `    uses: ChipIn-one/.github/.github/workflows/pr-gate.yml@${V1} # v1.0.0` }]);
   assert.deepEqual(checks(checkCallers(profile(BE), gate)), ['CALLER_MISSING'], 'pr-gate covers admission, link and metadata; BE milestones still needed');
 });

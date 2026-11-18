@@ -156,8 +156,8 @@ jobs:
     secrets: { admission-token: ${{ secrets.CHIPIN_DEV_READ_TOKEN }} }
 ```
 
-Existing frontend callers (`frontend-ci` admission step, `native-development-link.yml`, `pr-metadata.yml`) are replaced gradually: `pr-gate` is added first,
-and after two green weeks the old callers are removed. The required check name `frontend-ci` is kept (admission stays inside it until protection is switched).
+Existing frontend callers (`frontend-ci` admission step, `pr-metadata.yml`) are replaced gradually: `pr-gate` is added first,
+and after two green weeks the old callers are removed. The frontend `native-development-link.yml` is retired early ([chipin-frontend#760](https://github.com/ChipIn-one/chipin-frontend/issues/760)): `pr-metadata-action` already reconciles the Development link, and two parallel writers raced on the same Issue revision. The required check name `frontend-ci` is kept (admission stays inside it until protection is switched).
 Composite actions remain the units of logic and tests; direct action calls from repositories stay allowed only for milestones and completion.
 
 ## 4. Versioning and pins
