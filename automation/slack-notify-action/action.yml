@@ -1,0 +1,39 @@
+name: ChipIn Slack notify
+description: Post one message to a Slack Incoming Webhook. Never fails the caller job; the outcome is the result output (automation/README.md#slack-notification).
+inputs:
+  webhook-url:
+    description: Slack Incoming Webhook URL; must come from secrets.* (a vars.* or literal value is printed in the step log before it can be masked). Empty skips the notification.
+    required: false
+    default: ""
+  text:
+    description: Message text in Slack mrkdwn, built by the caller. The caller escapes external values (escapeMrkdwn in automation/slack-notify.mjs).
+    required: true
+  blocks:
+    description: Optional Slack Block Kit blocks as a JSON array string; text stays the notification fallback.
+    required: false
+    default: ""
+  timeout-seconds:
+    description: Request timeout in seconds (capped at 60).
+    required: false
+    default: "10"
+outputs:
+  result:
+    description: sent, skipped (no webhook) or failed (invalid input, timeout, network error or non-2xx answer).
+    value: ${{ steps.notify.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - name: Post the Slack message
+      id: notify
+      shell: bash
+      env:
+        SLACK_WEBHOOK_URL: ${{ inputs.webhook-url }}
+        SLACK_TEXT: ${{ inputs.text }}
+        SLACK_BLOCKS: ${{ inputs.blocks }}
+        SLACK_TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+      run: |
+        set -euo pipefail
+        if ! node "$GITHUB_ACTION_PATH/../slack-notify-cli.mjs"; then
+          echo "::warning title=Slack notification::Slack notification not sent: notifier did not run"
+          echo "result=failed" >> "$GITHUB_OUTPUT"
+        fi
