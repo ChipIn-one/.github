@@ -744,7 +744,7 @@ test("#278 reportOutcome prints the SKIPPED receipt and exits 0",async()=>{
 
 test("#278 a Retry-After hint from an earlier attempt is not reused",async()=>{
   // per attempt retryAfter() is read twice: at the start (discarded) and after the failure
-  const hints=[null,20000,null,null];const sleeps=[];let calls=0;
+  const hints=[null,20000,15000,null];const sleeps=[];let calls=0;
   const result=await runReconcile({async request(){return null;}},relPolicy,20,RUN_SHA,{sleep:async ms=>{sleeps.push(ms);},
     random:()=>0,log:()=>{},retryAfter:()=>hints.shift()??null,
     reconcile:async()=>{calls++;throw new Error("GET /repos/x -> 429: slow down");}});
