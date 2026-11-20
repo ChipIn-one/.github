@@ -1239,7 +1239,9 @@ test('GitHubConformanceSource: production containment reuses the completion rece
   const receipt = M2;
   const responses = (statusState) => async path => {
     if (path === `/repos/${FE}/commits/heads/master`) return { sha: head };
-    if (path.startsWith(`/repos/${FE}/deployments?environment=Production`)) return [{ id: 7, sha: receipt, environment: 'Production', creator: { login: 'vercel[bot]' }, created_at: RECENT }];
+    // the live record lists `Production` and `Production – chipin-frontend` (.github#287): each is read on its own
+    if (path.startsWith(`/repos/${FE}/deployments?environment=Production&`)) return [{ id: 7, sha: receipt, environment: 'Production', creator: { login: 'vercel[bot]' }, created_at: RECENT }];
+    if (path.startsWith(`/repos/${FE}/deployments?environment=Production%20%E2%80%93%20chipin-frontend&`)) return [];
     if (path.startsWith(`/repos/${FE}/deployments/7/statuses`)) return [{ id: 1, state: statusState, creator: { login: 'vercel[bot]' }, created_at: RECENT }];
     const compare = /\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/.exec(path);
     if (compare) return compare[2] === head || compare[1] === M1 ? { status: 'ahead', merge_base_commit: { sha: compare[1] } } : { status: 'diverged', merge_base_commit: { sha: '0'.repeat(40) } };
@@ -1249,8 +1251,43 @@ test('GitHubConformanceSource: production containment reuses the completion rece
   assert.equal(await ok.contains({ mergeCommitSha: M1, mergedAt: RECENT }), true);
   assert.equal(await ok.contains({ mergeCommitSha: '3'.repeat(40), mergedAt: RECENT }), false);
   const none = await new GitHubConformanceSource({ request: responses('failure') }).productionContainment(profile(FE));
-  await assert.rejects(none.contains({ mergeCommitSha: M1, mergedAt: RECENT }), e => /no valid Production receipt/.test(e.message) && e.code === 'CLOSED_BEFORE_PRODUCTION_UNVERIFIABLE');
+  await assert.rejects(none.contains({ mergeCommitSha: M1, mergedAt: RECENT }), e => /no valid Production or Production \u2013 chipin-frontend receipt/.test(e.message) && e.code === 'CLOSED_BEFORE_PRODUCTION_UNVERIFIABLE');
   await assert.rejects(new GitHubConformanceSource({ request: async () => { throw new Error('GET x -> 403'); } }).productionContainment(profile(FE)), /403/);
+});
+
+test('#287 GitHubConformanceSource: production containment and state read every listed name and match it exactly', async () => {
+  const FE_PROD = 'Production – chipin-frontend';
+  const SITE_PROD = 'Production – chipin-site';
+  const vercel = 'vercel[bot]';
+  const S9 = '9'.repeat(40);
+  const calls = [];
+  // GitHub answers each name; the site's record (newest, success, SHA on the branch) and lookalikes are filtered out
+  const deployments = {
+    Production: [dep(5, V1, 'Production', vercel, '2026-11-05T08:00:00Z')],
+    [FE_PROD]: [dep(11, S9, SITE_PROD, vercel, '2026-11-05T12:00:00Z'), dep(10, S9, 'Production - chipin-frontend', vercel, '2026-11-05T11:30:00Z'),
+      dep(9, S9, 'production – chipin-frontend', vercel, '2026-11-05T11:00:00Z'), dep(8, PROD, FE_PROD, vercel, '2026-11-05T10:00:00Z')],
+  };
+  const statuses = { 11: st('success', vercel, '2026-11-05T12:01:00Z'), 10: st('success', vercel, '2026-11-05T11:31:00Z'),
+    9: st('success', vercel, '2026-11-05T11:01:00Z'), 8: st('success', vercel, '2026-11-05T10:01:00Z'), 5: st('success', vercel, '2026-11-05T08:01:00Z') };
+  const state = await new GitHubConformanceSource(productionClient({ deployments, statuses, calls })).productionState(profile(FE));
+  assert.deepEqual(state, { sha: PROD, label: `${FE_PROD} deployment 8`, successAt: '2026-11-05T10:01:00Z' });
+  assert.ok(calls.includes(`/repos/${FE}/deployments?environment=Production&per_page=50&page=1`));
+  assert.ok(calls.includes(`/repos/${FE}/deployments?environment=Production%20%E2%80%93%20chipin-frontend&per_page=50&page=1`));
+  assert.ok(!calls.some(path => /deployments\/(9|10|11)\/statuses/.test(path)), 'site and lookalike records are never read');
+  // the old Production name still counts when it is the newest success
+  const old = await new GitHubConformanceSource(productionClient({ deployments: { Production: [dep(12, V1, 'Production', vercel, '2026-11-06T08:00:00Z')], [FE_PROD]: deployments[FE_PROD] },
+    statuses: { ...statuses, 12: st('success', vercel, '2026-11-06T08:01:00Z') } })).productionState(profile(FE));
+  assert.deepEqual([old.sha, old.label], [V1, 'Production deployment 12']);
+  // only the site's receipt: unverifiable, never the site's SHA
+  await assert.rejects(new GitHubConformanceSource(productionClient({ deployments: { [FE_PROD]: [dep(11, S9, SITE_PROD, vercel, '2026-11-05T12:00:00Z')] }, statuses })).productionState(profile(FE)),
+    e => e.code === 'RELEASE_PRODUCTION_UNVERIFIABLE' && /Production or Production – chipin-frontend deployment/.test(e.message));
+
+  // containment: a receipt under the per-project name contains the merge; the site's receipt never does
+  const contained = { [FE_PROD]: [dep(8, PROD, FE_PROD, vercel, RECENT)] };
+  const site = { [FE_PROD]: [dep(11, PROD, SITE_PROD, vercel, RECENT)], Production: [] };
+  const containsOn = deploymentsByName => new GitHubConformanceSource(productionClient({ deployments: deploymentsByName, statuses, onBranch: () => true })).productionContainment(profile(FE));
+  assert.equal(await (await containsOn(contained)).contains({ mergeCommitSha: M1, mergedAt: RECENT }), true);
+  await assert.rejects((await containsOn(site)).contains({ mergeCommitSha: M1, mergedAt: RECENT }), e => e.code === 'CLOSED_BEFORE_PRODUCTION_UNVERIFIABLE');
 });
 
 test('GitHubConformanceSource: production-merge containment uses merged dev -> main release PR heads, as the engine does', async () => {

@@ -104,7 +104,7 @@ Native Issue state is the completion authority. Closing as completed means the t
 
 Development-linked PRs are implementation evidence. Their merge state must not be copied into Project Status, except `Awaiting release`, which only the completion engine writes (docs/workflow/completion.md). Linking an open PR may move `Backlog`/`Todo` to `In Progress` (table above); that move reflects started work, not merge state, and is never completion evidence.
 
-For frontend code work, merge to the integration branch (`master` since .github#216) is not completion. Close only after the required implementation is in production (a Vercel `Production` deployment of `master`).
+For frontend code work, merge to the integration branch (`master` since .github#216) is not completion. Close only after the required implementation is in production (a Vercel `Production` or `Production – chipin-frontend` deployment of `master`, the registry names since .github#287).
 
 Completion triggers per repository are defined by the registry `completion` strategy (docs/workflow/completion.md).
 

@@ -19,6 +19,7 @@ import {
   readBranchHead,
   readDeclaredTargetStates,
   readIssueRecord,
+  productionEnvironments,
   readProductionDeployments,
   reconcileAwaitingRelease,
   runCompletion,
@@ -1097,6 +1098,12 @@ const RECEIPT_SHA = "cccccccccccccccccccccccccccccccccccccccc";
 const OLD_RECEIPT_SHA = "dddddddddddddddddddddddddddddddddddddddd";
 const MERGE_2 = "3333333333333333333333333333333333333333";
 
+// the exact environment names of the live frontend record (.github#287): Vercel names the per-project environment
+// with an EN DASH (U+2013) and spaces around it
+const FE_PRODUCTION = "Production \u2013 chipin-frontend";
+const SITE_PRODUCTION = "Production \u2013 chipin-site";
+const FE_PRODUCTION_ENVIRONMENTS = ["Production", FE_PRODUCTION];
+
 // the live frontend record with the engine on (.github#217)
 const ENGINE_ON = /^      completion: automatic {5}# automatic \| manual; engine on since #217 \(Promote evidence checked in cutover step 7\)$/mu;
 async function receiptRegistry() {
@@ -1147,6 +1154,7 @@ function receiptClient({
   ancestry = [MERGE + "..." + HEAD, RECEIPT_SHA + "..." + HEAD, MERGE + "..." + RECEIPT_SHA],
   deploymentsError = null,
   deploymentPages = null,
+  deploymentsByEnvironment = null,
   compareErrors = {},
   ...projectOptions
 } = {}) {
@@ -1156,9 +1164,13 @@ function receiptClient({
     const deploymentsMatch = /\/repos\/ChipIn-one\/chipin-frontend\/deployments\?environment=([^&]+)&per_page=(\d+)&page=(\d+)$/u.exec(path);
     if (deploymentsMatch) {
       client.log.push("GET " + path);
-      assert.equal(decodeURIComponent(deploymentsMatch[1]), "Production");
+      // the live record lists both exact names (.github#287); each is read on its own
+      const name = decodeURIComponent(deploymentsMatch[1]);
+      assert.ok(FE_PRODUCTION_ENVIRONMENTS.includes(name), "unexpected environment " + name);
       if (deploymentsError) throw new Error(deploymentsError);
       const [perPage, page] = [Number(deploymentsMatch[2]), Number(deploymentsMatch[3])];
+      if (deploymentsByEnvironment) return (deploymentsByEnvironment[name] ?? []).slice((page - 1) * perPage, page * perPage);
+      if (name !== "Production") return [];
       if (deploymentPages) return deploymentPages[page - 1] ?? [];
       return deployments.slice((page - 1) * perPage, page * perPage);
     }
@@ -1193,7 +1205,8 @@ test("deployment-receipt: the cutover registry record validates and runs the new
   const profile = registry.repositories.find((candidate) => candidate.repository === FE);
   assert.equal(profile.completion, "deployment-receipt");
   assert.equal(profile.capabilities.completion, "automatic");
-  assert.deepEqual(profile.productionEvidence, { environment: "Production", creator: "vercel[bot]" });
+  // .github#287: the old `Production` and the per-project `Production – chipin-frontend` (U+2013), never the site's
+  assert.deepEqual(profile.productionEvidence, { environment: FE_PRODUCTION_ENVIRONMENTS, creator: "vercel[bot]" });
   // .github#217: no FE caller, the org sweep is the only runner
   assert.equal(profile.completionRunner, "org-sweep");
   assert.deepEqual(profile.branches, { default: "master", integration: "master", promotion: null });
@@ -1261,11 +1274,12 @@ test("deployment-receipt: a merge commit contained in a valid production receipt
     }],
   });
   assert.equal(mutations(client).filter((entry) => entry.startsWith("PATCH ")).length, 1);
-  assert.equal(receipt.productionEvidence.environment, "Production");
+  // the run receipt names the registry list as declared (.github#287); both names were read
+  assert.deepEqual(receipt.productionEvidence.environment, FE_PRODUCTION_ENVIRONMENTS);
   assert.equal(receipt.productionEvidence.deploymentsRead, 1);
   assert.equal(receipt.productionEvidence.truncated, false);
   assert.deepEqual(receipt.productionEvidence.checked.map((row) => [row.deploymentId, row.valid, row.reason]), [[900, true, null]]);
-  assert.match(formatCompletionSummary(receipt), /- Production evidence: Production by vercel\[bot\]; 1 deployment\(s\) read, 1 checked, valid receipts: 900 \(ccccccc, status 9000\)/u);
+  assert.match(formatCompletionSummary(receipt), /- Production evidence: Production or Production \u2013 chipin-frontend by vercel\[bot\]; 1 deployment\(s\) read, 1 checked, valid receipts: 900 \(ccccccc, status 9000\)/u);
   // compare direction: receipt on the branch is RECEIPT...HEAD, merge in the receipt is MERGE...RECEIPT
   assert.ok(client.log.includes("GET /repos/ChipIn-one/chipin-frontend/compare/" + RECEIPT_SHA + "..." + HEAD));
   assert.ok(client.log.includes("GET /repos/ChipIn-one/chipin-frontend/compare/" + MERGE + "..." + RECEIPT_SHA));
@@ -1382,6 +1396,163 @@ test("deployment-receipt: receipt validity (environment, creator, newest status 
   await assert.rejects(() => check(deployment(), new Error("GET statuses -> 502: Bad Gateway")), /502/u);
   await assert.rejects(() => check(deployment(), [deploymentStatus()], async () => { throw new Error("compare -> 500"); }), /500/u);
   await assert.rejects(() => check(deployment(), { not: "a list" }), /not a list/u);
+});
+
+test("#287 deployment-receipt: a receipt under `Production – chipin-frontend` closes; both names are read, URL-encoded", async () => {
+  const client = receiptClient({
+    deploymentsByEnvironment: { [FE_PRODUCTION]: [deployment({ environment: FE_PRODUCTION })] },
+    deploymentStatuses: { 900: [deploymentStatus({ environment: FE_PRODUCTION })] },
+  });
+  const receipt = await receiptRun(client);
+  const [result] = receipt.results;
+  assert.equal(result.decision.code, "closed-completed");
+  assert.equal(result.decision.evidence.pullRequests[0].receipt.environment, FE_PRODUCTION);
+  assert.match(result.decision.detail, /production receipt deployment 900 \(Production – chipin-frontend, vercel\[bot\]/u);
+  const reads = client.log.filter((entry) => entry.includes("/deployments?environment="));
+  assert.deepEqual(reads, [
+    "GET /repos/ChipIn-one/chipin-frontend/deployments?environment=Production&per_page=50&page=1",
+    "GET /repos/ChipIn-one/chipin-frontend/deployments?environment=Production%20%E2%80%93%20chipin-frontend&per_page=50&page=1",
+  ]);
+  assert.equal(receipt.productionEvidence.matchingDeployments, 1);
+  // the old `Production` name still closes (the generic receipt tests run on it), and the newest of both windows wins
+  const both = receiptClient({
+    deploymentsByEnvironment: {
+      Production: [deployment({ id: 800, sha: OLD_RECEIPT_SHA, createdAt: "2026-10-05T10:00:00Z" })],
+      [FE_PRODUCTION]: [deployment({ environment: FE_PRODUCTION })],
+    },
+    deploymentStatuses: { 900: [deploymentStatus()], 800: [deploymentStatus({ id: 8000 })] },
+    ancestry: [MERGE + "..." + HEAD, RECEIPT_SHA + "..." + HEAD, OLD_RECEIPT_SHA + "..." + HEAD, MERGE + "..." + RECEIPT_SHA],
+  });
+  const merged = await receiptRun(both);
+  assert.equal(merged.results[0].decision.code, "closed-completed");
+  assert.deepEqual(merged.productionEvidence.checked.map((row) => [row.deploymentId, row.environment, row.valid]), [[900, FE_PRODUCTION, true]],
+    "the newest receipt (from the second window) is checked first and suffices");
+  assert.ok(!both.log.some((entry) => entry.includes("/deployments/800/statuses")));
+});
+
+test("#287 deployment-receipt: a `Production – chipin-site` receipt never closes, even as the newest or only one with the SHA", async () => {
+  // GitHub answers the per-name query with the site's record (or both windows carry it): the exact filter drops it
+  for (const [label, byEnvironment] of [
+    ["only receipt", { [FE_PRODUCTION]: [deployment({ environment: SITE_PRODUCTION })] }],
+    ["newest receipt, older FE one is not on the merge", {
+      Production: [deployment({ id: 800, sha: OLD_RECEIPT_SHA, createdAt: "2026-10-05T10:00:00Z" })],
+      [FE_PRODUCTION]: [deployment({ id: 950, environment: SITE_PRODUCTION, createdAt: "2026-10-09T10:00:00Z" })],
+    }],
+  ]) {
+    const client = receiptClient({
+      deploymentsByEnvironment: byEnvironment,
+      deploymentStatuses: {
+        950: [deploymentStatus({ environment: SITE_PRODUCTION })], 900: [deploymentStatus({ environment: SITE_PRODUCTION })],
+        800: [deploymentStatus({ id: 8000 })],
+      },
+      ancestry: [MERGE + "..." + HEAD, RECEIPT_SHA + "..." + HEAD, OLD_RECEIPT_SHA + "..." + HEAD, MERGE + "..." + RECEIPT_SHA],
+    });
+    const receipt = await receiptRun(client);
+    assert.equal(receipt.results[0].decision.code, "awaiting-production", label);
+    assert.deepEqual(mutations(client), [], label);
+    assert.ok(!receipt.productionEvidence.checked.some((row) => row.environment === SITE_PRODUCTION), label);
+    assert.ok(!client.log.some((entry) => /\/deployments\/(900|950)\/statuses/u.test(entry)), label + ": the site record is never validated");
+  }
+});
+
+test("#287 deployment-receipt: names match exactly (dash, case and spaces are never normalized)", async () => {
+  const lookalikes = [
+    "Production - chipin-frontend", // hyphen-minus
+    "Production \u2014 chipin-frontend", // em dash (U+2014)
+    "Production \u2212 chipin-frontend", // minus sign (U+2212)
+    "production \u2013 chipin-frontend",
+    "PRODUCTION \u2013 CHIPIN-FRONTEND",
+    "Production\u2013chipin-frontend",
+    "Production \u2013chipin-frontend",
+    "Production  \u2013 chipin-frontend",
+    "Production \u2013 chipin-frontend ",
+    " Production \u2013 chipin-frontend",
+    "Production\u00a0\u2013 chipin-frontend", // no-break space (U+00A0) instead of a space
+    "Production \u2013 chipin-frontend-preview",
+    "Production \u2013 chipin",
+    "Production \u2013 chipin-site",
+    "production",
+    "Production ",
+  ];
+  const check = (environment, statusEnvironment = environment) => validateProductionReceipt(deployment({ environment }), {
+    environment: FE_PRODUCTION_ENVIRONMENTS, creator: "vercel[bot]", integrationHeadSha: HEAD,
+    readStatuses: async () => [deploymentStatus({ environment: statusEnvironment })],
+    containsCommit: async (base, target) => base === RECEIPT_SHA && target === HEAD,
+  });
+  for (const name of lookalikes) assert.equal((await check(name)).reason, "environment-mismatch", JSON.stringify(name));
+  for (const name of FE_PRODUCTION_ENVIRONMENTS) assert.equal((await check(name)).valid, true, name);
+  // a status that names an environment must name one of the listed names too
+  assert.equal((await check(FE_PRODUCTION, SITE_PRODUCTION)).reason, "status-environment-mismatch");
+  assert.equal((await check(FE_PRODUCTION, "Production - chipin-frontend")).reason, "status-environment-mismatch");
+  // an invalid list matches nothing (fail closed)
+  for (const environment of [[], ["Production", "Production"], ["Production", 7], [" Production"], undefined]) {
+    const verdict = await validateProductionReceipt(deployment(), {
+      environment, creator: "vercel[bot]", integrationHeadSha: HEAD,
+      readStatuses: async () => [deploymentStatus()], containsCommit: async () => true,
+    });
+    assert.equal(verdict.reason, "environment-mismatch", JSON.stringify(environment));
+  }
+  assert.deepEqual(productionEnvironments("Production"), ["Production"]);
+  assert.deepEqual(productionEnvironments(FE_PRODUCTION_ENVIRONMENTS), FE_PRODUCTION_ENVIRONMENTS);
+  for (const bad of ["", " x", [], ["a", "a"], ["a", null], null, 7]) assert.deepEqual(productionEnvironments(bad), [], JSON.stringify(bad));
+
+  // end to end: every lookalike receipt keeps the Issue open
+  const client = receiptClient({
+    deploymentsByEnvironment: { [FE_PRODUCTION]: lookalikes.map((environment, index) => deployment({ id: 1000 + index, environment })) },
+    deploymentStatuses: Object.fromEntries(lookalikes.map((environment, index) => [1000 + index, [deploymentStatus({ environment })]])),
+  });
+  const receipt = await receiptRun(client);
+  assert.equal(receipt.results[0].decision.code, "awaiting-production");
+  assert.equal(receipt.productionEvidence.matchingDeployments, 0);
+  assert.deepEqual(mutations(client), []);
+});
+
+test("#287 readProductionDeployments: one window per name, merged newest first (created_at, then id), deduplicated, truncation combined", async () => {
+  const windows = {
+    Production: [
+      [{ id: 3, created_at: "2026-10-03T00:00:00Z" }, { id: 1, created_at: "2026-10-01T00:00:00Z" }],
+      [{ id: 0, created_at: "2026-09-30T00:00:00Z" }],
+    ],
+    [FE_PRODUCTION]: [[{ id: 5, created_at: "2026-10-05T00:00:00Z" }, { id: 4, created_at: "2026-10-03T00:00:00Z" }], [{ id: 3, created_at: "2026-10-03T00:00:00Z" }, { id: 2, created_at: "2026-10-02T00:00:00Z" }]],
+  };
+  const paths = [];
+  const client = {
+    request: async (path) => {
+      paths.push(path);
+      const match = /deployments\?environment=([^&]+)&per_page=2&page=(\d+)$/u.exec(path);
+      return windows[decodeURIComponent(match[1])][Number(match[2]) - 1] ?? [];
+    },
+  };
+  const result = await readProductionDeployments(client, FE, { environment: FE_PRODUCTION_ENVIRONMENTS, pageSize: 2, maxPages: 2 });
+  assert.deepEqual(result.deployments.map((entry) => entry.id), [5, 4, 3, 2, 1, 0], "equal created_at falls back to the higher id");
+  assert.equal(result.read, 7, "every record read is counted, duplicates included");
+  assert.equal(result.truncated, true, "the second window was full");
+  assert.deepEqual(paths.map((path) => path.replace(/^.*environment=/u, "")), [
+    "Production&per_page=2&page=1", "Production&per_page=2&page=2",
+    "Production%20%E2%80%93%20chipin-frontend&per_page=2&page=1", "Production%20%E2%80%93%20chipin-frontend&per_page=2&page=2",
+  ]);
+  // no window full -> not truncated; a single string reads one window as before
+  windows[FE_PRODUCTION] = [[{ id: 5, created_at: "2026-10-05T00:00:00Z" }]];
+  windows.Production = [[{ id: 3, created_at: "2026-10-03T00:00:00Z" }, { id: 2, created_at: "2026-10-02T00:00:00Z" }],
+    [{ id: 1, created_at: "2026-10-01T00:00:00Z" }, { id: 0, created_at: "2026-09-30T00:00:00Z" }]];
+  assert.equal((await readProductionDeployments(client, FE, { environment: FE_PRODUCTION_ENVIRONMENTS, pageSize: 2, maxPages: 2 })).truncated, true,
+    "the first window alone is full");
+  windows.Production = [[{ id: 1, created_at: "2026-10-01T00:00:00Z" }]];
+  const small = await readProductionDeployments(client, FE, { environment: FE_PRODUCTION_ENVIRONMENTS, pageSize: 2, maxPages: 2 });
+  assert.deepEqual([small.deployments.map((entry) => entry.id), small.read, small.truncated], [[5, 1], 2, false]);
+  paths.length = 0;
+  await readProductionDeployments(client, FE, { environment: "Production", pageSize: 2, maxPages: 2 });
+  assert.equal(paths.length, 1);
+  // an invalid list is refused before any read; an unreadable second window stops the whole read
+  for (const environment of [[], ["Production", "Production"], ["Production", ""], [" Production"]]) {
+    await assert.rejects(() => readProductionDeployments(client, FE, { environment }), /environment is required/u);
+  }
+  const notList = { request: async (path) => (path.includes("%E2%80%93") ? { message: "weird" } : []) };
+  await assert.rejects(() => readProductionDeployments(notList, FE, { environment: FE_PRODUCTION_ENVIRONMENTS }),
+    (error) => error.code === "PRODUCTION_EVIDENCE_UNREADABLE" && error.message.includes('for environment "Production \u2013 chipin-frontend" is not a list'));
+  const broken = { request: async (path) => { if (path.includes("%E2%80%93")) throw new Error("GET x -> 502"); return []; } };
+  await assert.rejects(() => readProductionDeployments(broken, FE, { environment: FE_PRODUCTION_ENVIRONMENTS }),
+    (error) => error.code === "PRODUCTION_EVIDENCE_UNREADABLE");
 });
 
 test("deployment-receipt: read errors fail closed (run blocked before any write, or the one Issue left open)", async () => {
@@ -1865,6 +2036,22 @@ test("backend: a full page of jobs cannot prove the receipt job (run-jobs-trunca
   await untrusted("100 jobs on the page", {
     jobs: { [BE_RUN]: { total_count: 100, jobs: [...filler, ...full.jobs] } },
   }, "run-jobs-truncated");
+});
+
+test("#287 backend: a verifier record with an environment list is refused before any read", async () => {
+  const registry = await backendReceiptRegistry();
+  for (const environment of [["production-receipt"], ["production-receipt", "Production"]]) {
+    const forged = {
+      ...registry,
+      repositories: registry.repositories.map((profile) => (profile.repository === BE
+        ? { ...profile, productionEvidence: { ...profile.productionEvidence, environment } } : profile)),
+    };
+    const client = beClient();
+    await assert.rejects(() => runCompletion(client, { repository: BE, registry: forged, reconcileProjectStatus: false }),
+      (error) => error instanceof CompletionBlocked && error.code === "PRODUCTION_EVIDENCE_UNDECLARED"
+        && /verifier workflow-run needs a single productionEvidence\.environment name, not a list/u.test(error.message), JSON.stringify(environment));
+    assert.deepEqual(client.log, []);
+  }
 });
 
 test("backend: a verifier record without its workflow-run keys is refused before any read", async () => {

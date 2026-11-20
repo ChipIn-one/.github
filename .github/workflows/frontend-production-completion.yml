@@ -4,7 +4,8 @@
 # Since .github#217 the record says `completion: deployment-receipt`, `capabilities.completion: automatic` and
 # `completionRunner: org-sweep`: by owner decision (2026-10-22) chipin-frontend has no completion caller of its own, so
 # this run is the only FE completion writer. It closes an Issue once every linked PR's merge commit is in a valid
-# Vercel `Production` receipt (written by vercel[bot] at Promote to Production) and moves Todo / In Progress to
+# Vercel `Production` or `Production – chipin-frontend` receipt (registry names, .github#287; written by vercel[bot]
+# at Promote to Production) and moves Todo / In Progress to
 # `Awaiting release` for merged but not yet promoted work (the repository GITHUB_TOKEN cannot write the org Project).
 # Latency (.github#228): within minutes of the Promote when chipin-frontend forwards its successful vercel[bot]
 # Production deployment as repository_dispatch `frontend-production-deployed` (chipin-frontend#559); otherwise on the
@@ -15,7 +16,8 @@
 # a green no-op (harmless while the record is automatic). Rollback to the dev/main record needs no change here.
 # Runs only trusted master code: pushes to master, the schedule and repository_dispatch, which GitHub always runs from
 # the default branch; there is no branch-selectable workflow_dispatch. The dispatch payload (deployment id, SHA) is only
-# a hint and is never read: the engine re-reads the Vercel Production receipt itself, so a forged dispatch can at most
+# a hint and is never read: the engine re-reads the Vercel `Production` / `Production – chipin-frontend` receipt itself
+# (registry names, .github#287), so a forged dispatch can at most
 # start an ordinary sweep run.
 name: Frontend production completion
 
