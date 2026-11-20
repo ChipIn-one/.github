@@ -9,6 +9,10 @@
 #
 # `completion: deployment-receipt` also needs `productionEvidence: { environment: <name>, creator: "<login>" }`
 # (quote a `[bot]` login inside a flow mapping) and `deploymentProfile: production`; no other strategy may carry it.
+# `environment` is one exact Deployment environment name or a list of exact names, e.g. `[Production, "Production – app"]`
+# (Vercel names it per project with an EN DASH, U+2013; .github#287). Names match by exact string equality only: no
+# prefix, case or dash normalization, so another project's `Production – <site>` never counts. With
+# `verifier: workflow-run` it stays a single name.
 # `completionRunner` (optional, default `repository`): `org-sweep` means the engine runs only from an org sweep workflow
 # in this repository (no completion caller in the target repository); it needs `capabilities.completion: automatic`.
 schemaVersion: 1
@@ -24,7 +28,7 @@ repositories:
     branches: { default: master, integration: master }   # canonical master, no promotion branch (chipin-frontend#497)
     deploymentProfile: production      # none | staging | production
     completion: deployment-receipt     # production-merge | integration-merge | deployment-receipt | manual
-    productionEvidence: { environment: Production, creator: "vercel[bot]" }
+    productionEvidence: { environment: [Production, "Production – chipin-frontend"], creator: "vercel[bot]" }   # exact names (U+2013), #287
     completionRunner: org-sweep        # repository | org-sweep; no FE caller: only .github/workflows/frontend-production-completion.yml (#217)
     protection: ruleset                # ruleset | protection | unavailable (Free + private)
     requiredChecks: [frontend-ci]

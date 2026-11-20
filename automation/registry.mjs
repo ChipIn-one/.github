@@ -277,6 +277,23 @@ function assertString(where, value, pattern) {
   }
 }
 
+// productionEvidence.environment (.github#287): one exact GitHub Deployment environment name, or a list of exact names
+// (a Vercel team with several projects names the environment per project, e.g. `Production – chipin-frontend` with
+// U+2013). Each name is non-empty, without leading or trailing whitespace; a list is non-empty and has no duplicates.
+// The engine compares names by exact string equality only: no prefix, case or dash normalization. Returned as declared
+// (string, or a frozen copy of the list), so single-name records keep their exact shape.
+function productionEvidenceEnvironment(where, value) {
+  const valid = name => typeof name === 'string' && name !== '' && name.trim() === name;
+  if (typeof value === 'string') {
+    if (!valid(value)) fail('REGISTRY_VALUE', `${where}: invalid value ${JSON.stringify(value)}`);
+    return value;
+  }
+  if (!Array.isArray(value) || value.length === 0) fail('REGISTRY_VALUE', `${where}: invalid value ${JSON.stringify(value)} (a name or a non-empty list of names)`);
+  value.forEach((name, i) => { if (!valid(name)) fail('REGISTRY_VALUE', `${where}[${i}]: invalid value ${JSON.stringify(name)}`); });
+  if (new Set(value).size !== value.length) fail('REGISTRY_VALUE', `${where}: duplicate environment name`);
+  return Object.freeze([...value]);
+}
+
 function normalizeRepository(record, index) {
   const where = `repositories[${index}]`;
   assertKeys(where, record,
@@ -300,11 +317,8 @@ function normalizeRepository(record, index) {
       fail('REGISTRY_VALUE', `${where}: completion ${PRODUCTION_EVIDENCE_STRATEGY} needs productionEvidence { environment, creator }`);
     }
     assertKeys(`${where}.productionEvidence`, record.productionEvidence, ['environment', 'creator'], WORKFLOW_RUN_EVIDENCE_KEYS);
-    const { environment, creator } = record.productionEvidence;
-    if (typeof environment !== 'string' || environment.trim() !== environment) {
-      fail('REGISTRY_VALUE', `${where}.productionEvidence.environment: invalid value ${JSON.stringify(environment)}`);
-    }
-    assertString(`${where}.productionEvidence.environment`, environment);
+    const { creator } = record.productionEvidence;
+    const environment = productionEvidenceEnvironment(`${where}.productionEvidence.environment`, record.productionEvidence.environment);
     assertString(`${where}.productionEvidence.creator`, creator, DEPLOYMENT_CREATOR);
     if (record.deploymentProfile !== 'production') {
       fail('REGISTRY_VALUE', `${where}: completion ${PRODUCTION_EVIDENCE_STRATEGY} needs deploymentProfile production`);
@@ -315,6 +329,10 @@ function normalizeRepository(record, index) {
       const { task, verifier, workflow, branch, job } = record.productionEvidence;
       if (!Object.hasOwn(record.productionEvidence, 'verifier')) {
         fail('REGISTRY_VALUE', `${where}.productionEvidence: ${runKeys.join(', ')} need verifier ${PRODUCTION_EVIDENCE_VERIFIERS.join(' | ')}`);
+      }
+      // the workflow-run verifier counts only the latest receipt of one environment (.github#287): no list
+      if (Array.isArray(environment)) {
+        fail('REGISTRY_VALUE', `${where}.productionEvidence.environment: verifier ${verifier} needs a single environment name, not a list`);
       }
       assertEnum(`${where}.productionEvidence.verifier`, verifier, PRODUCTION_EVIDENCE_VERIFIERS);
       for (const key of WORKFLOW_RUN_EVIDENCE_KEYS) {

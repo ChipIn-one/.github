@@ -1,5 +1,6 @@
 # Caller template for repositories with completion: deployment-receipt
-# (registry: `completion: deployment-receipt` + `productionEvidence: { environment, creator }`). Required when the record
+# (registry: `completion: deployment-receipt` + `productionEvidence: { environment, creator }`, environment one exact name
+# or a list of exact names). Required when the record
 # has the default `completionRunner: repository`; optional with `completionRunner: org-sweep`, for a repository that
 # wants the Issue closed right at the receipt instead of at the next org sweep run
 # (minutes later with a forwarded Production dispatch, otherwise hours: the schedule is throttled, .github#228).
@@ -37,7 +38,10 @@ concurrency:
   cancel-in-progress: false
 jobs:
   completion:
-    # productionEvidence.environment from workflow-registry.yaml
+    # productionEvidence.environment from workflow-registry.yaml. For a list of names, compare each one in full, e.g.
+    # (github.event.deployment.environment == 'Production' || github.event.deployment.environment == 'Production – chipin-frontend')
+    # (EN DASH U+2013); never a prefix or contains(). This `if:` is only a coarse trigger filter (Actions `==` is
+    # case-insensitive); the exact check is the engine's, which re-validates every receipt by exact string equality.
     if: >-
       github.repository_owner == 'ChipIn-one' &&
       (github.event_name != 'deployment_status' ||
