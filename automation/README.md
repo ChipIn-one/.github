@@ -28,6 +28,42 @@ Validate locally with `node automation/registry.mjs --validate`; `automation-tes
 
 `completion.mjs` is the single completion engine: it reads the registry record, runs only when `capabilities.completion: automatic`, and picks the strategy from `completion`. `production-merge` (frontend) delegates unchanged to `frontend-production-completion.mjs`; `integration-merge` (`.github`, knowledge base) closes an Issue once every Development-linked same-repository PR (base and `headRepository`) is merged into `branches.integration` and its merge commit is still in that branch head. Both share the fail-closed gates (native Development link read from `closedByPullRequestsReferences`, merged PR evidence, no open blockers or incomplete sub-issues, no scope change after the last merge, stale-snapshot check); `integration-merge` additionally fails closed when `sub_issues_summary.total` does not match the listed sub-issues and counts any reopen after the last merge as a scope change. `deployment-receipt` (.github#212) runs every `integration-merge` gate and then requires each linked PR's merge commit to be contained in a valid production receipt: a GitHub Deployment of the registry `productionEvidence` environment (one exact name or a list of exact names, matched by exact string equality, #287) and creator, newest status `success`, SHA on the integration branch; merged but not yet received gives `awaiting-production`. The only mutation is `state=closed`, `state_reason=completed`. `manual` does not run (an org sweep with `CHIPIN_COMPLETION_SKIP_MANUAL=1` gets a green `skipped` receipt instead). The frontend record (`deployment-receipt` on canonical `master` since .github#216) is `automatic` with `completionRunner: org-sweep` since .github#217: no FE caller, the org sweep is its only runner; `production-merge` and `frontend-production-completion.mjs` stay for the dev/main rollback record only. Writes need `CHIPIN_COMPLETION_WRITE=1`; `CHIPIN_COMPLETION_PROJECT_RECONCILE=0` keeps repository-local runs away from Project #5; `CHIPIN_COMPLETION_AWAITING_RELEASE=1` (production-merge or deployment-receipt with Project reconciliation on) moves `Todo`/`In Progress` to `Awaiting release` for `awaiting-production` Issues, used by the org workflow `.github/workflows/frontend-production-completion.yml`, which runs `completion.mjs --repository ChipIn-one/chipin-frontend`. `completion-action/` wraps it for repository-local callers (`templates/caller-completion-integration.yml`, knowledge base, repository token: blockers in other private repositories are invisible to it; `templates/caller-completion-deployment-receipt.yml`, `deployment_status` + push, input `awaiting-release: "true"` with an org token that writes Project #5); `.github` runs it through `.github/workflows/integration-completion.yml` with the org write PAT `CHIPIN_ISSUE_WRITE_TOKEN` (as `CHIPIN_CANONICAL_WRITE_TOKEN`, workflow `permissions: contents: read`, Project #5 repair on). GitHub's native "Auto-close issues with merged linked pull requests" must be disabled by the owner in every `integration-merge` repository, otherwise GitHub closes linked Issues on merge without these gates. The `.github` development-link caller lands with the org pin bump after the first tag containing #179. See [docs/workflow/completion.md](../docs/workflow/completion.md).
 
+## Slack notification
+
+`slack-notify.mjs` posts one message to a Slack Incoming Webhook; `slack-notify-action/` wraps it as the shared composite action for every repository (.github#276). The action runs `slack-notify-cli.mjs`; `slack-notify.mjs` itself has no side effects on import.
+
+Inputs:
+
+- `webhook-url` (optional, default empty): the Incoming Webhook URL. It must come from `secrets.*`: a `vars.*` or literal value is printed in the step log (the `with:` header) before the action can mask it. Empty means `skipped`.
+- `text` (required): Slack mrkdwn built by the caller; it is also the fallback text when `blocks` is set.
+- `blocks` (optional, default empty): Block Kit blocks as a JSON array string. Invalid JSON or a non-array is `failed`.
+- `timeout-seconds` (optional, default `10`, capped at 60): one deadline for the request, the headers and the body read.
+
+Output `result`: `sent`, `skipped` (no webhook) or `failed` (webhook not `https://hooks.slack.com/...`, invalid input, timeout, network error or non-2xx answer). It is empty only when the runner's `$GITHUB_OUTPUT` file cannot be written.
+
+Contract: a notification never fails the caller job. Every outcome exits 0; `failed` also writes a `::warning::` line, and if the notifier cannot start at all the step still writes `result=failed`. The webhook URL is masked with `::add-mask::` before the request and is never printed otherwise, not even when it is rejected. A non-2xx answer reports the status code and at most a short sanitized snippet of the body.
+
+Escaping is the caller's job: pass external values (PR titles, branch names, commit messages) through `env:`, never `${{ }}` inside `run:`, and escape `&`, `<` and `>` (Slack rules) before they go into `text`. JavaScript callers may import `escapeMrkdwn` from `slack-notify.mjs`; anything equivalent is fine. Use a random heredoc delimiter when writing multi-line values to `$GITHUB_OUTPUT`. Pin the action by full commit SHA:
+
+```yaml
+- name: Build the message
+  id: message
+  env:
+    PR_TITLE: ${{ github.event.pull_request.title }}
+  run: |
+    set -euo pipefail
+    title="$(printf '%s' "$PR_TITLE" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
+    delimiter="EOF_$(openssl rand -hex 8)"
+    { echo "text<<$delimiter"; echo "Merged: $title"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
+- name: Notify Slack
+  uses: ChipIn-one/.github/automation/slack-notify-action@<full-commit-sha> # vX.Y.Z
+  with:
+    webhook-url: ${{ secrets.SLACK_WEBHOOK_RELEASES }}
+    text: ${{ steps.message.outputs.text }}
+```
+
+Tests: `slack-notify.test.mjs` (injected fetch, no network; includes the action step's fallback).
+
 ## Issue intake
 
 `issue-intake.mjs` provides one bounded create/finalize and reconcile path for new ChipIn issues. It reuses active schema IDs and shared Project/Issue readers from `github-metadata.mjs`; migration #117 is historical only.
