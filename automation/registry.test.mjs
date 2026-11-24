@@ -81,7 +81,8 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
     repository: FE, kind: 'code', visibility: 'public', owner: 'syllik',
     branches: { default: 'master', integration: 'master', promotion: null },
     deploymentProfile: 'production', completion: 'deployment-receipt', completionRunner: 'org-sweep',
-    productionEvidence: { environment: 'Production', creator: 'vercel[bot]' }, protection: 'ruleset',
+    // .github#287: exact names, the old `Production` and the per-project one with U+2013
+    productionEvidence: { environment: ['Production', 'Production \u2013 chipin-frontend'], creator: 'vercel[bot]' }, protection: 'ruleset',
     requiredChecks: ['frontend-ci'],
     release: { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v' },
     capabilities: { admission: 'required', developmentLink: 'required', prMetadata: 'required',
@@ -240,6 +241,29 @@ test('deployment-receipt with verifier workflow-run declares task, workflow, bra
   // `job` is the display name the jobs API reports, so a `name:` with spaces is valid
   assert.equal(validateRegistry(document([record({ ...RECEIPT, productionEvidence: { ...RUN_EVIDENCE, job: 'deploy / deploy' } })]))
     .repositories[0].productionEvidence.job, 'deploy / deploy');
+});
+
+test('#287 productionEvidence.environment: a list of exact names is valid; empty, duplicate, non-string or padded is not', () => {
+  const names = ['Production', 'Production \u2013 chipin-frontend'];
+  const [profile] = validateRegistry(document([record({ ...RECEIPT, productionEvidence: { environment: names, creator: 'vercel[bot]' } })])).repositories;
+  assert.deepEqual(profile.productionEvidence, { environment: names, creator: 'vercel[bot]' });
+  assert.throws(() => { profile.productionEvidence.environment.push('Preview'); }, TypeError, 'the list is frozen');
+  // a one-name list is a list; a single string keeps its exact shape for every other record
+  assert.deepEqual(validateRegistry(document([record({ ...RECEIPT, productionEvidence: { environment: ['Production'], creator: 'vercel[bot]' } })]))
+    .repositories[0].productionEvidence.environment, ['Production']);
+  assert.equal(validateRegistry(document([record(RECEIPT)])).repositories[0].productionEvidence.environment, 'Production');
+  // the YAML subset reads the live line: a flow sequence inside the flow mapping, the EN DASH name quoted
+  assert.deepEqual(parseYamlSubset('productionEvidence: { environment: [Production, "Production \u2013 chipin-frontend"], creator: "vercel[bot]" }'),
+    { productionEvidence: { environment: names, creator: 'vercel[bot]' } });
+  for (const environment of [
+    [], ['Production', 'Production'], ['Production', 7], ['Production', null], ['Production', ['Preview']], ['Production', ''],
+    ['Production', ' Production \u2013 chipin-frontend'], ['Production \u2013 chipin-frontend '], ['Production', '\tProduction'], {}, null,
+  ]) {
+    rejects(() => validateRegistry(document([record({ ...RECEIPT, productionEvidence: { environment, creator: 'vercel[bot]' } })])), 'REGISTRY_VALUE');
+  }
+  // the workflow-run verifier counts the latest receipt of one environment: it keeps a single name, never a list
+  rejects(() => validateRegistry(document([record({ ...RECEIPT, productionEvidence: { ...RUN_EVIDENCE, environment: ['production-receipt'] } })])), 'REGISTRY_VALUE');
+  rejects(() => validateRegistry(document([record({ ...RECEIPT, productionEvidence: { ...RUN_EVIDENCE, environment: ['production-receipt', 'Production'] } })])), 'REGISTRY_VALUE');
 });
 
 test('completionRunner: repository by default, org-sweep only for an automatic code or docs record (.github#217)', () => {

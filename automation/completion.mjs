@@ -10,8 +10,9 @@
 //                        from the branch head;
 //   deployment-receipt — every integration-merge gate, plus (.github#212) every linked PR's merge commit is
 //                        contained in a valid production receipt: a GitHub Deployment of the registry
-//                        `productionEvidence` environment and creator whose newest status is `success` and whose
-//                        SHA is on the integration branch. Merged but not yet received -> `awaiting-production`.
+//                        `productionEvidence` environment (one exact name or a list of exact names, .github#287)
+//                        and creator whose newest status is `success` and whose SHA is on the integration branch.
+//                        Merged but not yet received -> `awaiting-production`.
 //                        With `productionEvidence.verifier: workflow-run` (chipin-backend#184) the receipt is
 //                        written by our own workflow, so it is also proven against its workflow run, and only
 //                        the latest receipt counts (what runs in production); an untrusted latest receipt leaves
@@ -746,44 +747,80 @@ const newestFirst = (left, right) => (Date.parse(right.created_at ?? "") || 0) -
   || (Number(right.id) || 0) - (Number(left.id) || 0);
 
 /**
- * Read the newest Deployments of `environment` (newest first, bounded pagination). Any read error or a page that
- * is not a list stops the run (PRODUCTION_EVIDENCE_UNREADABLE) before anything is evaluated or written.
- * Returns `{ deployments, read, truncated }`; `truncated` means the window was full, so older records may exist.
+ * The exact environment names of `productionEvidence.environment` (.github#287): a non-empty string, or a non-empty
+ * list of distinct non-empty strings, each without leading or trailing whitespace. Anything else is `[]`, which
+ * matches no Deployment (fail closed). Callers compare with `names.includes(value)`: exact string equality, no prefix,
+ * case or dash normalization (`Production – chipin-site` never matches `Production – chipin-frontend`).
+ */
+export function productionEnvironments(environment) {
+  const valid = (name) => typeof name === "string" && name !== "" && name.trim() === name;
+  if (typeof environment === "string") return valid(environment) ? [environment] : [];
+  if (!Array.isArray(environment) || environment.length === 0 || !environment.every(valid)) return [];
+  return new Set(environment).size === environment.length ? [...environment] : [];
+}
+
+const describeEnvironments = (environment) => productionEnvironments(environment).join(" or ");
+
+/**
+ * Read the newest Deployments of `environment` (newest first, bounded pagination). `environment` is one exact name
+ * or a list of exact names (.github#287): each name is read separately (`?environment=<name>`, its own window of at
+ * most `pageSize * maxPages`), and the windows are merged newest first (created_at, then id) without duplicate ids.
+ * Any read error or a page that is not a list stops the run (PRODUCTION_EVIDENCE_UNREADABLE) before anything is
+ * evaluated or written. Returns `{ deployments, read, truncated }`; `read` counts every record read, `truncated` means
+ * at least one window was full, so older records of that name may exist (they are not evidence).
  */
 export async function readProductionDeployments(client, repository, {
   environment,
   pageSize = RECEIPT_PAGE_SIZE,
   maxPages = RECEIPT_MAX_PAGES,
 } = {}) {
-  if (typeof environment !== "string" || !environment) throw new Error("environment is required");
+  const environments = productionEnvironments(environment);
+  if (environments.length === 0) throw new Error("environment is required");
   const { owner, repo } = splitRepository(repository);
   const deployments = [];
-  let truncated = true;
-  for (let page = 1; page <= maxPages; page += 1) {
-    let batch;
-    try {
-      batch = await client.request("/repos/" + owner + "/" + repo + "/deployments?environment="
-        + encodeURIComponent(environment) + "&per_page=" + pageSize + "&page=" + page);
-    } catch (error) {
-      throw blocked("PRODUCTION_EVIDENCE_UNREADABLE", "Deployments of " + repository + " are unreadable: "
-        + (error instanceof Error ? error.message : String(error)));
+  let read = 0;
+  let truncated = false;
+  for (const name of environments) {
+    let full = true;
+    for (let page = 1; page <= maxPages; page += 1) {
+      let batch;
+      try {
+        batch = await client.request("/repos/" + owner + "/" + repo + "/deployments?environment="
+          + encodeURIComponent(name) + "&per_page=" + pageSize + "&page=" + page);
+      } catch (error) {
+        throw blocked("PRODUCTION_EVIDENCE_UNREADABLE", "Deployments of " + repository + " are unreadable: "
+          + (error instanceof Error ? error.message : String(error)));
+      }
+      if (!Array.isArray(batch)) {
+        throw blocked("PRODUCTION_EVIDENCE_UNREADABLE", "Deployments page " + page + " of " + repository
+          + " for environment " + JSON.stringify(name) + " is not a list");
+      }
+      deployments.push(...batch);
+      read += batch.length;
+      if (batch.length < pageSize) {
+        full = false;
+        break;
+      }
     }
-    if (!Array.isArray(batch)) {
-      throw blocked("PRODUCTION_EVIDENCE_UNREADABLE", "Deployments page " + page + " of " + repository + " is not a list");
-    }
-    deployments.push(...batch);
-    if (batch.length < pageSize) {
-      truncated = false;
-      break;
-    }
+    truncated ||= full;
   }
-  return { deployments: [...deployments].sort(newestFirst), read: deployments.length, truncated };
+  // one record per deployment id (the first one read); records without a readable id are kept and fail validation
+  const seen = new Set();
+  const unique = deployments.filter((deployment) => {
+    const id = deployment?.id;
+    if (!Number.isInteger(id)) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  return { deployments: unique.sort(newestFirst), read, truncated };
 }
 
 /**
- * Validate one Deployment as a production receipt. Valid: `environment` and `creator.login` equal the registry
- * `productionEvidence`, a full SHA, the newest status is `success` written by the same creator (and, when the
- * status names an environment, the same one), and the SHA is an ancestor of or equal to the integration head
+ * Validate one Deployment as a production receipt. Valid: `environment` is one of the registry
+ * `productionEvidence.environment` names (exact string equality, productionEnvironments) and `creator.login` equals
+ * its creator, a full SHA, the newest status is `success` written by the same creator (and, when the status names an
+ * environment, one of those names), and the SHA is an ancestor of or equal to the integration head
  * (compare `sha...head` is `ahead`, or the SHAs are equal; containsCommit). A full page of statuses
  * (`statusPageSize`) is `statuses-truncated`: the newest status cannot be proven. A 404 (deployment or commit gone)
  * makes the receipt invalid; any other read error is thrown, so the Issue under evaluation fails closed.
@@ -807,8 +844,9 @@ export async function validateProductionReceipt(deployment, {
     statusCreatedAt: null,
   };
   const invalid = (reason) => ({ valid: false, reason, receipt: record });
+  const environments = productionEnvironments(environment);
   if (!Number.isInteger(record.deploymentId)) return invalid("deployment-id-unreadable");
-  if (record.environment !== environment) return invalid("environment-mismatch");
+  if (!environments.includes(record.environment)) return invalid("environment-mismatch");
   if (record.creator !== creator) return invalid("creator-mismatch");
   if (!SHA_PATTERN.test(String(record.sha ?? ""))) return invalid("sha-unreadable");
 
@@ -829,7 +867,7 @@ export async function validateProductionReceipt(deployment, {
   record.statusCreatedAt = newest.created_at ?? null;
   if (newest.state !== "success") return invalid("newest-status-" + (newest.state ?? "unknown"));
   if (newest.creator?.login !== creator) return invalid("status-creator-mismatch");
-  if (newest.environment != null && newest.environment !== environment) return invalid("status-environment-mismatch");
+  if (newest.environment != null && !environments.includes(newest.environment)) return invalid("status-environment-mismatch");
 
   let onBranch;
   try {
@@ -1177,7 +1215,8 @@ export async function runDeploymentReceiptCompletionSweep(client, profile, {
   const repository = profile.repository;
   const integrationBranch = profile.branches.integration;
   const { environment, creator } = profile.productionEvidence ?? {};
-  if (typeof environment !== "string" || !environment || typeof creator !== "string" || !creator) {
+  const environments = productionEnvironments(environment);
+  if (environments.length === 0 || typeof creator !== "string" || !creator) {
     throw blocked("PRODUCTION_EVIDENCE_UNDECLARED", profile.repository
       + " has completion deployment-receipt without productionEvidence { environment, creator } in workflow-registry.yaml.");
   }
@@ -1190,10 +1229,15 @@ export async function runDeploymentReceiptCompletionSweep(client, profile, {
     throw blocked("PRODUCTION_EVIDENCE_UNDECLARED", profile.repository
       + " declares productionEvidence.verifier without verifier workflow-run { task, workflow, branch, job } in workflow-registry.yaml.");
   }
+  // the workflow-run verifier counts only the latest receipt of one environment: a list is refused (.github#287)
+  if (workflowRun && typeof environment !== "string") {
+    throw blocked("PRODUCTION_EVIDENCE_UNDECLARED", profile.repository
+      + ": verifier workflow-run needs a single productionEvidence.environment name, not a list (workflow-registry.yaml).");
+  }
   const { owner, repo } = splitRepository(repository);
   const deploymentWindow = await readProductionDeployments(client, repository, { environment, pageSize, maxPages });
   const candidates = deploymentWindow.deployments.filter((deployment) => (
-    deployment?.environment === environment && deployment?.creator?.login === creator
+    environments.includes(deployment?.environment) && deployment?.creator?.login === creator
     && (!workflowRun || deployment?.task === evidence.task)
   ));
   const readStatuses = (deploymentId) => client.request("/repos/" + owner + "/" + repo + "/deployments/"
@@ -1369,7 +1413,7 @@ export async function runCompletion(client, {
 
 function formatProductionEvidence(evidence) {
   const valid = (evidence.checked ?? []).filter((row) => row.valid);
-  return "- Production evidence: " + evidence.environment + " by " + evidence.creator + "; "
+  return "- Production evidence: " + describeEnvironments(evidence.environment) + " by " + evidence.creator + "; "
     + evidence.deploymentsRead + " deployment(s) read" + (evidence.truncated ? " (window full, older ones ignored)" : "")
     + ", " + (evidence.checked ?? []).length + " checked, valid receipts: "
     + (valid.length > 0

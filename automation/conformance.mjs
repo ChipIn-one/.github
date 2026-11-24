@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { GitHubClient, projectReadBudget, readProjectItemsPage } from './github-metadata.mjs';
 import { getRepositoryProfile, loadRegistry, parseYamlSubset } from './registry.mjs';
 import { ReleaseBlocked, githubStore, planRelease, sortedVersionTags } from './release.mjs';
-import { RECEIPT_STATUS_PAGE_SIZE, createReceiptResolver, readBranchHead, readProductionDeployments, validateProductionReceipt } from './completion.mjs';
+import { RECEIPT_STATUS_PAGE_SIZE, createReceiptResolver, productionEnvironments, readBranchHead, readProductionDeployments, validateProductionReceipt } from './completion.mjs';
 import { compareContainsCommit, readProductionReleases } from './frontend-production-completion.mjs';
 import { INTEGRATION_BRANCH as FRONTEND_INTEGRATION_BRANCH, PRODUCTION_BRANCH as FRONTEND_PRODUCTION_BRANCH } from './frontend-production-completion-policy.mjs';
 
@@ -918,7 +918,8 @@ export class GitHubConformanceSource {
   // Production SHA of a versioned record (checkProductionRelease). semver-by-impact: the release branch head.
   // deploy-tag: the Deployments of productionEvidence (frontend) or else release.productionSource (backend: the
   // production-receipt of record-receipt); neither declared is RELEASE_PRODUCTION_UNVERIFIABLE, never a guess. The
-  // newest 100 (readProductionDeployments) are filtered by environment, creator and task. A receipt source
+  // newest 100 per environment name (readProductionDeployments; a productionEvidence list of exact names, .github#287,
+  // is read name by name and merged newest first) are filtered by exact environment name, creator and task. A receipt source
   // (productionSource, or productionEvidence with a verifier) uses its newest receipt only, as the release caller and
   // the engine do. Otherwise the newest PRODUCTION_STATUS_LOOKAHEAD candidates (more only while none succeeded) are
   // ordered by the time of their newest `success` status (a Vercel redeploy or rollback re-posts success on an older
@@ -936,9 +937,10 @@ export class GitHubConformanceSource {
     if (!declared) throw unverifiable(`${repository} declares neither productionEvidence nor release.productionSource, so the production SHA is unknown`, 'undeclared');
     const receiptOnly = !profile.productionEvidence || Boolean(profile.productionEvidence.verifier);
     const { environment, creator, task } = declared;
+    const environments = productionEnvironments(environment);
     const integrationHeadSha = await readBranchHead(this.client, repository, profile.branches.integration);
     const window = await readProductionDeployments(this.client, repository, { environment });
-    const candidates = window.deployments.filter(d => d?.environment === environment && d?.creator?.login === creator && (!task || d?.task === task));
+    const candidates = window.deployments.filter(d => environments.includes(d?.environment) && d?.creator?.login === creator && (!task || d?.task === task));
     const statuses = new Map();
     const readStatuses = id => {
       if (!statuses.has(id)) statuses.set(id, this.client.request(`/repos/${repository}/deployments/${id}/statuses?per_page=${RECEIPT_STATUS_PAGE_SIZE}`));
@@ -957,7 +959,7 @@ export class GitHubConformanceSource {
       if (status?.state !== 'success') continue;
       if (!chosen || Date.parse(status.created_at ?? '') > Date.parse(chosen.status.created_at ?? '')) chosen = { deployment, status };
     }
-    const what = `${environment} deployment${receiptOnly ? ' (newest receipt only)' : ''} by ${creator}${task ? ` with task ${task}` : ''}`;
+    const what = `${environments.join(' or ')} deployment${receiptOnly ? ' (newest receipt only)' : ''} by ${creator}${task ? ` with task ${task}` : ''}`;
     if (!chosen) throw unverifiable(`no ${what} with a success status among the newest ${window.read} deployment(s) of ${repository}`);
     const verdict = await validateProductionReceipt(chosen.deployment, {
       environment, creator, integrationHeadSha, readStatuses,
@@ -966,7 +968,7 @@ export class GitHubConformanceSource {
     if (['deployment-id-unreadable', 'sha-unreadable', 'deployment-not-found', 'statuses-truncated'].includes(verdict.reason)) {
       throw unverifiable(`the newest successful ${what} (${chosen.deployment?.id}) is unreadable: ${verdict.reason}`);
     }
-    const state = { sha: chosen.deployment.sha, label: `${environment} deployment ${chosen.deployment.id}`, successAt: chosen.status.created_at ?? null };
+    const state = { sha: chosen.deployment.sha, label: `${chosen.deployment.environment} deployment ${chosen.deployment.id}`, successAt: chosen.status.created_at ?? null };
     return verdict.valid ? state : { ...state, untrusted: verdict.reason };
   }
   // the release engine's own plan for the production SHA (read-only)
@@ -1084,20 +1086,22 @@ export class GitHubConformanceSource {
       };
     }
     const { environment, creator } = profile.productionEvidence ?? {};
-    if (!environment || !creator) throw new Error(`${repository} has no productionEvidence in the registry`);
+    const environments = productionEnvironments(environment);
+    if (!environments.length || !creator) throw new Error(`${repository} has no productionEvidence in the registry`);
     const integrationHeadSha = await readBranchHead(this.client, repository, profile.branches.integration);
     const window = await readProductionDeployments(this.client, repository, { environment });
+    const named = environments.join(' or ');
     const resolver = createReceiptResolver({
-      deployments: window.deployments.filter(d => d?.environment === environment && d?.creator?.login === creator),
+      deployments: window.deployments.filter(d => environments.includes(d?.environment) && d?.creator?.login === creator),
       environment, creator, integrationHeadSha, containsCommit,
       readStatuses: id => this.client.request(`/repos/${repository}/deployments/${id}/statuses?per_page=${RECEIPT_STATUS_PAGE_SIZE}`),
     });
     return {
-      label: `a valid ${environment} receipt by ${creator}`,
+      label: `a valid ${named} receipt by ${creator}`,
       contains: async ({ mergeCommitSha }) => {
         if (await resolver.findReceipt(mergeCommitSha)) return true;
         if (!(await resolver.checked()).some(row => row.valid)) {
-          throw Object.assign(new Error(`no valid ${environment} receipt by ${creator} among the newest ${window.read} deployment(s) of ${repository}`), { code: EVIDENCE_UNVERIFIABLE });
+          throw Object.assign(new Error(`no valid ${named} receipt by ${creator} among the newest ${window.read} deployment(s) of ${repository}`), { code: EVIDENCE_UNVERIFIABLE });
         }
         return false;
       },
