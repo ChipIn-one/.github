@@ -58,7 +58,7 @@ Escaping is the caller's job: pass external values (PR titles, branch names, com
 - name: Notify Slack
   uses: ChipIn-one/.github/automation/slack-notify-action@<full-commit-sha> # vX.Y.Z
   with:
-    webhook-url: ${{ secrets.SLACK_WEBHOOK_RELEASES }}
+    webhook-url: ${{ secrets.SLACK_WEBHOOK_CI }}
     text: ${{ steps.message.outputs.text }}
 ```
 

@@ -25,29 +25,43 @@ These were taken on 2026-10-20 in `chipin-notifications`. Only the parts that st
 
 The 2026-11-14 decision above supersedes D21 where the two differ: the Slack logic now lives in one shared action in this repository, not in inline workflow code.
 
+## Channels
+
+Owner decision, 2026-11-25: releases and CI never share a channel.
+
+| Channel | What posts there | Secret |
+| --- | --- | --- |
+| `#ci` | red CI and failed deploys from every repository | `SLACK_WEBHOOK_CI` |
+| `#fe-releases` | frontend release QA (handoff and results) and production release announcements | `SLACK_WEBHOOK_FE_RELEASES` |
+| `#be-releases` | reserved for backend release announcements; nothing posts there yet | none yet |
+| `#ci-releases` | the GitHub Slack app feed; no workflow writes there | none |
+
+A secret name always means the same channel in every repository. A new kind of message that fits neither `#ci` nor a release channel gets a new channel, a new webhook and a new secret name.
+
 ## Events
 
 | Repository | Workflow | Event | Channel | Secret |
 | --- | --- | --- | --- | --- |
-| `chipin-frontend` | `frontend-ci.yml`, job `notify-master-failure` | `frontend-ci` fails on a push to `master` | `#chipin-ci` | `SLACK_WEBHOOK_CI` |
-| `chipin-frontend` | `prepare-release-qa.yml` | release candidate QA handoff: mentions the assigned QA, or says the owner checks, or says no QA is needed | `#chipin-ci` | `SLACK_WEBHOOK_CI` |
-| `chipin-frontend` | `release-qa-result.yml` | a QA result is posted or withdrawn on the QA Issue | `#chipin-ci` | `SLACK_WEBHOOK_CI` |
-| `chipin-frontend` | `release-on-production.yml`, job `notify` | production release announcement, rollback, or not released ([chipin-frontend#484](https://github.com/ChipIn-one/chipin-frontend/issues/484)) | `#chipin-fe-releases` | `SLACK_WEBHOOK_FE_RELEASES` |
-| `chipin-backend` | `notify-deploy-failure.yml` ([chipin-backend#312](https://github.com/ChipIn-one/chipin-backend/issues/312), in progress) | `Deploy Staging`, `Redeploy Staging` or `Deploy Production` fails or times out | `#chipin-ci` | `SLACK_WEBHOOK_CI` (repository secret) |
+| `chipin-frontend` | `frontend-ci.yml`, job `notify-master-failure` | `frontend-ci` fails on a push to `master` | `#ci` | `SLACK_WEBHOOK_CI` |
+| `chipin-frontend` | `prepare-release-qa.yml` | release candidate QA handoff: mentions the assigned QA, or says the owner checks, or says no QA is needed | `#fe-releases` | `SLACK_WEBHOOK_FE_RELEASES` |
+| `chipin-frontend` | `release-qa-result.yml` | a QA result is posted or withdrawn on the QA Issue | `#fe-releases` | `SLACK_WEBHOOK_FE_RELEASES` |
+| `chipin-frontend` | `release-on-production.yml`, job `notify` | production release announcement, rollback, or not released ([chipin-frontend#484](https://github.com/ChipIn-one/chipin-frontend/issues/484)) | `#fe-releases` | `SLACK_WEBHOOK_FE_RELEASES` |
+| `chipin-backend` | `notify-deploy-failure.yml` ([chipin-backend#312](https://github.com/ChipIn-one/chipin-backend/issues/312), in progress) | `Deploy Staging`, `Redeploy Staging` or `Deploy Production` fails or times out | `#ci` | `SLACK_WEBHOOK_CI` |
 
 There is no feed of successes. Only failures, QA handoffs and results, and production releases post.
 
 ## Secrets
 
 - Each repository stores its own webhook secret. Organization secrets are not available to private repositories on the Free plan.
-- The same webhook URL may be stored in several repositories, under the same secret name.
+- `SLACK_WEBHOOK_CI` holds the `#ci` webhook and `SLACK_WEBHOOK_FE_RELEASES` the `#fe-releases` webhook. The same URL is stored in every repository that posts to that channel, always under the same secret name.
+- A webhook URL posts to exactly one channel, so pointing a secret at another channel means storing that channel's webhook URL; the workflows do not change.
 - A missing secret means the step is skipped. It is never a failure.
 - The URL must come from `secrets.*`, never `vars.*`: variables are not secret and are not masked in logs.
 - The URL is never printed, echoed or written to a summary.
 
 ## Add a caller
 
-1. Pick the channel and the secret from the table above. A new channel needs a new webhook and a new secret name; add both to the table in the same pull request.
+1. Pick the channel and the secret from the [channels table](#channels). A new channel needs a new webhook and a new secret name; add its row to the channels table in the same pull request.
 2. Add a separate job, or at least a separate step, for the notification.
 3. Build the message text in a step that reads external values from `env:`.
 4. Escape `&`, `<` and `>` in every external value (Slack mrkdwn rules) before it goes into the text.
