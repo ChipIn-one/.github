@@ -322,8 +322,8 @@ test("automatic closing reference: read-back still fails closed and names the cl
     reconcileDevelopmentLink(client, { repository: REPOSITORY, pullRequestNumber: 10 }),
     (error) => /read-back failed/u.test(error.message)
       && /AUTOMATIC_CLOSING_REFERENCE/u.test(error.message)
-      && /Closes #7/u.test(error.message)
-      && /Remove the closing keyword/u.test(error.message),
+      && /ChipIn-one\/chipin-frontend#7/u.test(error.message)
+      && /Remove only the closing-keyword line/u.test(error.message),
   );
   assert.equal(mutationCalls(client).length, 1);
   assert.equal(automaticCalls(client).length, 1);
@@ -347,6 +347,41 @@ test("automatic reference found on a later page", async () => {
     /AUTOMATIC_CLOSING_REFERENCE/u,
   );
   assert.equal(automaticCalls(client).length, 2);
+});
+
+test("automatic reference with the same number but another id or repository gives no hint", async () => {
+  const client = makeClient({ readBackFailure: true, automaticReferencePages: [[10]] });
+  const original = client.graphql;
+  client.graphql = async (query, variables) => {
+    const data = await original(query, variables);
+    if (query.includes("query DevelopmentLinkAutomaticReference")) {
+      data.repository.issue.closedByPullRequestsReferences.nodes = [
+        { id: "PR_OTHER", number: 10, repository: { nameWithOwner: REPOSITORY } },
+        { id: "PR_10", number: 10, repository: { nameWithOwner: "ChipIn-one/chipin-backend" } },
+      ];
+    }
+    return data;
+  };
+  await assert.rejects(
+    reconcileDevelopmentLink(client, { repository: REPOSITORY, pullRequestNumber: 10 }),
+    (error) => /read-back failed/u.test(error.message) && !/AUTOMATIC_CLOSING_REFERENCE|unknown/u.test(error.message),
+  );
+});
+
+test("automatic reference pagination without a cursor is unknown", async () => {
+  const client = makeClient({ readBackFailure: true, automaticReferencePages: [[11]] });
+  const original = client.graphql;
+  client.graphql = async (query, variables) => {
+    const data = await original(query, variables);
+    if (query.includes("query DevelopmentLinkAutomaticReference")) {
+      data.repository.issue.closedByPullRequestsReferences.pageInfo = { hasNextPage: true, endCursor: null };
+    }
+    return data;
+  };
+  await assert.rejects(
+    reconcileDevelopmentLink(client, { repository: REPOSITORY, pullRequestNumber: 10 }),
+    /cause is unknown/u,
+  );
 });
 
 test("unreadable automatic references keep the fail-closed read-back error", async () => {

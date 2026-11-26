@@ -800,7 +800,7 @@ export async function reconcileDevelopmentLink(client, {
       repository, issueNumber: task.issueNumber, pullRequestId: before.pullRequest.id, pullRequestNumber: prNumber,
     });
     const cause = automatic === true
-      ? ` AUTOMATIC_CLOSING_REFERENCE: GitHub holds ${repository}#${prNumber} as an automatic closing reference of ${task.canonical} (a closing keyword such as "Closes #${task.issueNumber}" in the PR body), and no user-linked reference was created. Remove the closing keyword from the PR body (keep only the Task identity line) and re-run this check.`
+      ? ` AUTOMATIC_CLOSING_REFERENCE: GitHub holds ${repository}#${prNumber} as an automatic closing reference of ${task.canonical} (a closing keyword such as "Closes #${task.issueNumber}" in the PR body), and no user-linked reference was created. Remove only the closing-keyword line from the PR body (keep the Task identity line and the other sections) and re-run this check; the next run should then create the user-linked reference.`
       : automatic === null ? ' Automatic closing references are unreadable, so the cause is unknown.' : '';
     throw new Error(
       `Native Development link read-back failed: ${task.canonical} is not linked to ${repository}#${prNumber} through user-linked Development references.${cause}`,
