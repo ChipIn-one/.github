@@ -1863,7 +1863,7 @@ function beClient({
       }
       if ((match = /\/deployments\/(\d+)\/statuses\?per_page=100$/u.exec(path))) return answer(statuses, match[1], path);
       if ((match = /\/actions\/runs\/(\d+)$/u.exec(path))) return answer(runs, match[1], path);
-      if (path.endsWith("/actions/workflows/deploy-production.yml/runs?per_page=10")) {
+      if (path.endsWith("/actions/workflows/deploy-production.yml/runs?per_page=100")) {
         if (listedRuns instanceof Error) throw listedRuns;
         return { total_count: listedRuns.length, workflow_runs: listedRuns };
       }
@@ -2034,7 +2034,8 @@ test("backend: the cited run must be the newest successful deploy (deleted newer
   await untrusted("no run_number", { runs: { [BE_RUN]: beRun({ run_number: null }) } }, "run-number-unreadable");
   // an unreadable list is unreadable, not untrusted
   for (const newestRuns of [new Error("GET runs -> 403: Resource not accessible"), new Error("GET runs -> 404: Not Found"), [{ run_number: "x" }],
-    [beRun(), beRun({ id: 4990, run_attempt: null })], [beRun(), beRun({ id: 4990, run_attempt: 0 })]]) {
+    [beRun(), beRun({ id: 4990, run_attempt: null })], [beRun(), beRun({ id: 4990, run_attempt: 0 })],
+    [beRun(), beRun({ id: 4990, run_attempt: "2" })], [beRun({ id: 5009, run_attempt: null }), beRun()]]) {
     const flaky = beClient({ newestRuns });
     assert.equal((await beRunCompletion(flaky)).results[0].decision.code, "production-evidence-unreadable");
     assert.deepEqual(closes(flaky), []);
@@ -2049,34 +2050,43 @@ test("backend: the cited run must be the newest successful deploy (deleted newer
   }
 });
 
-test("backend: a re-run of an older deploy run after the receipt keeps Issues open (rerun-after-receipt)", async () => {
-  // receipt 700 of run 5000 is created at 10:05:00; run 4990 is older (lower run_number)
+test("backend: a re-run of an older deploy run after the cited run keeps Issues open (rerun-after-receipt)", async () => {
+  // cited run 5000 is created at 10:00:00 and writes receipt 700 at 10:05:00; run 4990 is older (lower run_number)
   const older = (overrides) => beRun({ id: 4990, created_at: "2026-10-01T10:00:00Z", ...overrides });
-  // re-run of the older run started after the receipt (it may have redeployed an older image, run_number unchanged)
+  const code = async (newestRuns) => (await beRunCompletion(beClient({ newestRuns }))).results[0].decision.code;
+  // re-run of the older run after the receipt (it may have redeployed an older image, run_number unchanged)
   await untrusted("older run re-run after the receipt", { newestRuns: [beRun(), older({
     run_attempt: 2, run_started_at: "2026-10-09T10:00:00Z", updated_at: "2026-10-09T10:06:00Z" })] }, "rerun-after-receipt");
-  // still running, or started before and completed after the receipt: it may have deployed after the receipt
-  await untrusted("older run re-run still in progress", { newestRuns: [beRun(), older({
-    run_attempt: 2, status: "in_progress", conclusion: null, run_started_at: "2026-10-08T10:04:00Z", updated_at: "2026-10-08T10:04:30Z" })] },
+  // a re-run that ended between the cited run's start and its receipt (overlap without a concurrency group)
+  await untrusted("older run re-run overlapping the cited run", { newestRuns: [beRun(), older({
+    run_attempt: 3, conclusion: "failure", run_started_at: "2026-10-08T09:59:00Z", updated_at: "2026-10-08T10:04:00Z" })] },
   "rerun-after-receipt");
-  await untrusted("older run re-run overlapping the receipt", { newestRuns: [beRun(), older({
-    run_attempt: 3, conclusion: "failure", run_started_at: "2026-10-08T10:04:00Z", updated_at: "2026-10-08T10:07:00Z" })] },
-  "rerun-after-receipt");
-  // unreadable times of a re-run fail closed
-  for (const times of [{ run_started_at: null }, { updated_at: "soon" }]) {
-    await untrusted("older re-run with unreadable times", { newestRuns: [beRun(), older({ run_attempt: 2, updated_at: "2026-10-01T10:06:00Z", ...times })] },
-      "rerun-after-receipt");
+  // any other run not completed, re-run or first attempt (queued, in progress), fails closed
+  for (const attempt of [1, 2]) {
+    await untrusted("older run still in progress (attempt " + attempt + ")", { newestRuns: [beRun(), older({
+      run_attempt: attempt, status: "in_progress", conclusion: null, updated_at: "2026-10-01T10:04:30Z" })] }, "rerun-after-receipt");
   }
-  // a re-run that completed before the receipt was created is fine
-  assert.equal((await beRunCompletion(beClient({ newestRuns: [beRun(), older({
-    run_attempt: 2, run_started_at: "2026-10-05T10:00:00Z", updated_at: "2026-10-05T10:06:00Z" })] }))).results[0].decision.code, "closed-completed");
-  // a first attempt of an older run is not a re-run, whatever its times
-  assert.equal((await beRunCompletion(beClient({ newestRuns: [beRun(), older({ run_started_at: null })] }))).results[0].decision.code,
+  // an unreadable updated_at of a re-run fails closed
+  for (const updated_at of [null, "soon"]) {
+    await untrusted("older re-run with unreadable updated_at", { newestRuns: [beRun(), older({ run_attempt: 2, updated_at })] }, "rerun-after-receipt");
+  }
+  // one blocking re-run among several fine ones blocks
+  await untrusted("one bad re-run of several", { newestRuns: [beRun(),
+    older({ run_attempt: 2, updated_at: "2026-10-05T10:06:00Z" }),
+    beRun({ id: 4980, run_attempt: 2, updated_at: "2026-10-08T10:01:00Z" })] }, "rerun-after-receipt");
+  // a re-run completed before the cited run was created is fine, also exactly at that time
+  assert.equal(await code([beRun(), older({ run_attempt: 2, run_started_at: "2026-10-05T10:00:00Z", updated_at: "2026-10-05T10:06:00Z" })]),
     "closed-completed");
-  // the cited run itself is not affected by this rule (its own re-run is judged by the run window and job evidence)
-  const citedRerun = beRun({ run_attempt: 2, run_started_at: "2026-10-08T10:00:00Z", updated_at: "2026-10-08T10:06:00Z" });
+  assert.equal(await code([beRun(), older({ run_attempt: 2, updated_at: "2026-10-08T10:00:00Z" })]), "closed-completed");
+  // a completed first attempt of an older run is not a re-run, whatever its times (concurrency queues the next dispatch)
+  assert.equal(await code([beRun(), older({ updated_at: "2026-10-08T10:01:00Z" })]), "closed-completed");
+  // the cited run itself is not affected by this rule (its own re-runs are judged by the run window, the job evidence
+  // and run-id-cited-twice)
+  const citedRerun = beRun({ run_attempt: 2 });
   assert.equal((await beRunCompletion(beClient({ runs: { [BE_RUN]: citedRerun }, newestRuns: [citedRerun] }))).results[0].decision.code,
     "closed-completed");
+  // a newer run is judged first: run-not-newest-deploy, whatever its run_attempt
+  await untrusted("newer re-run", { newestRuns: [beRun({ id: 5009, run_attempt: 2 }), beRun()] }, "run-not-newest-deploy");
 });
 
 test("backend: an injected receipt notice next to the legitimate one makes the receipt ambiguous", async () => {

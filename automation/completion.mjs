@@ -931,7 +931,7 @@ export function createReceiptResolver({ deployments, environment, creator, integ
 export const RUN_JOBS_PAGE_SIZE = 100;
 export const ANNOTATIONS_PAGE_SIZE = 100;
 // Newest runs of the registry workflow (any branch, event or status) read to prove the cited run is the newest deploy.
-export const NEWEST_DEPLOY_RUNS_PAGE_SIZE = 10;
+export const NEWEST_DEPLOY_RUNS_PAGE_SIZE = 100;
 // The record-receipt job writes exactly this notice (core.notice), which GitHub stores as a check-run annotation of
 // that job. Job outputs and the step summary are not readable through the REST API; the annotation is. It is not
 // unforgeable: any workflow of the repository with `checks: write` can append annotations to an Actions check run.
@@ -971,9 +971,9 @@ export function receiptRunId(deployment) {
  *   re-run was cancelled), and a deleted newer receipt or a re-run of an older run's receipt job would otherwise
  *   make an older deploy look current. Fail closed: any newer run, even one that wrote no receipt, makes the
  *   receipt invalid;
- * - no other listed run of that workflow is a re-run (run_attempt > 1) that started, was still running or completed
- *   after the receipt was created (`rerun-after-receipt`): a re-run keeps its run_number and may have redeployed an
- *   older image. Only the listed (newest NEWEST_DEPLOY_RUNS_PAGE_SIZE) runs are seen;
+ * - every other listed run of that workflow is completed, and every other re-run (run_attempt > 1) completed before
+ *   the cited run was created (`rerun-after-receipt`): a re-run keeps its run_number and may have redeployed an older
+ *   image. Only the listed (newest NEWEST_DEPLOY_RUNS_PAGE_SIZE) runs are seen;
  * - the run's successful `job` jobs (all attempts, one page) carry, among all their annotations, exactly one receipt
  *   notice, and it names this deployment id and SHA; that job's window (started_at .. completed_at) contains the
  *   Deployment's created_at;
@@ -1033,21 +1033,23 @@ export async function verifyWorkflowRunReceipt(deployment, verdict, {
   if (newest.workflow_runs.some((other) => !Number.isSafeInteger(other?.run_number))) {
     throw new Error("Runs of " + evidence.workflow + " carry an unreadable run_number");
   }
-  if (newest.workflow_runs.some((other) => other.run_number > run.run_number)) return invalid("run-not-newest-deploy");
   if (newest.workflow_runs.some((other) => !Number.isSafeInteger(other?.run_attempt) || other.run_attempt < 1)) {
     throw new Error("Runs of " + evidence.workflow + " carry an unreadable run_attempt");
   }
-  // A re-run keeps its run_number, so an older run re-run after the receipt may have redeployed an older image
-  // without a newer run_number (chipin-backend#184: the deploy workflow has no re-run guard). Any other listed run
-  // with run_attempt > 1 must have completed before the receipt was created; unreadable times fail closed.
-  const receiptTime = Date.parse(record.createdAt ?? "");
-  const rerunAfterReceipt = (other) => {
-    if (String(other.id) === runId || other.run_attempt === 1) return false;
-    const [started, updated] = [Date.parse(other.run_started_at ?? ""), Date.parse(other.updated_at ?? "")];
-    return other.status !== "completed" || !Number.isFinite(started) || !Number.isFinite(updated)
-      || !Number.isFinite(receiptTime) || started > receiptTime || updated > receiptTime;
+  if (newest.workflow_runs.some((other) => other.run_number > run.run_number)) return invalid("run-not-newest-deploy");
+  // A re-run keeps its run_number, so the check above cannot see an older run re-run later: it may have redeployed an
+  // older image (chipin-backend#184: the deploy workflow has no re-run guard). Fail closed on any other listed run
+  // that is not completed, and on any other re-run (run_attempt > 1) that was still running when the cited run was
+  // created or later. This does not rely on the deploy workflow's concurrency group; unreadable times fail closed.
+  const citedCreated = Date.parse(run.created_at ?? "");
+  const rerunAfterCited = (other) => {
+    if (String(other.id) === runId) return false;
+    if (other.status !== "completed") return true;
+    if (other.run_attempt === 1) return false;
+    const updated = Date.parse(other.updated_at ?? "");
+    return !Number.isFinite(updated) || !Number.isFinite(citedCreated) || updated > citedCreated;
   };
-  if (newest.workflow_runs.some(rerunAfterReceipt)) return invalid("rerun-after-receipt");
+  if (newest.workflow_runs.some(rerunAfterCited)) return invalid("rerun-after-receipt");
 
   const jobsPage = await readRunJobs(runId);
   const jobs = jobsPage?.jobs;
