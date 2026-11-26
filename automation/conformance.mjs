@@ -923,7 +923,7 @@ export class GitHubConformanceSource {
     return data.status;
   }
   // Production SHA of a versioned record (checkProductionRelease). semver-by-impact: the release branch head.
-  // deploy-tag: the Deployments of productionEvidence (frontend) or else release.productionSource (backend: the
+  // deploy-tag: the Deployments of productionEvidence (frontend; backend with verifier workflow-run) or else release.productionSource (a record without it: the
   // production-receipt of record-receipt); neither declared is RELEASE_PRODUCTION_UNVERIFIABLE, never a guess. The
   // newest 100 per environment name (readProductionDeployments; a productionEvidence list of exact names, .github#287,
   // is read name by name and merged newest first) are filtered by exact environment name, creator and task. A receipt source
@@ -1092,14 +1092,16 @@ export class GitHubConformanceSource {
         },
       };
     }
-    const { environment, creator } = profile.productionEvidence ?? {};
+    // A verifier record (backend) also filters by task, as the engine does; the audit does not repeat the engine's
+    // run proof, so this read-only note may count a receipt the engine would reject (conformance.md).
+    const { environment, creator, task, verifier } = profile.productionEvidence ?? {};
     const environments = productionEnvironments(environment);
     if (!environments.length || !creator) throw new Error(`${repository} has no productionEvidence in the registry`);
     const integrationHeadSha = await readBranchHead(this.client, repository, profile.branches.integration);
     const window = await readProductionDeployments(this.client, repository, { environment });
     const named = environments.join(' or ');
     const resolver = createReceiptResolver({
-      deployments: window.deployments.filter(d => environments.includes(d?.environment) && d?.creator?.login === creator),
+      deployments: window.deployments.filter(d => environments.includes(d?.environment) && d?.creator?.login === creator && (!verifier || d?.task === task)),
       environment, creator, integrationHeadSha, containsCommit,
       readStatuses: id => this.client.request(`/repos/${repository}/deployments/${id}/statuses?per_page=${RECEIPT_STATUS_PAGE_SIZE}`),
     });
