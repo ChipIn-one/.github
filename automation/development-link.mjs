@@ -281,6 +281,45 @@ async function readNativeState(client, { repository, issueNumber, pullRequestNum
   };
 }
 
+// #125: diagnostics only, read after a failed user-linked read-back. GitHub keeps a closing
+// keyword in the PR body (for example `Closes #N`) as an *automatic* closing reference; the
+// reconciler accepts only user-linked references, and addCloseIssueReferences was observed to
+// return normally without creating one while the automatic reference exists. The result never
+// authorizes a link: it only names the cause in the fail-closed error.
+const AUTOMATIC_REFERENCE_QUERY = `
+query DevelopmentLinkAutomaticReference($owner: String!, $repo: String!, $issueNumber: Int!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    issue(number: $issueNumber) {
+      closedByPullRequestsReferences(first: 100, after: $after, includeClosedPrs: true, excludeUserLinked: true) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id number repository { nameWithOwner } }
+      }
+    }
+  }
+}`;
+
+// Returns true (the PR is an automatic closing reference), false (it is not) or null (unreadable).
+export async function readAutomaticClosingReference(client, { repository, issueNumber, pullRequestId, pullRequestNumber }) {
+  const [owner, repo] = splitRepository(repository);
+  let after = null;
+  try {
+    for (let page = 0; page < 20; page += 1) {
+      const data = await client.graphql(AUTOMATIC_REFERENCE_QUERY, { owner, repo, issueNumber, after });
+      const connection = data?.repository?.issue?.closedByPullRequestsReferences;
+      if (!connection?.pageInfo || !Array.isArray(connection.nodes)) return null;
+      if (connection.nodes.some((node) => node?.id === pullRequestId
+        && node.number === pullRequestNumber
+        && node.repository?.nameWithOwner === repository)) return true;
+      if (!connection.pageInfo.hasNextPage) return false;
+      if (!connection.pageInfo.endCursor) return null;
+      after = connection.pageInfo.endCursor;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function readPullRequest(client, repository, pullRequestNumber) {
   const [owner, repo] = splitRepository(repository);
   let data;
@@ -757,8 +796,14 @@ export async function reconcileDevelopmentLink(client, {
     pullRequestNumber: prNumber,
   });
   if (!after.linked) {
+    const automatic = await readAutomaticClosingReference(client, {
+      repository, issueNumber: task.issueNumber, pullRequestId: before.pullRequest.id, pullRequestNumber: prNumber,
+    });
+    const cause = automatic === true
+      ? ` AUTOMATIC_CLOSING_REFERENCE: GitHub holds ${repository}#${prNumber} as an automatic closing reference of ${task.canonical} (a closing keyword such as "Closes #${task.issueNumber}" in the PR body), and no user-linked reference was created. Remove only the closing-keyword line from the PR body (keep the Task identity line and the other sections) and re-run this check; the next run should then create the user-linked reference.`
+      : automatic === null ? ' Automatic closing references are unreadable, so the cause is unknown.' : '';
     throw new Error(
-      `Native Development link read-back failed: ${task.canonical} is not linked to ${repository}#${prNumber} through user-linked Development references.`,
+      `Native Development link read-back failed: ${task.canonical} is not linked to ${repository}#${prNumber} through user-linked Development references.${cause}`,
     );
   }
 
