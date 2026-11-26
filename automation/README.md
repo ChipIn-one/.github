@@ -75,7 +75,7 @@ Tests: `slack-notify.test.mjs` (injected fetch, no network; includes the action 
 - conflicting existing human values, duplicate membership, permission failures, schema drift, or unreadable read-back produce an incomplete result rather than overwrite/guess/success.
 - apply mode requires both `--activate issue-intake-v1` and `CHIPIN_ISSUE_WRITE=1`.
 
-`issue-draft-check.mjs` is the offline draft check for a new Issue (#285): the same body, classification and owner rules, no GitHub call and no credential, `DRAFT_OK` or `DRAFT_BLOCKED`. It is step 3 of the [agent create path](./issue-intake.md#agent-create-path-local-session-285); it is not admission.
+`issue-draft-check.mjs` is the offline draft check for a new Issue (#285): the same offline rules as the writer (body, classification, owner, `## Dependencies` declarations), all reported at once, no GitHub call and no credential, `DRAFT_OK` or `DRAFT_BLOCKED`. It is step 3 of the [agent create path](./issue-intake.md#agent-create-path-local-session-285); it is not admission.
 
 The UI entry point is the manual `.github/workflows/issue-metadata-finalize.yml` workflow. It runs the full automation test suite before plan/apply. Read-only plans can use `CHIPIN_DEV_READ_TOKEN`; writes require the separate `CHIPIN_ISSUE_WRITE_TOKEN`.
 

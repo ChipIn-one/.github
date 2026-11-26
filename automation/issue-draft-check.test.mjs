@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { checkDraft, main, parseDraftArgs } from './issue-draft-check.mjs';
 
 const config = JSON.parse(await readFile(new URL('./metadata-migration.config.json', import.meta.url), 'utf8'));
@@ -10,7 +14,7 @@ const VALID = [
   '## Problem', '', 'The settle-up screen hides the receiver IBAN, so payers ask in chat.', '',
   '## Outcome', '', 'The payer sees the receiver payment details on the settle-up screen.', '',
   '## Acceptance', '', '- [ ] Settle-up shows the IBAN of the receiver when one is saved.', '- [ ] No details: the section is hidden.', '',
-  '## Dependencies', '', 'Part of: ChipIn-one/chipin-frontend#855', '',
+  '## Dependencies', '', 'Parent: ChipIn-one/chipin-frontend#855', '',
 ].join('\n');
 const draft = (overrides = {}) => checkDraft({ config, repository: FE, title: TITLE, body: VALID, issueType: 'Task', priority: 'P2', ...overrides });
 const without = section => VALID.replace(new RegExp('## ' + section + '\\n\\n[^#]*'), '');
@@ -80,27 +84,43 @@ test('argument parsing requires the core flags and rejects unknown or repeated o
   assert.throws(() => parseDraftArgs(['--repository', '--title']), /Usage/);
 });
 
-test('CLI makes no GitHub call, prints each blocker and exits 2 on a blocked draft', async () => {
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = () => { throw new Error('network is not allowed in the draft check'); };
-  const files = { '/draft/ok.md': VALID, '/draft/bad.md': '## Problem\n\nShort.\n' };
-  const readFile = async path => path.endsWith('.json') ? JSON.stringify(config) : files[path];
-  const out = []; const err = [];
-  const io = { readFile, stdout: { write: s => out.push(s) }, stderr: { write: s => err.push(s) } };
-  const previous = process.exitCode;
-  try {
-    const ok = await main(['--repository', FE, '--title', TITLE, '--body-file', '/draft/ok.md', '--type', 'Task', '--priority', 'P2'], io);
-    assert.equal(ok.status, 'DRAFT_OK');
-    assert.equal(err.length, 0);
-    assert.notEqual(process.exitCode, 2);
-    const bad = await main(['--repository', FE, '--title', TITLE, '--body-file', '/draft/bad.md', '--type', 'Bug', '--priority', 'P1'], io);
-    assert.equal(bad.status, 'DRAFT_BLOCKED');
-    assert.equal(process.exitCode, 2);
-    assert.equal(err.length, bad.blockers.length);
-    assert.ok(err.every(line => line.startsWith('DRAFT BLOCKER: ')));
-    assert.equal(JSON.parse(out.at(-1)).contractVersion, 'chipin-issue-draft-check/v1');
-  } finally {
-    globalThis.fetch = realFetch;
-    process.exitCode = previous;
-  }
+test('a malformed ## Dependencies declaration is a blocker', () => {
+  const body = VALID.replace('Parent: ChipIn-one/chipin-frontend#855', 'Relates to: #855');
+  assert.ok(draft({ body }).blockers.some(b => b.startsWith('Dependencies: ')), draft({ body }).blockers.join('; '));
+});
+
+const SCRIPT = fileURLToPath(new URL('./issue-draft-check.mjs', import.meta.url));
+// Real child process, empty environment (no GITHUB_TOKEN, no gh), fetch replaced by a thrower,
+// started from another working directory, so the default config path must resolve by module URL.
+function cli(args, cwd) {
+  return new Promise(done => execFile(process.execPath, ['--import', 'data:text/javascript,globalThis.fetch=()=>{throw new Error("network")}', SCRIPT, ...args],
+    { cwd, env: {} }, (error, stdout, stderr) => done({ code: error ? error.code : 0, stdout, stderr })));
+}
+
+test('CLI offline: exit 0 / 2 / 1, blockers on stderr, unreadable body is a blocker', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'draft-check-'));
+  await writeFile(join(dir, 'ok.md'), VALID);
+  await writeFile(join(dir, 'bad.md'), '## Problem\n\nShort.\n');
+  const base = ['--repository', FE, '--title', TITLE, '--type', 'Task', '--priority', 'P2', '--body-file'];
+
+  const ok = await cli([...base, 'ok.md'], dir);
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.equal(JSON.parse(ok.stdout).status, 'DRAFT_OK');
+  assert.equal(ok.stderr, '');
+
+  const bad = await cli([...base, 'bad.md'], dir);
+  assert.equal(bad.code, 2);
+  const result = JSON.parse(bad.stdout);
+  assert.equal(result.contractVersion, 'chipin-issue-draft-check/v1');
+  assert.equal(bad.stderr.trim().split('\n').length, result.blockers.length);
+  assert.ok(bad.stderr.trim().split('\n').every(line => line.startsWith('DRAFT BLOCKER: ')));
+
+  const missing = await cli([...base, 'nope.md'], dir);
+  assert.equal(missing.code, 2);
+  assert.match(JSON.parse(missing.stdout).blockers[0], /^Issue body read failed/);
+
+  const usage = await cli(['--repository', FE], dir);
+  assert.equal(usage.code, 1);
+  assert.equal(usage.stdout, '');
+  assert.match(usage.stderr, /Usage/);
 });

@@ -98,13 +98,13 @@ The short procedure for an agent that creates a ChipIn Issue from a local sessio
    - [ ] One verifiable item per line (a list is required).
 
    ## Dependencies
-   Part of: ChipIn-one/<repo>#<n>
+   Parent: ChipIn-one/<repo>#<n>
 
    ## References
    - files, runs, docs
    ```
 
-   `## Dependencies` and `## References` are optional for the Issue, but declare relationships only in `## Dependencies` ([relationships](../docs/workflow/relationships.md)). A bug report with `Actual` / `Expected` still needs the three required sections.
+   `## Dependencies` and `## References` are optional for the Issue, but declare relationships only in `## Dependencies`, one per line as `Parent:`, `Blocked by:`, `Blocks:` or `Relates to:` with one exact `ChipIn-one/<repo>#<n>`; any other text there (for example `Part of:`) is ignored and creates no edge ([relationships](../docs/workflow/relationships.md)). A bug report with `Actual` / `Expected` still needs the three required sections.
 
 2. **Choose the native metadata.** Never infer it from labels, title or Milestone:
 
@@ -114,7 +114,7 @@ The short procedure for an agent that creates a ChipIn Issue from a local sessio
    | `Feature` | required, `P0`–`P3` | none | same | same |
    | `Bug` | required, `P0`–`P3` | required, `Critical`, `Major` or `Minor` | same | same |
 
-3. **Check the draft offline.** No GitHub call and no credential; it runs the same body, classification and owner rules as the canonical writer:
+3. **Check the draft offline.** No GitHub call and no credential; it runs the same offline rules as the canonical writer (body, classification, owner, `## Dependencies` declarations) and reports them all at once. It cannot see the writer's online checks (org schema, Project #5):
 
    ```sh
    node automation/issue-draft-check.mjs --repository ChipIn-one/chipin-frontend \
@@ -123,7 +123,7 @@ The short procedure for an agent that creates a ChipIn Issue from a local sessio
    # KB additionally requires --owner <explicitly-selected-login>
    ```
 
-   `DRAFT_OK` (exit 0) or `DRAFT_BLOCKED` (exit 2, one `DRAFT BLOCKER:` line per problem on stderr, JSON on stdout). Fix every blocker before any create. `DRAFT_OK` is not admission.
+   `DRAFT_OK` (exit 0) or `DRAFT_BLOCKED` (exit 2, JSON on stdout, one `DRAFT BLOCKER:` line per problem on stderr; an unreadable body file is a blocker too). Exit 1 is a usage error. Fix every blocker before any create. `DRAFT_OK` is not admission.
 
 4. **Create.**
    - With an approved write credential: the canonical writer, `apply create` as in the [API / agent create path](#api--agent-create-path) below (it creates, writes Type, Fields, owner and Project #5, and reads them back in one run).
@@ -137,7 +137,7 @@ The short procedure for an agent that creates a ChipIn Issue from a local sessio
 
    Until then report `PENDING_INTAKE: <blockers>`, never "created".
 
-6. **Implementation PR body.** One line `Task identity: ChipIn-one/<repo>#<n>` (exactly one, no closing keyword such as `Closes #<n>`), and the sections `## Summary`, `## Tests`, `## Version impact` and `## Dependencies`; a UI-affecting frontend PR also needs QA steps. See [pr-metadata.md](pr-metadata.md).
+6. **Implementation PR body.** One line `Task identity: ChipIn-one/<repo>#<n>` (exactly one). Do not add a closing keyword such as `Closes #<n>`: it never counts as the link, and it makes the native Development link read-back fail (#125). The frontend PR metadata check also requires `## Summary`, `## Tests`, `## Version impact` and `## Dependencies` and, for a UI-affecting PR, QA steps ([pr-metadata.md](pr-metadata.md)); other repositories follow their own PR checks (`.github` needs `## Version impact`, [release](../docs/workflow/release.md)).
 
 ## API / agent create path
 

@@ -1,18 +1,21 @@
 #!/usr/bin/env node
 // Offline draft check for a new ChipIn Issue (#285). No GitHub call, no credential, no write.
-// It runs the same body rules as the canonical writer and admission (validateBody), the same
+// It runs the same offline rules (all reported at once; the writer stops at the first group): the same body rules as the canonical writer and admission (validateBody), the same
 // classification rules as issue-intake.mjs (validateClassification) and the registry owner
 // policy, so a local agent can fix a draft before the raw or canonical create.
 // A clean result is not admission: after create, issue-admission-preflight.mjs must return
 // INTAKE_COMPLETE before any branch, PR or handoff.
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { requiredOwner, validateBody } from './issue-admission.mjs';
 import { isSupportedIntakeRepository, validateClassification } from './issue-intake.mjs';
+import { parseDeclarations } from './relationships.mjs';
 
 export const DRAFT_CHECK_CONTRACT = 'chipin-issue-draft-check/v1';
 const FLAGS = new Set(['repository', 'title', 'body-file', 'type', 'priority', 'severity', 'owner', 'config']);
+// Exit codes: 0 DRAFT_OK, 2 DRAFT_BLOCKED (JSON on stdout), 1 usage error (no JSON).
+// A value may not start with "--".
 const USAGE = 'Usage: issue-draft-check.mjs --repository ChipIn-one/<repo> --title <text> --body-file <path> ' +
   '--type Task|Feature|Bug --priority P0..P3 [--severity Critical|Major|Minor|none] [--owner <login>] [--config <path>]';
 
@@ -38,6 +41,8 @@ export function checkDraft({ config, repository, title, body, issueType, priorit
   const checked = validateClassification(config, { issueType, priority, severity });
   blockers.push(...checked.blockers);
   blockers.push(...validateBody(title, body));
+  // Malformed `## Dependencies` declarations are rejected later by the relationship reconciler.
+  blockers.push(...parseDeclarations(body).errors.map(error => 'Dependencies: ' + error));
   return {
     contractVersion: DRAFT_CHECK_CONTRACT,
     status: blockers.length ? 'DRAFT_BLOCKED' : 'DRAFT_OK',
@@ -51,20 +56,31 @@ export function checkDraft({ config, repository, title, body, issueType, priorit
 }
 
 export async function main(argv = process.argv.slice(2), overrides = {}) {
-  const opts = parseDraftArgs(argv);
   const read = overrides.readFile ?? readFile;
-  const config = JSON.parse(await read(resolve(opts.config ?? new URL('./metadata-migration.config.json', import.meta.url).pathname), 'utf8'));
-  const body = await read(resolve(opts['body-file']), 'utf8');
+  const stderr = overrides.stderr ?? process.stderr;
+  let opts;
+  try { opts = parseDraftArgs(argv); }
+  catch (error) { stderr.write(error.message + '\n'); process.exitCode = 1; return null; }
+  const config = JSON.parse(await read(opts.config ? resolve(opts.config) : fileURLToPath(new URL('./metadata-migration.config.json', import.meta.url)), 'utf8'));
+  let body = '';
+  let readError = null;
+  try { body = await read(resolve(opts['body-file']), 'utf8'); }
+  catch (error) { readError = 'Issue body read failed: ' + error.message; }
   const result = checkDraft({
     config, repository: opts.repository, title: opts.title, body,
     issueType: opts.type, priority: opts.priority, severity: opts.severity ?? null, owner: opts.owner ?? null,
   });
+  if (readError) {
+    result.blockers.unshift(readError);
+    result.status = 'DRAFT_BLOCKED';
+    result.next = 'Fix every blocker and run the check again before any create.';
+  }
   (overrides.stdout ?? process.stdout).write(JSON.stringify(result, null, 2) + '\n');
-  for (const blocker of result.blockers) (overrides.stderr ?? process.stderr).write('DRAFT BLOCKER: ' + blocker + '\n');
+  for (const blocker of result.blockers) stderr.write('DRAFT BLOCKER: ' + blocker + '\n');
   if (result.blockers.length) process.exitCode = 2;
   return result;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch(error => { console.error(error.message); process.exitCode = 2; });
+  main().catch(error => { console.error(error.message); process.exitCode = 1; });
 }
