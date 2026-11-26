@@ -13,7 +13,7 @@ Active schema configuration is in `metadata-migration.config.json`; shared GitHu
 
 Every run requires explicit Issue Type and Priority, plus Severity when applicable. `Bug` requires Severity. There is no Release-scope input.
 
-Native Milestone is optional. Missing milestone is valid and means “not scheduled for a concrete release”. Intake never infers, writes, clears, or renames Milestones.
+Native Milestone is optional. Missing milestone is valid and means “not committed to a product goal”. Intake never infers, writes, clears, or renames Milestones.
 
 Existing canonical values are human-owned. If requested Issue Type/Priority/Severity conflicts with an existing value, reconciliation stops rather than overwriting it. Existing Project Status is also preserved. Project Status values are `Backlog`, `Todo`, `In Progress`, `Awaiting release` (written only by the completion engine), and `Done`; `Done` is valid only when the Issue is already `closed/completed` and is never completion authority. `DEV`/`PROD` are retired. The initial Status (`Backlog`, or `Todo` with `apply create --status Todo`) is initialized only when the issue has exactly one Project #5 item with no Status. Intake never writes `In Progress` (the development-link reconciler does, .github#218), `Awaiting release` or `Done`. Intake never closes or reopens an Issue.
 
@@ -32,7 +32,7 @@ CHIPIN_ISSUE_WRITE=1
 
 After creating an issue with a shared form, run `ChipIn-one/.github -> Actions -> Issue metadata finalizer`.
 
-Provide exact issue identity, Issue Type, Priority, applicable Severity, and `apply=false` first. For KB Issues, choose an explicit native GitHub login in the workflow `owner` input for both plan and apply. FE/BE use their required owner policies; leaving KB owner blank fails closed. No release target is required. Existing Milestone state is left untouched.
+Provide exact issue identity, Issue Type, Priority, applicable Severity, and `apply=false` first. For KB Issues, choose an explicit native GitHub login in the workflow `owner` input for both plan and apply. FE/BE use their required owner policies; leaving KB owner blank fails closed. No milestone is required. Existing Milestone state is left untouched.
 
 The workflow is intentionally `workflow_dispatch` only. Organization-profile workflows do not subscribe to sibling-repository issue events.
 
@@ -66,7 +66,7 @@ Rules:
 
 Validated requests are durably queued before the shared serialized drain. Manual finalizer and connector bridge use the same `canonical-issue-intake-writes` concurrency group and the same guarded intake implementation.
 
-Result comments include canonical read-back for Issue Type, Priority, Severity, native Milestone, Project #5 membership and Status. Milestone is release targeting only; it is not workflow or completion authority.
+Result comments include canonical read-back for Issue Type, Priority, Severity, native Milestone, Project #5 membership and Status. Milestone is an optional product goal only; it is not workflow or completion authority.
 
 ### Read-back lag, pending retry and the manual requeue path (#182)
 

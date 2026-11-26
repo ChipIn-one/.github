@@ -13,7 +13,7 @@ Organisation-wide defaults and GitHub coordination tooling for `ChipIn-one`.
 
 ## Shared templates and repository overrides
 
-Supported Issue Forms are owned here and set only native GitHub Issue Type: `Bug`, `Feature`, or `Task`. Priority and Severity remain Organization Issue Fields; native repository Milestones are the optional concrete release target; Project #5 Status remains the workflow field.
+Supported Issue Forms are owned here and set only native GitHub Issue Type: `Bug`, `Feature`, or `Task`. Priority and Severity remain Organization Issue Fields; native repository Milestones are optional named product goals (the same name in FE and BE when both work toward one), never versions; Project #5 Status remains the workflow field.
 
 Exception: `qa-bug.yml` (frontend release QA, #229) also presets label `Frontend`, assignee `syllik` and project `ChipIn-one/5`. GitHub adds the project only when the reporter has write access to Project #5; otherwise the finalizer or intake reconcile adds it. Priority and Severity are still set afterwards. Its Russian `Устройство` / `Preview URL` / `Насколько мешает` / `Скриншоты или видео` answers render inside `## Problem` for admission.
 
