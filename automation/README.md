@@ -100,6 +100,14 @@ See [issue-intake.md](./issue-intake.md) for CLI examples, connector request for
   write, and again after it, the reconciler reads
   `closedByPullRequestsReferences(includeClosedPrs: true, userLinkedOnly: true)` with complete
   pagination. Success is impossible without exact native read-back.
+- A closing keyword in the PR body (`Closes #N`, `Fixes #N`, …) makes GitHub hold the PR as an
+  *automatic* closing reference. The mutation was observed to return normally without creating a
+  user-linked reference in that state (.github#125, chipin-backend#159 / PR #176), so the read-back
+  fails. After a failed read-back the reconciler reads
+  `closedByPullRequestsReferences(includeClosedPrs: true, excludeUserLinked: true)` for diagnostics only and, when the PR is
+  there, the error says `AUTOMATIC_CLOSING_REFERENCE` and asks to remove the closing keyword. An
+  automatic reference is never accepted as the link; an unreadable diagnostic read says the cause is
+  unknown and changes nothing else.
 - An already linked PR is an idempotent success. More than one implementation PR may link to the
   same Issue, and unrelated existing links are preserved.
 - Missing/ambiguous identity, unsupported repositories, unreadable Issue/PR/relationship state,

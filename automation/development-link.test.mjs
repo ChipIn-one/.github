@@ -31,6 +31,7 @@ function makeClient({
   relationshipUnreadable = false,
   issueUnreadable = false,
   pullRequestUnreadable = false,
+  automaticReferencePages = undefined,
 } = {}) {
   const links = new Set(linkedPullRequests);
   const calls = [];
@@ -112,10 +113,30 @@ function makeClient({
         };
       }
 
+      if (query.includes("query DevelopmentLinkAutomaticReference") && automaticReferencePages !== undefined) {
+        // pages: arrays of PR numbers, or the string "unreadable" for a malformed page
+        const index = variables.after ? Number(variables.after.replace("CURSOR_", "")) : 0;
+        const page = automaticReferencePages[index];
+        if (page === "unreadable") return { repository: { issue: { closedByPullRequestsReferences: null } } };
+        const hasNextPage = index + 1 < automaticReferencePages.length;
+        return {
+          repository: {
+            issue: {
+              closedByPullRequestsReferences: {
+                pageInfo: { hasNextPage, endCursor: hasNextPage ? `CURSOR_${index + 1}` : null },
+                nodes: page.map((number) => ({ id: `PR_${number}`, number, repository: { nameWithOwner: repository } })),
+              },
+            },
+          },
+        };
+      }
+
       throw new Error(`Unexpected GraphQL operation: ${query}`);
     },
   };
 }
+
+const automaticCalls = (client) => client.calls.filter(({ query }) => query.includes("query DevelopmentLinkAutomaticReference"));
 
 function mutationCalls(client) {
   return client.calls.filter(({ query }) => query.includes("mutation AddNativeDevelopmentLink"));
@@ -286,6 +307,100 @@ test("read-back failure never reports success", async () => {
     /read-back failed/u,
   );
   assert.equal(mutationCalls(client).length, 1);
+});
+
+// #125: chipin-backend#159 / PR #176. The PR body had "Closes #159"; GitHub held PR #176 only as an
+// automatic closing reference, addCloseIssueReferences returned normally and the user-linked
+// read-back stayed empty. The run must still fail closed, now naming the cause and the remedy.
+test("automatic closing reference: read-back still fails closed and names the closing keyword", async () => {
+  const client = makeClient({
+    readBackFailure: true,
+    bodies: { 10: `Task identity: ${REPOSITORY}#7\n\nCloses #7` },
+    automaticReferencePages: [[10]],
+  });
+  await assert.rejects(
+    reconcileDevelopmentLink(client, { repository: REPOSITORY, pullRequestNumber: 10 }),
+    (error) => /read-back failed/u.test(error.message)
+      && /AUTOMATIC_CLOSING_REFERENCE/u.test(error.message)
+      && /ChipIn-one\/chipin-frontend#7/u.test(error.message)
+      && /Remove only the closing-keyword line/u.test(error.message),
+  );
+  assert.equal(mutationCalls(client).length, 1);
+  assert.equal(automaticCalls(client).length, 1);
+  assert.equal(client.links.has(10), false);
+});
+
+test("automatic reference of another PR only: plain read-back failure, no keyword hint", async () => {
+  const client = makeClient({ readBackFailure: true, pullRequests: [10, 11], automaticReferencePages: [[11]] });
+  await assert.rejects(
+    reconcileDevelopmentLink(client, { repository: REPOSITORY, pullRequestNumber: 10 }),
+    (error) => /read-back failed/u.test(error.message)
+      && !/AUTOMATIC_CLOSING_REFERENCE/u.test(error.message)
+      && !/unknown/u.test(error.message),
+  );
+});
+
+test("automatic reference found on a later page", async () => {
+  const client = makeClient({ readBackFailure: true, pullRequests: [10, 11, 12], automaticReferencePages: [[11], [12, 10]] });
+  await assert.rejects(
+    reconcileDevelopmentLink(client, { repository: REPOSITORY, pullRequestNumber: 10 }),
+    /AUTOMATIC_CLOSING_REFERENCE/u,
+  );
+  assert.equal(automaticCalls(client).length, 2);
+});
+
+test("automatic reference with the same number but another id or repository gives no hint", async () => {
+  const client = makeClient({ readBackFailure: true, automaticReferencePages: [[10]] });
+  const original = client.graphql;
+  client.graphql = async (query, variables) => {
+    const data = await original(query, variables);
+    if (query.includes("query DevelopmentLinkAutomaticReference")) {
+      data.repository.issue.closedByPullRequestsReferences.nodes = [
+        { id: "PR_OTHER", number: 10, repository: { nameWithOwner: REPOSITORY } },
+        { id: "PR_10", number: 10, repository: { nameWithOwner: "ChipIn-one/chipin-backend" } },
+      ];
+    }
+    return data;
+  };
+  await assert.rejects(
+    reconcileDevelopmentLink(client, { repository: REPOSITORY, pullRequestNumber: 10 }),
+    (error) => /read-back failed/u.test(error.message) && !/AUTOMATIC_CLOSING_REFERENCE|unknown/u.test(error.message),
+  );
+});
+
+test("automatic reference pagination without a cursor is unknown", async () => {
+  const client = makeClient({ readBackFailure: true, automaticReferencePages: [[11]] });
+  const original = client.graphql;
+  client.graphql = async (query, variables) => {
+    const data = await original(query, variables);
+    if (query.includes("query DevelopmentLinkAutomaticReference")) {
+      data.repository.issue.closedByPullRequestsReferences.pageInfo = { hasNextPage: true, endCursor: null };
+    }
+    return data;
+  };
+  await assert.rejects(
+    reconcileDevelopmentLink(client, { repository: REPOSITORY, pullRequestNumber: 10 }),
+    /cause is unknown/u,
+  );
+});
+
+test("unreadable automatic references keep the fail-closed read-back error", async () => {
+  for (const pages of [["unreadable"], undefined]) {
+    const client = makeClient({ readBackFailure: true, automaticReferencePages: pages });
+    await assert.rejects(
+      reconcileDevelopmentLink(client, { repository: REPOSITORY, pullRequestNumber: 10 }),
+      (error) => /read-back failed/u.test(error.message) && /cause is unknown/u.test(error.message)
+        && !/AUTOMATIC_CLOSING_REFERENCE/u.test(error.message),
+    );
+  }
+});
+
+test("automatic references are read only after a failed read-back", async () => {
+  const linked = makeClient({ automaticReferencePages: [[10]] });
+  assert.equal((await reconcileDevelopmentLink(linked, { repository: REPOSITORY, pullRequestNumber: 10 })).result, "linked");
+  const already = makeClient({ linkedPullRequests: [10], automaticReferencePages: [[10]] });
+  assert.equal((await reconcileDevelopmentLink(already, { repository: REPOSITORY, pullRequestNumber: 10 })).result, "already-linked");
+  assert.equal(automaticCalls(linked).length + automaticCalls(already).length, 0);
 });
 
 test("unrelated task repository is never linked", async () => {
