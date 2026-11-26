@@ -28,12 +28,14 @@ The record alone is not trusted: anyone with write access can create an identica
 
 ### Rollout
 
-1. **Now:** `completion: manual` stays in `workflow-registry.yaml`. A human closes a backend Issue only after its Development-linked PR is merged, never before.
+1. **Until [chipin-backend#184](https://github.com/ChipIn-one/chipin-backend/issues/184) (done):** `completion: manual` in `workflow-registry.yaml`; a human closed a backend Issue only after production.
 2. [chipin-backend#213](https://github.com/ChipIn-one/chipin-backend/issues/213): the evidence step in `deploy-production`, reviewed and merged by olegbal.
 3. Before the engine is turned on, olegbal disables "Auto-close issues with merged linked pull requests" in chipin-backend.
 4. Registry switch to `completion: deployment-receipt` with `productionEvidence`, plus a completion caller using the same fail-closed read-back model as `frontend-production-completion`, as a separate PR merged by olegbal.
 
-Step **A1** of [chipin-backend#184](https://github.com/ChipIn-one/chipin-backend/issues/184), the engine, is done once its `.github` PR merges: `deployment-receipt` accepts `productionEvidence.verifier: workflow-run` and verifies the receipt against its run as described in [completion.md](completion.md#workflow-run-verifier-backend) (only the latest receipt counts, and its run must be the newest run of `deploy-production.yml`, on any branch, of any event or status; an untrusted latest receipt keeps Issues open as `production-evidence-untrusted`). It changes no backend behaviour: the record stays `completion: manual` / `capabilities.completion: manual`.
+Step **A1** of [chipin-backend#184](https://github.com/ChipIn-one/chipin-backend/issues/184), the engine, is done once its `.github` PR merges: `deployment-receipt` accepts `productionEvidence.verifier: workflow-run` and verifies the receipt against its run as described in [completion.md](completion.md#workflow-run-verifier-backend) (only the latest receipt counts, and its run must be the newest run of `deploy-production.yml`, on any branch, of any event or status; an untrusted latest receipt keeps Issues open as `production-evidence-untrusted`). It changed no backend behaviour on its own.
+
+Step **A3** (this record switch, [chipin-backend#184](https://github.com/ChipIn-one/chipin-backend/issues/184)): `completion: deployment-receipt`, `capabilities.completion: automatic`, the evidence line below, `release.productionSource` removed. The engine reads the registry of the org tag its caller pins, so the backend caller (`.github/workflows/completion.yml` in chipin-backend) pins the first tag that contains this switch and merges after it.
 
 ### Trust boundary
 
@@ -47,13 +49,23 @@ Users with write access to chipin-backend are trusted. The verifier stops forged
 ### Preconditions before the registry switch (step A3)
 
 - [ ] `develop` protected with required review ([#161](https://github.com/ChipIn-one/.github/issues/161); deferred: needs a paid plan).
-- [ ] The `deploy` job of chipin-backend's `deploy-production.yml` guarded by `if: github.run_attempt == 1`, so a re-run never redeploys.
-- [ ] The self-hosted production runner restricted to `deploy-production.yml` on `develop` (runner group with selected workflows, if the plan allows).
-- [ ] olegbal disables "Auto-close issues with merged linked pull requests" in chipin-backend (step 3 above).
-- [ ] The runner token can read Actions runs and jobs and check-run annotations on chipin-backend (plus Deployments read and Issues write); a failed read leaves every Issue `production-evidence-unreadable`.
-- [ ] The backend caller (decided: a repository caller, not only the org sweep) triggers on `workflow_run` `completed` of Deploy Production (plus `push` to `develop`), not on `deployment_status`: the receipt's status is written while the run is still `in_progress` ([completion.md](completion.md#workflow-run-verifier-backend)), and it pins an org tag containing A1.
+- [x] The `deploy` job of chipin-backend's `deploy-production.yml` guarded by `if: github.run_attempt == 1`, so a re-run never redeploys. A re-run that reaches the job again fails in `rerun-refused` (red, nothing deployed); "Re-run failed jobs" after only `record-receipt` failed keeps the attempt-1 deploy and writes the receipt.
+- [ ] The self-hosted production runner restricted to `deploy-production.yml` on `develop` (runner group with selected workflows, if the plan allows). Deferred with #161 (see known limits).
+- [x] olegbal disables "Auto-close issues with merged linked pull requests" in chipin-backend (step 3 above).
+- [x] The runner token can read Actions runs and jobs and check-run annotations on chipin-backend (plus Deployments read and Issues write); a failed read leaves every Issue `production-evidence-unreadable`.
+- [x] The backend caller (decided: a repository caller, not only the org sweep) triggers on `workflow_run` `completed` of Deploy Production (plus `push` to `develop`), not on `deployment_status`: the receipt's status is written while the run is still `in_progress` ([completion.md](completion.md#workflow-run-verifier-backend)), and it pins an org tag containing A1.
 
 The switch itself (step A3) uses exactly this evidence line:
 `productionEvidence: { environment: production-receipt, creator: "github-actions[bot]", task: "deploy:image-receipt", verifier: workflow-run, workflow: .github/workflows/deploy-production.yml, branch: develop, job: record-receipt }`
 
 The same PR removes `release.productionSource` from the record: the registry allows only one production source, and conformance then reads `productionEvidence` ([#254](https://github.com/ChipIn-one/.github/issues/254)).
+
+### Known limits after the switch
+
+Accepted until GitHub Team ([#161](https://github.com/ChipIn-one/.github/issues/161)); the engine stays on with them:
+
+- `develop` is unprotected, so the [trust boundary](#trust-boundary) is "users with write access", not "reviewed code".
+- The self-hosted production runner cannot be restricted to `deploy-production.yml` (runner groups with selected workflows need a paid plan for a private repository): another workflow on that runner can deploy without a receipt.
+- Fail closed, not self-healing: after "Re-run all jobs" of a Deploy Production run, a refused re-run, or a second receipt for one run (`run-id-cited-twice`), the newest run is not a clean successful deploy, so backend Issues stay open (`production-evidence-untrusted`) until the next successful Deploy Production.
+- The receipt written by "Re-run failed jobs" of `record-receipt` is valid only if the first attempt failed before its `Production receipt:` notice; otherwise the run is cited twice (see above).
+- `CHIPIN_ISSUE_WRITE_TOKEN` is a per-repository secret on the Free plan ([#193](https://github.com/ChipIn-one/.github/issues/193)); a revoked or expired token leaves every Issue `production-evidence-unreadable` and the caller run red.

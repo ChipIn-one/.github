@@ -491,8 +491,11 @@ test("runCompletion picks the strategy from the registry and refuses manual or u
   assert.equal(receipt.projectNumber, 5);
   assert.equal(receipt.results[0].decision.code, "closed-completed");
 
-  await assert.rejects(() => runCompletion(fakeClient(), { repository: "ChipIn-one/chipin-backend", reconcileProjectStatus: false }),
-    (error) => error instanceof CompletionBlocked && error.code === "COMPLETION_NOT_AUTOMATIC");
+  // the live backend record is automatic since chipin-backend#184; a manual backend record (fixture) is refused
+  const manualBackend = await backendManualRegistry();
+  await assert.rejects(() => runCompletion(fakeClient(), {
+    repository: "ChipIn-one/chipin-backend", registry: manualBackend, reconcileProjectStatus: false,
+  }), (error) => error instanceof CompletionBlocked && error.code === "COMPLETION_NOT_AUTOMATIC");
   await assert.rejects(() => runCompletion(fakeClient(), { repository: "ChipIn-one/unknown", reconcileProjectStatus: false }),
     (error) => error.code === "UNKNOWN_REPOSITORY");
   await assert.rejects(() => runCompletion(fakeClient(), { repository: "ChipIn-one/chipin-notifications", reconcileProjectStatus: false }),
@@ -566,7 +569,7 @@ test("summary names repository and strategy and escapes the diagnostic", () => {
   assert.match(summary, /\| #2 \| missing-development \| x \|/u);
 });
 
-test("registry: .github and the knowledge base are automatic integration-merge, backend stays manual", () => {
+test("registry: .github and the knowledge base are automatic integration-merge, backend is automatic deployment-receipt", () => {
   const registry = loadRegistry();
   for (const repository of [ORG, KB]) {
     const profile = registry.repositories.find((candidate) => candidate.repository === repository);
@@ -574,7 +577,8 @@ test("registry: .github and the knowledge base are automatic integration-merge, 
     assert.equal(profile.capabilities.completion, "automatic", repository);
   }
   const backend = registry.repositories.find((candidate) => candidate.repository === "ChipIn-one/chipin-backend");
-  assert.equal(backend.capabilities.completion, "manual");
+  assert.equal(backend.completion, "deployment-receipt");
+  assert.equal(backend.capabilities.completion, "automatic");
   assert.throws(() => validateRegistry({
     ...registry,
     repositories: registry.repositories.map((profile) => (profile.repository === ORG
@@ -1734,18 +1738,32 @@ const BE_RUN_URL = (id) => "https://github.com/ChipIn-one/chipin-backend/actions
 const BE_EVIDENCE_LINE = "    productionEvidence: { environment: production-receipt, creator: \"github-actions[bot]\", task: \"deploy:image-receipt\","
   + " verifier: workflow-run, workflow: .github/workflows/deploy-production.yml, branch: develop, job: record-receipt }\n";
 
-// The later registry switch (docs/workflow/backend.md rollout), simulated: the live backend record stays manual.
+// The live backend record is switched (chipin-backend#184): completion deployment-receipt with the workflow-run verifier.
+const BE_STRATEGY_LINE = /^    completion: deployment-receipt +# #156;[^\n]*\n/mu;
+const BE_CAPABILITY = /(prMetadata: required, relationships: required, )completion: automatic(, milestones: enabled, dependabot: required, agentRouting: required \})/u;
 async function backendReceiptRegistry() {
   const live = await readFile(new URL("../workflow-registry.yaml", import.meta.url), "utf8");
-  const strategy = /^    completion: manual {18}# deployment-receipt decided \(#156\)[^\n]*\n/mu;
-  const capability = /(prMetadata: required, relationships: required, )completion: manual(, milestones: enabled, dependabot: required, agentRouting: required \})/u;
-  assert.match(live, strategy, "the live backend record is completion: manual");
-  assert.match(live, capability);
-  // the switch replaces release.productionSource (conformance, .github#254) by productionEvidence: only one is allowed
-  const productionSource = /^      productionSource: [^\n]*\n/mu;
-  assert.match(live, productionSource);
+  assert.match(live, BE_STRATEGY_LINE, "the live backend record is completion: deployment-receipt");
+  assert.ok(live.includes(BE_EVIDENCE_LINE), "the live backend record declares the workflow-run productionEvidence");
+  assert.match(live, BE_CAPABILITY);
+  // productionEvidence replaced release.productionSource (conformance, .github#254): only one is allowed
+  assert.doesNotMatch(live, /^      productionSource: /mu);
+  return loadRegistry({ text: live });
+}
+
+// Fixture: the backend record as it was before the switch (completion manual, release.productionSource), so the
+// refusal of a manual record stays covered after the live switch.
+async function backendManualRegistry() {
+  const live = await readFile(new URL("../workflow-registry.yaml", import.meta.url), "utf8");
+  assert.match(live, BE_STRATEGY_LINE);
+  assert.ok(live.includes(BE_EVIDENCE_LINE));
+  assert.match(live, BE_CAPABILITY);
+  const tagPrefix = /^      tagPrefix: v +# production SHA for conformance[^\n]*\n/mu;
+  assert.match(live, tagPrefix);
   return loadRegistry({
-    text: live.replace(strategy, "    completion: deployment-receipt\n" + BE_EVIDENCE_LINE).replace(capability, "$1completion: automatic$2").replace(productionSource, ""),
+    text: live.replace(BE_STRATEGY_LINE, "    completion: manual\n").replace(BE_EVIDENCE_LINE, "")
+      .replace(BE_CAPABILITY, "$1completion: manual$2")
+      .replace(tagPrefix, "      tagPrefix: v\n      productionSource: { environment: production-receipt, creator: \"github-actions[bot]\", task: \"deploy:image-receipt\" }\n"),
   });
 }
 
@@ -1872,12 +1890,20 @@ const beRunCompletion = async (client) => runCompletion(client, {
 });
 const closes = (client) => client.log.filter((entry) => entry.startsWith("PATCH "));
 
-test("backend: the live record stays manual; the switched record validates with the workflow-run verifier", async () => {
+test("backend: the live record is switched and validates with the workflow-run verifier; the manual record is refused", async () => {
   const live = loadRegistry().repositories.find((profile) => profile.repository === BE);
-  assert.equal(live.completion, "manual");
-  assert.equal(live.capabilities.completion, "manual");
-  assert.equal(Object.hasOwn(live, "productionEvidence"), false);
+  assert.equal(live.completion, "deployment-receipt");
+  assert.equal(live.capabilities.completion, "automatic");
+  assert.equal(Object.hasOwn(live.release, "productionSource"), false);
+  const manual = (await backendManualRegistry()).repositories.find((profile) => profile.repository === BE);
+  assert.equal(manual.completion, "manual");
+  assert.equal(manual.capabilities.completion, "manual");
+  assert.equal(Object.hasOwn(manual, "productionEvidence"), false);
+  const manualRegistry = await backendManualRegistry();
+  await assert.rejects(() => runCompletion(beClient(), { repository: BE, registry: manualRegistry, reconcileProjectStatus: false }),
+    (error) => error instanceof CompletionBlocked && error.code === "COMPLETION_NOT_AUTOMATIC");
   const switched = (await backendReceiptRegistry()).repositories.find((profile) => profile.repository === BE);
+  assert.deepEqual(switched, live);
   assert.equal(switched.completion, "deployment-receipt");
   assert.deepEqual(switched.productionEvidence, {
     environment: "production-receipt", creator: "github-actions[bot]", task: "deploy:image-receipt", verifier: "workflow-run",

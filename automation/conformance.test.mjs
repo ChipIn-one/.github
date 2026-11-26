@@ -41,11 +41,18 @@ test('pins are extracted with action name, ref and version comment', () => {
 test('caller presence follows the registry capabilities', () => {
   const none = checkCallers(profile(BE), []);
   assert.deepEqual(checks(none), Array(none.length).fill('CALLER_MISSING'));
-  assert.equal(none.length, 4, 'admission, developmentLink, prMetadata and milestones are missing for BE');
+  assert.equal(none.length, 5, 'admission, developmentLink, prMetadata, milestones and completion (deployment-receipt, chipin-backend#184) are missing for BE');
   const pins = extractPins([workflow(uses('issue-admission-action', V1), uses('development-link-action', V1), uses('create-milestone-action', V1))]);
   const be = checkCallers(profile(BE), pins);
-  assert.equal(be.length, 1);
+  assert.equal(be.length, 2);
   assert.match(be[0].message, /prMetadata/);
+  assert.match(be[1].message, /completion is automatic but no workflow uses completion-action/);
+  const beComplete = extractPins([workflow(uses('issue-admission-action', V1), uses('development-link-action', V1), uses('pr-metadata-action', V1),
+    uses('create-milestone-action', V1), uses('completion-action', V1))]);
+  assert.deepEqual(checkCallers(profile(BE), beComplete), [], 'BE with every caller incl. completion-action conforms');
+  // a manual backend record (the pre-switch record) needs no completion caller
+  const beManual = { ...profile(BE), completion: 'manual', capabilities: Object.freeze({ ...profile(BE).capabilities, completion: 'manual' }) };
+  assert.equal(checkCallers(beManual, []).length, 4, 'a manual BE record misses only admission, developmentLink, prMetadata and milestones');
   assert.deepEqual(checkCallers(profile(META), []), [], 'meta repositories host the actions');
   const kbPins = extractPins([workflow(uses('development-link-action', V1))]);
   const kb = checkCallers(profile(KB), kbPins);
@@ -76,11 +83,14 @@ test('caller presence follows the registry capabilities', () => {
   assert.match(noLink[0].message, /Capability developmentLink is required but no workflow uses development-link-action or pr-gate from/);
   // the action is FE-only (pr-metadata.config.json repository; SCOPE: elsewhere): it never covers another repository's link
   assert.equal(profile(BE).capabilities.prMetadata, 'required');
-  const beNoLink = checkCallers(profile(BE), extractPins([workflow(uses('issue-admission-action', V1), uses('pr-metadata-action', V1), uses('create-milestone-action', V1))]));
+  const beNoLink = checkCallers(profile(BE), extractPins([workflow(uses('issue-admission-action', V1), uses('pr-metadata-action', V1), uses('create-milestone-action', V1), uses('completion-action', V1))]));
   assert.deepEqual(checks(beNoLink), ['CALLER_MISSING'], 'BE pr-metadata-action does not cover developmentLink');
   assert.match(beNoLink[0].message, /Capability developmentLink is required/);
   const gate = extractPins([{ path: 'p', text: `    uses: ChipIn-one/.github/.github/workflows/pr-gate.yml@${V1} # v1.0.0` }]);
-  assert.deepEqual(checks(checkCallers(profile(BE), gate)), ['CALLER_MISSING'], 'pr-gate covers admission, link and metadata; BE milestones still needed');
+  assert.deepEqual(checks(checkCallers(beManual, gate)), ['CALLER_MISSING'], 'pr-gate covers admission, link and metadata; BE milestones still needed');
+  const gateLive = checkCallers(profile(BE), gate);
+  assert.deepEqual(checks(gateLive), ['CALLER_MISSING', 'CALLER_MISSING'], 'pr-gate does not cover the live BE milestones and completion callers');
+  assert.match(gateLive[1].message, /completion-action/);
 });
 
 // a deployment-receipt record with the engine on and the default runner (a repository caller)
@@ -106,6 +116,23 @@ test('deployment-receipt: the shared completion-action is the caller, the fronte
   assert.match(wrong[0].message, /completion is automatic but no workflow uses completion-action/);
 });
 
+test('deployment-receipt with verifier workflow-run: the completion caller needs workflow_run and push, not deployment_status', () => {
+  const base = receiptProfile();
+  const backend = { ...base, productionEvidence: { environment: 'production-receipt', creator: 'github-actions[bot]', task: 'deploy:image-receipt',
+    verifier: 'workflow-run', workflow: '.github/workflows/deploy-production.yml', branch: 'develop', job: 'record-receipt' } };
+  const inspect = files => checkCompletionCaller(backend, files, extractPins(files));
+  const WORKFLOW_RUN_ON = ['on:', '  workflow_run:', '    workflows: [Deploy Production]', '    types: [completed]', '  push:', '    branches: [develop]', '  workflow_dispatch:'];
+  assert.deepEqual(inspect([receiptCaller(WORKFLOW_RUN_ON)]), []);
+  assert.deepEqual(inspect([receiptCaller(['on: [push, workflow_run]'])]), [], 'flow form');
+  const receiptOn = inspect([receiptCaller(RECEIPT_ON)]);
+  assert.deepEqual(checks(receiptOn), ['COMPLETION_TRIGGER_MISSING']);
+  assert.match(receiptOn[0].message, /has no workflow_run trigger/);
+  assert.match(receiptOn[0].remediation, /workflow_run \(completed\) of the deploy workflow \.github\/workflows\/deploy-production\.yml/);
+  assert.match(inspect([receiptCaller(['on:', '  workflow_run:'])])[0].message, /has no push trigger/);
+  // without a verifier the plain receipt rule is unchanged
+  assert.match(checkCompletionCaller(base, [receiptCaller(WORKFLOW_RUN_ON)], extractPins([receiptCaller(WORKFLOW_RUN_ON)]))[0].message, /has no deployment_status trigger/);
+});
+
 test('deployment-receipt: the completion caller needs the deployment_status and push triggers', () => {
   const receipt = receiptProfile();
   const inspect = files => checkCompletionCaller(receipt, files, extractPins(files));
@@ -123,10 +150,17 @@ test('deployment-receipt: the completion caller needs the deployment_status and 
   assert.match(inspect(split)[0].message, /no deployment_status trigger/);
   // no caller at all is CALLER_MISSING's finding, not this one
   assert.deepEqual(inspect([]), []);
-  // other strategies are not checked for these triggers
-  for (const name of [KB, BE, META]) {
-    assert.deepEqual(checkCompletionCaller(profile(name), [receiptCaller(['on: push'])], extractPins([receiptCaller(['on: push'])])), [], name);
+  // other strategies are not checked for these triggers (manual backend record: fixture of the pre-switch record)
+  const beManual = { ...profile(BE), completion: 'manual', capabilities: Object.freeze({ ...profile(BE).capabilities, completion: 'manual' }) };
+  for (const [name, record] of [[KB, profile(KB)], [BE + ' (manual)', beManual], [META, profile(META)]]) {
+    assert.deepEqual(checkCompletionCaller(record, [receiptCaller(['on: push'])], extractPins([receiptCaller(['on: push'])])), [], name);
   }
+  // the live backend record (chipin-backend#184) is deployment-receipt with verifier workflow-run: workflow_run + push
+  assert.equal(profile(BE).productionEvidence.verifier, 'workflow-run');
+  const bePushOnly = checkCompletionCaller(profile(BE), [receiptCaller(['on: push'])], extractPins([receiptCaller(['on: push'])]));
+  assert.deepEqual(checks(bePushOnly), ['COMPLETION_TRIGGER_MISSING']);
+  assert.match(bePushOnly[0].message, /has no workflow_run trigger/);
+  assert.deepEqual(checkCompletionCaller(profile(BE), [receiptCaller(['on: [push, workflow_run]'])], extractPins([receiptCaller(['on: [push, workflow_run]'])])), []);
   // org-sweep (the live frontend record): a caller is optional, but one that exists must still have both triggers
   assert.deepEqual(checks(checkCompletionCaller(profile(FE), [receiptCaller(['on: push'])], extractPins([receiptCaller(['on: push'])]))),
     ['COMPLETION_TRIGGER_MISSING']);
@@ -859,7 +893,7 @@ test('GitHubConformanceSource.productionState: status reads are bounded by the l
   assert.equal(await reads(6), 7, 'first success at index 6: one by one until it, then stop');
 });
 
-test('GitHubConformanceSource.productionState: the backend reads release.productionSource, newest receipt only; nothing declared is never guessed', async () => {
+test('GitHubConformanceSource.productionState: the backend reads productionEvidence (verifier) or release.productionSource, newest receipt only; nothing declared is never guessed', async () => {
   const R = 'production-receipt';
   const bot = 'github-actions[bot]';
   const S9 = '9'.repeat(40);
@@ -871,22 +905,30 @@ test('GitHubConformanceSource.productionState: the backend reads release.product
     [R]: [receipt(60, S9, '2026-11-04T16:00:00Z', 'deploy'), receipt(55, PROD, '2026-11-04T15:26:55Z'), receipt(40, V1, '2026-11-03T09:21:48Z')],
   };
   const statuses = { 55: st('success', bot, '2026-11-04T15:26:56Z'), 40: st('success', bot, '2026-11-03T09:21:49Z'), 60: st('success', bot, '2026-11-04T16:00:01Z') };
-  const be = await new GitHubConformanceSource(productionClient({ deployments, statuses, calls })).productionState(profile(BE));
-  assert.deepEqual(be, { sha: PROD, label: 'production-receipt deployment 55', successAt: '2026-11-04T15:26:56Z' }, 'a receipt with another task is ignored');
-  assert.ok(!calls.some(path => /environment=production&/.test(path)), 'the implicit production environment is not read');
-  assert.ok(!calls.some(path => /deployments\/40\/statuses/.test(path)), 'older receipts are not read');
-  // newest receipt not successful (or its status by another creator): no fallback to an older receipt
-  await assert.rejects(new GitHubConformanceSource(productionClient({ deployments, statuses: { ...statuses, 55: st('in_progress', bot, '2026-11-04T15:26:56Z') } })).productionState(profile(BE)),
-    e => e.code === 'RELEASE_PRODUCTION_UNVERIFIABLE' && /newest receipt only/.test(e.message));
-  const foreign = await new GitHubConformanceSource(productionClient({ deployments, statuses: { ...statuses, 55: st('success', 'olegbal', '2026-11-04T15:26:56Z') } })).productionState(profile(BE));
-  assert.deepEqual([foreign.sha, foreign.untrusted], [PROD, 'status-creator-mismatch']);
+  // the live backend record (chipin-backend#184): productionEvidence with verifier workflow-run, no release.productionSource
+  assert.equal(profile(BE).productionEvidence.verifier, 'workflow-run');
+  assert.equal(Object.hasOwn(profile(BE).release, 'productionSource'), false);
+  // fixture: the pre-switch backend record (release.productionSource, no productionEvidence), still supported by the code
+  const { productionEvidence: _evidence, ...beBase } = profile(BE);
+  const sourceRecord = { ...beBase, release: { ...profile(BE).release, productionSource: { environment: R, creator: bot, task: 'deploy:image-receipt' } } };
+  for (const [label, record] of [['productionEvidence (live)', profile(BE)], ['release.productionSource (fixture)', sourceRecord]]) {
+    calls.length = 0;
+    const be = await new GitHubConformanceSource(productionClient({ deployments, statuses, calls })).productionState(record);
+    assert.deepEqual(be, { sha: PROD, label: 'production-receipt deployment 55', successAt: '2026-11-04T15:26:56Z' }, `${label}: a receipt with another task is ignored`);
+    assert.ok(!calls.some(path => /environment=production&/.test(path)), `${label}: the implicit production environment is not read`);
+    assert.ok(!calls.some(path => /deployments\/40\/statuses/.test(path)), `${label}: older receipts are not read`);
+    // newest receipt not successful (or its status by another creator): no fallback to an older receipt
+    await assert.rejects(new GitHubConformanceSource(productionClient({ deployments, statuses: { ...statuses, 55: st('in_progress', bot, '2026-11-04T15:26:56Z') } })).productionState(record),
+      e => e.code === 'RELEASE_PRODUCTION_UNVERIFIABLE' && /newest receipt only/.test(e.message), label);
+    const foreign = await new GitHubConformanceSource(productionClient({ deployments, statuses: { ...statuses, 55: st('success', 'olegbal', '2026-11-04T15:26:56Z') } })).productionState(record);
+    assert.deepEqual([foreign.sha, foreign.untrusted], [PROD, 'status-creator-mismatch'], label);
+  }
   // productionEvidence with a verifier is a receipt source too
   const verified = { ...profile(FE), productionEvidence: { environment: 'Production', creator: 'vercel[bot]', verifier: 'workflow-run' } };
   await assert.rejects(new GitHubConformanceSource(productionClient({ deployments: { Production: [dep(9, S9, 'Production', 'vercel[bot]', 'x'), dep(8, PROD, 'Production', 'vercel[bot]', 'x')] }, statuses: { 9: st('failure', 'vercel[bot]', 'x'), 8: st('success', 'vercel[bot]', 'x') } })).productionState(verified),
     e => e.code === 'RELEASE_PRODUCTION_UNVERIFIABLE');
   // a deploy-tag record without productionEvidence or productionSource
-  const { productionSource, ...release } = profile(BE).release;
-  await assert.rejects(new GitHubConformanceSource(productionClient({ deployments, statuses })).productionState({ ...profile(BE), release }),
+  await assert.rejects(new GitHubConformanceSource(productionClient({ deployments, statuses })).productionState({ ...beBase, release: profile(BE).release }),
     e => e.code === 'RELEASE_PRODUCTION_UNVERIFIABLE' && e.phase === 'undeclared');
 });
 
@@ -1157,9 +1199,15 @@ test('CLOSED_BEFORE_PRODUCTION: a PR already in production, outside the window, 
 });
 
 test('CLOSED_BEFORE_PRODUCTION: integration-merge and manual repositories are not checked', async () => {
-  for (const name of [META, KB, BE]) {
-    assert.deepEqual(await checkClosedBeforeProduction(profile(name), scanOf([closedIssue(1, { merge: M2, base: profile(name).branches.integration, repository: name })]), inProduction()), [], name);
+  // the pre-switch manual backend record (fixture) is not checked
+  const beManual = { ...profile(BE), completion: 'manual', capabilities: Object.freeze({ ...profile(BE).capabilities, completion: 'manual' }) };
+  for (const [name, record] of [[META, profile(META)], [KB, profile(KB)], [BE, beManual]]) {
+    assert.deepEqual(await checkClosedBeforeProduction(record, scanOf([closedIssue(1, { merge: M2, base: record.branches.integration, repository: name })]), inProduction()), [], name);
   }
+  // the live backend record is deployment-receipt since chipin-backend#184, so it is checked
+  const beLive = await checkClosedBeforeProduction(profile(BE), scanOf([closedIssue(1, { merge: M2, base: 'develop', repository: BE })]), inProduction());
+  assert.deepEqual(beLive.map(f => [f.check, f.severity]), [['CLOSED_BEFORE_PRODUCTION', 'note']]);
+  assert.match(beLive[0].message, /merged into develop .*#1 \(closed \d{4}-\d{2}-\d{2} by syllik; PR #1001 2222222 not in production\)/);
   const report = await audit({ source: fakeSource({ recentlyClosedIssues: async () => { throw new Error('must not be read'); } }), repositories: [META, KB] });
   assert.ok(report.repositories.every(r => r.status !== 'UNREADABLE'));
 });

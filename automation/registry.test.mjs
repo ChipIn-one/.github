@@ -89,15 +89,19 @@ test('workflow-registry.yaml matches the approved standard exactly', () => {
       relationships: 'required', completion: 'automatic', milestones: 'enabled',
       dependabot: 'required', agentRouting: 'required' },
   });
+  // chipin-backend#184 (step A3): engine on, receipt of record-receipt verified against its Deploy Production run;
+  // productionEvidence replaces release.productionSource (only one production source is allowed)
   assert.deepEqual(getRepositoryProfile(BE), {
     repository: BE, kind: 'code', visibility: 'private', owner: 'olegbal',
     branches: { default: 'develop', integration: 'develop', promotion: null },
-    deploymentProfile: 'production', completion: 'manual', completionRunner: 'repository', protection: 'unavailable',
+    deploymentProfile: 'production', completion: 'deployment-receipt', completionRunner: 'repository',
+    productionEvidence: { environment: 'production-receipt', creator: 'github-actions[bot]', task: 'deploy:image-receipt',
+      verifier: 'workflow-run', workflow: '.github/workflows/deploy-production.yml', branch: 'develop', job: 'record-receipt' },
+    protection: 'unavailable',
     requiredChecks: ['Unit and integration tests'],
-    release: { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v',
-      productionSource: { environment: 'production-receipt', creator: 'github-actions[bot]', task: 'deploy:image-receipt' } },
+    release: { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v' },
     capabilities: { admission: 'advisory', developmentLink: 'required', prMetadata: 'required',
-      relationships: 'required', completion: 'manual', milestones: 'enabled',
+      relationships: 'required', completion: 'automatic', milestones: 'enabled',
       dependabot: 'required', agentRouting: 'required' },
   });
   assert.deepEqual(getRepositoryProfile(KB), {
@@ -443,8 +447,8 @@ test('release decisions of 2026-10-21 are recorded for every registered reposito
   const by = Object.fromEntries(loadRegistry().repositories.map(p => [p.repository, p.release]));
   // FE moved from semver-by-impact / promotion-merge to deploy tags with the master cutover (.github#216)
   assert.deepEqual(by[FE], { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v' });
-  assert.deepEqual(by[BE], { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v',
-    productionSource: { environment: 'production-receipt', creator: 'github-actions[bot]', task: 'deploy:image-receipt' } });
+  // the backend production SHA source moved from release.productionSource to productionEvidence (chipin-backend#184)
+  assert.deepEqual(by[BE], { strategy: 'deploy-tag', trigger: 'production-deploy', tagPrefix: 'v' });
   assert.deepEqual(by[META], { strategy: 'semver-by-impact', trigger: 'integration-merge', tagPrefix: 'v' });
   assert.equal(by[KB].strategy, 'none');
   assert.equal(by[NOTIF].strategy, 'none');
