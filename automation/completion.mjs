@@ -971,6 +971,9 @@ export function receiptRunId(deployment) {
  *   re-run was cancelled), and a deleted newer receipt or a re-run of an older run's receipt job would otherwise
  *   make an older deploy look current. Fail closed: any newer run, even one that wrote no receipt, makes the
  *   receipt invalid;
+ * - no other listed run of that workflow is a re-run (run_attempt > 1) that started, was still running or completed
+ *   after the receipt was created (`rerun-after-receipt`): a re-run keeps its run_number and may have redeployed an
+ *   older image. Only the listed (newest NEWEST_DEPLOY_RUNS_PAGE_SIZE) runs are seen;
  * - the run's successful `job` jobs (all attempts, one page) carry, among all their annotations, exactly one receipt
  *   notice, and it names this deployment id and SHA; that job's window (started_at .. completed_at) contains the
  *   Deployment's created_at;
@@ -1031,6 +1034,20 @@ export async function verifyWorkflowRunReceipt(deployment, verdict, {
     throw new Error("Runs of " + evidence.workflow + " carry an unreadable run_number");
   }
   if (newest.workflow_runs.some((other) => other.run_number > run.run_number)) return invalid("run-not-newest-deploy");
+  if (newest.workflow_runs.some((other) => !Number.isSafeInteger(other?.run_attempt) || other.run_attempt < 1)) {
+    throw new Error("Runs of " + evidence.workflow + " carry an unreadable run_attempt");
+  }
+  // A re-run keeps its run_number, so an older run re-run after the receipt may have redeployed an older image
+  // without a newer run_number (chipin-backend#184: the deploy workflow has no re-run guard). Any other listed run
+  // with run_attempt > 1 must have completed before the receipt was created; unreadable times fail closed.
+  const receiptTime = Date.parse(record.createdAt ?? "");
+  const rerunAfterReceipt = (other) => {
+    if (String(other.id) === runId || other.run_attempt === 1) return false;
+    const [started, updated] = [Date.parse(other.run_started_at ?? ""), Date.parse(other.updated_at ?? "")];
+    return other.status !== "completed" || !Number.isFinite(started) || !Number.isFinite(updated)
+      || !Number.isFinite(receiptTime) || started > receiptTime || updated > receiptTime;
+  };
+  if (newest.workflow_runs.some(rerunAfterReceipt)) return invalid("rerun-after-receipt");
 
   const jobsPage = await readRunJobs(runId);
   const jobs = jobsPage?.jobs;
