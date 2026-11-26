@@ -49,10 +49,10 @@ Users with write access to chipin-backend are trusted. The verifier stops forged
 ### Preconditions before the registry switch (step A3)
 
 - [ ] `develop` protected with required review ([#161](https://github.com/ChipIn-one/.github/issues/161); deferred: needs a paid plan).
-- [x] The `deploy` job of chipin-backend's `deploy-production.yml` guarded by `if: github.run_attempt == 1`, so a re-run never redeploys. A re-run that reaches the job again fails in `rerun-refused` (red, nothing deployed); "Re-run failed jobs" after only `record-receipt` failed keeps the attempt-1 deploy and writes the receipt.
+- [x] The `deploy` job of chipin-backend's `deploy-production.yml` guarded by `if: github.run_attempt == 1`, so a re-run never redeploys. A re-run that reaches the job again fails in `rerun-refused` (red, nothing deployed), and the inner `deploy` job of `deploy-compose.yml` refuses a production re-run of itself in its first step; "Re-run failed jobs" after only `record-receipt` failed keeps the attempt-1 deploy and writes the receipt.
 - [ ] The self-hosted production runner restricted to `deploy-production.yml` on `develop` (runner group with selected workflows, if the plan allows). Deferred with #161 (see known limits).
 - [x] olegbal disables "Auto-close issues with merged linked pull requests" in chipin-backend (step 3 above).
-- [x] The runner token can read Actions runs and jobs and check-run annotations on chipin-backend (plus Deployments read and Issues write); a failed read leaves every Issue `production-evidence-unreadable`.
+- [x] The runner token can read Actions runs and jobs and check-run annotations (Checks read) on chipin-backend (plus Contents read, Pull requests read, Deployments read, Issues write and Project #5); a failed read leaves every Issue `production-evidence-unreadable`.
 - [x] The backend caller (decided: a repository caller, not only the org sweep) triggers on `workflow_run` `completed` of Deploy Production (plus `push` to `develop`), not on `deployment_status`: the receipt's status is written while the run is still `in_progress` ([completion.md](completion.md#workflow-run-verifier-backend)), and it pins an org tag containing A1.
 
 The switch itself (step A3) uses exactly this evidence line:
@@ -67,5 +67,6 @@ Accepted until GitHub Team ([#161](https://github.com/ChipIn-one/.github/issues/
 - `develop` is unprotected, so the [trust boundary](#trust-boundary) is "users with write access", not "reviewed code".
 - The self-hosted production runner cannot be restricted to `deploy-production.yml` (runner groups with selected workflows need a paid plan for a private repository): another workflow on that runner can deploy without a receipt.
 - Fail closed, not self-healing: after "Re-run all jobs" of a Deploy Production run, a refused re-run, or a second receipt for one run (`run-id-cited-twice`), the newest run is not a clean successful deploy, so backend Issues stay open (`production-evidence-untrusted`) until the next successful Deploy Production.
-- The receipt written by "Re-run failed jobs" of `record-receipt` is valid only if the first attempt failed before its `Production receipt:` notice; otherwise the run is cited twice (see above).
+- The receipt written by "Re-run failed jobs" of `record-receipt` is valid only if the first attempt failed before it created its receipt Deployment; otherwise the run is cited twice (see above).
+- Deploy Production runs dispatched before the guard merged use their own, unguarded workflow file when re-run, for up to 30 days (GitHub's re-run limit). Such a re-run redeploys and may write no receipt, so the newest receipt could name newer code than production runs. Accepted: do not re-run old Deploy Production runs; the window ends 30 days after the guard PR merged.
 - `CHIPIN_ISSUE_WRITE_TOKEN` is a per-repository secret on the Free plan ([#193](https://github.com/ChipIn-one/.github/issues/193)); a revoked or expired token leaves every Issue `production-evidence-unreadable` and the caller run red.
