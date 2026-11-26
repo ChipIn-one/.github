@@ -1,6 +1,6 @@
 # ChipIn GitHub issue schema
 
-Last reviewed: 2026-10-08
+Last reviewed: 2026-11-26
 
 This document defines the shared GitHub task metadata model for ChipIn repositories.
 It does not define repository-specific implementation, review, build, test, deploy, or agent-execution rules.
@@ -16,7 +16,7 @@ Keep the axes separate:
 | Work kind | Organization Issue Type | `Task`, `Feature`, `Bug` |
 | Priority | Organization Issue Field `Priority` | `P0`, `P1`, `P2`, `P3` |
 | Severity | Organization Issue Field `Severity` | `Critical`, `Major`, `Minor`; use only when relevant |
-| Release target | Native repository Milestone (FE/BE only) | Optional concrete product release target; KB does not use product-release milestones |
+| Product goal | Native repository Milestone (FE/BE only) | Optional named product goal, same name in FE and BE when both work toward it, never a version (rules below); KB does not use milestones |
 | Workflow position / completion mirror | ChipIn Project #5 `Status` | `Backlog`, `Todo`, `In Progress`, `Awaiting release`; `Done` mirrors `closed/completed` only |
 | Completion state | Native GitHub Issue state/reason | open = unfinished; closed/completed = complete; closed/not planned = cancelled |
 | Parent / decomposition | Native GitHub issue relationships | Parent is optional; cross-repo product parent lives in KB when decomposition is needed |
@@ -24,16 +24,21 @@ Keep the axes separate:
 
 Organization Issue Fields and Project fields are different objects. Do not create same-named Project custom fields as fallbacks for Organization Issue Fields.
 
-A missing Milestone is valid and means the issue is not committed to a concrete release. Milestone membership never authorizes execution or completion.
+A missing Milestone is valid and means the issue is not committed to a product goal. Milestone membership never authorizes execution or completion.
 
-GitHub Milestones are repository-scoped. Only FE and BE use product-release milestones. Same-named milestones in FE and BE represent the same product release by convention and must use the same product-level name. The knowledge base is not a milestone participant; KB specs and documentation are linked to FE/BE work through native relationships/PRs. Do not derive a product milestone name from repository-local package/API versions unless product versioning explicitly adopts that scheme.
+GitHub Milestones are repository-scoped. Only FE and BE use product milestones. Owner decision of 2026-11-26 ([#300](https://github.com/ChipIn-one/.github/issues/300), option A): a product milestone is a named product goal, and repository versions stay technical.
 
-## Release-target rules
+- A milestone is named after the product goal it delivers, without a version-like number: `Telegram TMA`, not `1.2 Telegram TMA` or `POST RELEASE 1.1`.
+- A goal that needs frontend and backend work has a milestone with the same name in `chipin-frontend` and `chipin-backend`; the same name is the same goal, and it is how both repositories plan work toward it. A goal that touches only one repository has its milestone only there.
+- Repository versions are technical and independent: each repository's tag follows the `Version impact` of its own PRs ([release policy](docs/workflow/release.md#rules)). FE and BE versions are not kept in lockstep, a milestone name is never derived from them, and a release does not close or define a milestone.
+- The knowledge base is not a milestone participant; KB specs and documentation are linked to FE/BE work through native relationships/PRs.
 
-- Use concrete release targets such as the existing `POST RELEASE 1.1`.
+## Product milestone rules
+
+- Name a new milestone after its product goal (for example `Telegram TMA`). The version-like milestones of the earlier scheme (`POST RELEASE 1.1`, `1.2 Telegram TMA`) are triaged, renamed or closed only with the owner's approval ([#300](https://github.com/ChipIn-one/.github/issues/300)).
 - Do not create generic `PRE-PROD` or `POST-PROD` milestones to replace the retired field.
-- Existing Milestone assignments are human-owned release intent. Intake/reconciliation preserves them and does not infer, add, clear, or rename Milestones.
-- Release progress is based on release issues. Linked implementation PRs do not need the issue's milestone solely to inflate progress.
+- Existing Milestone assignments are human-owned product-goal intent. Intake/reconciliation preserves them and does not infer, add, clear, or rename Milestones.
+- Milestone progress is based on its Issues. Linked implementation PRs do not need the issue's milestone solely to inflate progress.
 - Project #5 `Status` remains secondary to native Issue state. `Done` is a derived Project mirror of `closed/completed`, never the authority that makes an Issue complete.
 
 ## Legacy metadata
