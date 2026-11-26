@@ -1040,7 +1040,8 @@ export async function verifyWorkflowRunReceipt(deployment, verdict, {
   // A re-run keeps its run_number, so the check above cannot see an older run re-run later: it may have redeployed an
   // older image (chipin-backend#184: the deploy workflow has no re-run guard). Fail closed on any other listed run
   // that is not completed, and on any other re-run (run_attempt > 1) that was still running when the cited run was
-  // created or later. This does not rely on the deploy workflow's concurrency group; unreadable times fail closed.
+  // created or later. The re-run rule does not rely on the deploy workflow's concurrency group; the exemption of a
+  // completed first attempt does (a newer dispatch waits behind it). Unreadable times fail closed.
   const citedCreated = Date.parse(run.created_at ?? "");
   const rerunAfterCited = (other) => {
     if (String(other.id) === runId) return false;
