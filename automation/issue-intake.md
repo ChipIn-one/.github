@@ -81,6 +81,64 @@ On 2026-10-20 seven requests ended BLOCKED although every write succeeded: the P
 - A request that is still pending after `MAX_PENDING_RETRIES` (6) PENDING results, about three hours, is reported **BLOCKED** ("Read-back still pending after N retries") and its control Issue is closed, so a permanent divergence reaches a human instead of looping. Drain job timeouts are 30 minutes because one lagging request can wait up to 4 minutes.
 - Manual requeue (still valid for a genuinely BLOCKED request): edit or reopen the control Issue; the bridge re-validates and enqueues a fresh request snapshot. A PENDING request needs no manual action; editing it only adds a second queue entry for the same target, which the drain processes in order. Closing a PENDING control Issue by hand does not cancel it: the scheduled drain (`--state open`) skips it, but the next event-driven drain (`--state all`) processes and closes it.
 
+## Agent create path (local session, #285)
+
+The short procedure for an agent that creates a ChipIn Issue from a local session. Follow it in this order; do not keep a private copy of these rules in handoff notes.
+
+1. **Draft the body.** Required sections, each with real content (no `TBD`, `n/a`, `...`):
+
+   ```markdown
+   ## Problem
+   What is wrong or missing today, with evidence.
+
+   ## Outcome
+   What is true when the work is done.
+
+   ## Acceptance
+   - [ ] One verifiable item per line (a list is required).
+
+   ## Dependencies
+   Parent: ChipIn-one/<repo>#<n>
+
+   ## References
+   - files, runs, docs
+   ```
+
+   `## Dependencies` and `## References` are optional for the Issue, but declare relationships only in `## Dependencies`, one per line as `Parent:`, `Blocked by:`, `Blocks:` or `Relates to:` with one exact `ChipIn-one/<repo>#<n>`; any other text there (for example `Part of:`) is ignored and creates no edge ([relationships](../docs/workflow/relationships.md)). A bug report with `Actual` / `Expected` still needs the three required sections.
+
+2. **Choose the native metadata.** Never infer it from labels, title or Milestone:
+
+   | Issue Type | Organization Issue Field `Priority` | Organization Issue Field `Severity` | Owner (native assignee) | Project #5 |
+   | --- | --- | --- | --- | --- |
+   | `Task` | required, `P0`–`P3` | none | registry `owner`: FE and `.github` `syllik`, BE `olegbal`, KB an explicit `--owner` | exactly one item with a Status |
+   | `Feature` | required, `P0`–`P3` | none | same | same |
+   | `Bug` | required, `P0`–`P3` | required, `Critical`, `Major` or `Minor` | same | same |
+
+3. **Check the draft offline.** No GitHub call and no credential; it runs the same offline rules as the canonical writer (body, classification, owner, `## Dependencies` declarations) and reports them all at once. It cannot see the writer's online checks (org schema, Project #5):
+
+   ```sh
+   node automation/issue-draft-check.mjs --repository ChipIn-one/chipin-frontend \
+     --title "Short task title" --body-file /tmp/issue-body.md \
+     --type Bug --priority P2 --severity Major
+   # KB additionally requires --owner <explicitly-selected-login>
+   ```
+
+   `DRAFT_OK` (exit 0) or `DRAFT_BLOCKED` (exit 2, JSON on stdout, one `DRAFT BLOCKER:` line per problem on stderr; an unreadable body file is a blocker too). Exit 1 is a usage error. Fix every blocker before any create. `DRAFT_OK` is not admission.
+
+4. **Create.**
+   - With an approved write credential: the canonical writer, `apply create` as in the [API / agent create path](#api--agent-create-path) below (it creates, writes Type, Fields, owner and Project #5, and reads them back in one run).
+   - Without one: one raw create with the checked body (`gh issue create` or the connector), then the [connector bridge](#connector-bridge) request with the same Type, Priority and Severity, or the owner-approved field writes. Never create a second Issue on a retry.
+
+5. **Read back.** Run the read-only preflight until it returns `INTAKE_COMPLETE`, before any branch, PR or handoff:
+
+   ```sh
+   node automation/issue-admission-preflight.mjs --issue ChipIn-one/chipin-frontend#<n>
+   ```
+
+   Until then report `PENDING_INTAKE: <blockers>`, never "created".
+
+6. **Implementation PR body.** One line `Task identity: ChipIn-one/<repo>#<n>` (exactly one). Do not add a closing keyword such as `Closes #<n>`: it never counts as the link, and it makes the native Development link read-back fail (#125). The frontend PR metadata check also requires `## Summary`, `## Tests`, `## Version impact` and `## Dependencies` and, for a UI-affecting PR, QA steps ([pr-metadata.md](pr-metadata.md)); other repositories follow their own PR checks (`.github` needs `## Version impact`, [release](../docs/workflow/release.md)).
+
 ## API / agent create path
 
 Example:

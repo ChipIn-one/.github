@@ -75,6 +75,8 @@ Tests: `slack-notify.test.mjs` (injected fetch, no network; includes the action 
 - conflicting existing human values, duplicate membership, permission failures, schema drift, or unreadable read-back produce an incomplete result rather than overwrite/guess/success.
 - apply mode requires both `--activate issue-intake-v1` and `CHIPIN_ISSUE_WRITE=1`.
 
+`issue-draft-check.mjs` is the offline draft check for a new Issue (#285): the same offline rules as the writer (body, classification, owner, `## Dependencies` declarations), all reported at once, no GitHub call and no credential, `DRAFT_OK` or `DRAFT_BLOCKED`. It is step 3 of the [agent create path](./issue-intake.md#agent-create-path-local-session-285); it is not admission.
+
 The UI entry point is the manual `.github/workflows/issue-metadata-finalize.yml` workflow. It runs the full automation test suite before plan/apply. Read-only plans can use `CHIPIN_DEV_READ_TOKEN`; writes require the separate `CHIPIN_ISSUE_WRITE_TOKEN`.
 
 For API clients/connectors that can create normal Issues but cannot mutate Issue Fields / Issue Type / Projects v2, `.github/workflows/issue-intake-connector-bridge.yml` accepts a narrowly formatted control issue in this repository. `issue-intake-request.mjs` validates the trusted author/trigger actor, exact target, request schema, and canonical classification, persists a durable normalized queue snapshot, then a repository-wide serialized drain invokes the same existing `issue-intake.mjs apply reconcile` path. The manual UI finalizer uses this same queue for apply operations. Pending drain replacement cannot lose a request because queue state exists before concurrency admission. The bridge never implements a second metadata writer.
