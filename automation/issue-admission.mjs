@@ -151,12 +151,14 @@ async function readOrgSchema(client, config) {
 
 export async function readAdmission({ client, config, repository, number, selectedOwner = null, expectedRevision = null, overrides = {} }) {
   const blockers = [];
+  // Blocker Project Status is read from the canonical Project (.github#307); see dependencyBlockers().
+  const blockerProject = { projectNumber: config.project.number, organization: config.organization };
   let project, snapshot;
   try { blockers.push(...await (overrides.readOrgSchema ?? readOrgSchema)(client, config)); }
   catch (error) { blockers.push('Organization schema unreadable: ' + error.message); }
   try { project = await (overrides.readProjectSnapshot ?? readProjectSnapshot)(client, config); }
   catch (error) { blockers.push('Project #5 unreadable: ' + error.message); }
-  try { snapshot = await (overrides.readIssueSnapshot ?? readIssueSnapshot)(client, repository, number); }
+  try { snapshot = await (overrides.readIssueSnapshot ?? readIssueSnapshot)(client, repository, number, blockerProject); }
   catch (error) { blockers.push('Native Issue unreadable: ' + error.message); }
   const result = verifyAdmission({ config, repository, number, selectedOwner, snapshot, project, expectedRevision, enforceDependencies: true });
   blockers.push(...result.blockers);
@@ -165,7 +167,7 @@ export async function readAdmission({ client, config, repository, number, select
       // A second native Issue GET alone misses field, relationship and Project Status drift.
       // Re-read both authorities and compare the full exact-Issue revision before admission.
       const [latest, latestProject] = await Promise.all([
-        (overrides.readIssueSnapshot ?? readIssueSnapshot)(client, repository, number),
+        (overrides.readIssueSnapshot ?? readIssueSnapshot)(client, repository, number, blockerProject),
         (overrides.readProjectSnapshot ?? readProjectSnapshot)(client, config),
       ]);
       const confirmed = verifyAdmission({

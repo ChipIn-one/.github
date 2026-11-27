@@ -377,7 +377,111 @@ function compactIssue(issue) {
   return { repository: issue.repository_url?.split("/repos/")[1] ?? null, number: issue.number, state: issue.state };
 }
 
-export async function readIssueSnapshot(client, repository, number) {
+// .github#307: one GraphQL read of every blocker's Project items (bounded: 50 blockers x 20 items),
+// issued only when the Issue has an open native blocker; never one request per blocker.
+// includeArchived: false, like readProjectSnapshot: an archived item counts as no item.
+const BLOCKER_PROJECT_ITEMS_QUERY = `
+query MetadataBlockerProjectItems($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issue(number: $number) {
+      number
+      blockedBy(first: 50) {
+        totalCount
+        nodes {
+          number
+          repository { nameWithOwner }
+          projectItems(first: 20, includeArchived: false) {
+            totalCount
+            nodes {
+              id
+              project { number owner { __typename ... on Organization { login } } }
+              fieldValueByName(name: "Status") {
+                __typename
+                ... on ProjectV2ItemFieldSingleSelectValue { name }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/**
+ * Project #`projectNumber` Status of one blocker node from BLOCKER_PROJECT_ITEMS_QUERY, as
+ * { projectStatus, projectStatusError }. Exactly one item of `organization`'s Project with a
+ * single-select Status yields projectStatus; anything else (no item, several items, empty Status,
+ * truncated or unreadable connection, unreadable owner) yields projectStatus null and a short,
+ * stable reason, which the dependency gate treats as blocking. Same owner rule as
+ * readIssueProjectItems (.github#218): another owner's same-numbered Project never counts.
+ */
+export function blockerProjectStatus(node, projectNumber, organization) {
+  const unreadable = (reason) => ({ projectStatus: null, projectStatusError: `unreadable: ${reason}` });
+  const connection = node?.projectItems;
+  if (!Number.isInteger(connection?.totalCount) || !Array.isArray(connection.nodes)) return unreadable("projectItems missing");
+  if (connection.nodes.length !== connection.totalCount) return unreadable(`projectItems incomplete: read ${connection.nodes.length} of ${connection.totalCount}`);
+  const sameNumber = connection.nodes.filter((item) => item?.project?.number === projectNumber);
+  if (sameNumber.some((item) => !item.project.owner?.__typename)) return unreadable(`Project #${projectNumber} owner is unreadable`);
+  const ours = sameNumber.filter((item) => item.project.owner.__typename === "Organization" && item.project.owner.login === organization);
+  if (ours.length === 0) return { projectStatus: null, projectStatusError: `no Project #${projectNumber} item` };
+  if (ours.length > 1) return { projectStatus: null, projectStatusError: `${ours.length} Project #${projectNumber} items` };
+  const value = ours[0].fieldValueByName;
+  if (value == null) return { projectStatus: null, projectStatusError: `Project #${projectNumber} Status is empty` };
+  if (value.__typename !== "ProjectV2ItemFieldSingleSelectValue" || typeof value.name !== "string" || !value.name) return unreadable("Status value is not a single-select option");
+  return { projectStatus: value.name, projectStatusError: null };
+}
+
+// Transient failures (5xx, 408/429, rate limits, network) are rethrown so admission reports
+// "Native Issue unreadable" and the existing bounded retries apply; they never become a
+// dependency blocker. Returns a short stable reason for every other failure.
+function blockerReadFailure(error) {
+  const message = String(error?.message ?? "");
+  const code = error?.code ?? error?.cause?.code;
+  const status = Number(/-> (\d{3})(?::|$|\s)/.exec(message)?.[1] ?? NaN);
+  const transient = code === "TRANSPORT_ERROR" || status === 408 || status === 429 || (status >= 500 && status <= 599) ||
+    error?.name === "AbortError" || error?.name === "TimeoutError" || message === "fetch failed" ||
+    ["ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED"].includes(code) || String(code ?? "").startsWith("UND_ERR_") ||
+    /secondary rate limit|\bRATE_LIMITED\b|Something went wrong while executing your query/i.test(message);
+  if (transient) throw error;
+  if (code === "PERMISSION_DENIED" || status === 401 || status === 403 ||
+      /not accessible|forbidden|INSUFFICIENT_SCOPES|read:project/i.test(message)) return "Projects read denied";
+  return "blocker Project read failed";
+}
+
+async function readBlockerProjectStatuses(client, repository, number, blockers, projectNumber, organization) {
+  // Closed blockers pass on native state alone; their Status stays out of the snapshot (and the
+  // admission revision) so the release sweep moving them to Done does not churn dependents.
+  const closed = (blocker) => blocker?.state === "closed";
+  const settle = (status) => blockers.map((blocker) => (closed(blocker)
+    ? { ...blocker, projectStatus: null, projectStatusError: null }
+    : { ...blocker, ...status(blocker) }));
+  if (blockers.every(closed)) return settle(() => ({}));
+  const failOpen = (reason) => settle(() => ({ projectStatus: null, projectStatusError: `unreadable: ${reason}` }));
+  const [owner, repo] = repository.split("/");
+  let data;
+  try {
+    data = await client.graphql(BLOCKER_PROJECT_ITEMS_QUERY, { owner, repo, number });
+  } catch (error) {
+    return failOpen(blockerReadFailure(error));
+  }
+  if (data?.repository?.issue?.number !== number) return failOpen("Issue identity mismatch in blocker Project read");
+  const connection = data.repository.issue.blockedBy;
+  if (!Number.isInteger(connection?.totalCount) || !Array.isArray(connection.nodes)) return failOpen("blockedBy missing in blocker Project read");
+  if (connection.totalCount !== blockers.length || connection.nodes.length !== connection.totalCount) {
+    return failOpen(`blockedBy count mismatch: GraphQL ${connection.nodes.length} of ${connection.totalCount}, REST ${blockers.length}`);
+  }
+  const named = (value) => typeof value === "string" && value.length > 0;
+  const byRef = new Map(connection.nodes
+    .filter((node) => named(node?.repository?.nameWithOwner) && Number.isInteger(node.number))
+    .map((node) => [`${node.repository.nameWithOwner}#${node.number}`, node]));
+  return settle((blocker) => {
+    const node = named(blocker?.repository) && Number.isInteger(blocker.number) ? byRef.get(`${blocker.repository}#${blocker.number}`) : null;
+    if (!node) return { projectStatus: null, projectStatusError: "unreadable: blocker missing from GraphQL blockedBy read" };
+    return blockerProjectStatus(node, projectNumber, organization);
+  });
+}
+
+export async function readIssueSnapshot(client, repository, number, { projectNumber = 5, organization = "ChipIn-one" } = {}) {
   const [owner, repo] = repository.split("/");
   const root = `/repos/${owner}/${repo}/issues/${number}`;
   const [issue, issueFieldValues, blockedBy, blocking, parent, subIssues] = await Promise.all([
@@ -391,7 +495,12 @@ export async function readIssueSnapshot(client, repository, number) {
   return {
     issue,
     issueFieldValues,
-    blockedBy: blockedBy.map(compactIssue),
+    // Each open blocker carries its Project Status (.github#307) so the dependency gate can pass
+    // it in Awaiting release/Done; a failed read marks open blockers unreadable, and only a
+    // transient failure throws (retried as "Native Issue unreadable").
+    blockedBy: blockedBy.length
+      ? await readBlockerProjectStatuses(client, repository, number, blockedBy.map(compactIssue), projectNumber, organization)
+      : [],
     blocking: blocking.map(compactIssue),
     parent: compactIssue(parent),
     subIssues: subIssues.map(compactIssue),
