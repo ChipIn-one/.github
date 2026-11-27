@@ -182,15 +182,34 @@ function lineFor(edge, self) {
 // Blocker gate (read-only)
 // ---------------------------------------------------------------------------
 
-// Admission blockers for a snapshot of `repository` (relationships: required). Any blocker whose
-// state is not positively `closed` blocks, including unreadable ones.
+// Admission blockers for a snapshot of `repository` (relationships: required). A blocker is
+// satisfied only when it is positively `closed`, or `open` with exactly one readable Project #5
+// Status in SATISFIED_BLOCKER_STATUSES (.github#307: merged work waiting for the Production
+// release). Everything else blocks, including unreadable state or Project Status (fail closed).
+export const SATISFIED_BLOCKER_STATUSES = Object.freeze(['Awaiting release', 'Done']);
+const BLOCKER_RULE = 'it must be closed or in Awaiting release/Done, or a human removes the native edge.';
+const PROJECT_READ_HINT = 'the admission token lacks Projects read (classic read:project, or fine-grained organization Projects: read)';
+
+function blockerSatisfied(item) {
+  if (item?.state === 'closed') return true;
+  return item?.state === 'open' && !item.projectStatusError && SATISFIED_BLOCKER_STATUSES.includes(item.projectStatus);
+}
+
+function blockerDiagnostic(item) {
+  const ref = `${item?.repository ?? 'unknown'}#${item?.number ?? '?'}`;
+  if (item?.state !== 'open') return `${BLOCKED_BY_DEPENDENCY}: ${ref} is ${item?.state ?? 'unreadable'}; ${BLOCKER_RULE}`;
+  const problem = item.projectStatusError ?? (item.projectStatus == null ? 'unreadable: Project #5 Status was not read' : null);
+  if (problem == null) return `${BLOCKED_BY_DEPENDENCY}: ${ref} is open (Project #5 Status: ${item.projectStatus}); ${BLOCKER_RULE}`;
+  if (problem === 'unreadable: Projects read denied') return `${BLOCKED_BY_DEPENDENCY}: ${ref} is open and its Project #5 Status is ${problem}; ${PROJECT_READ_HINT}; ${BLOCKER_RULE}`;
+  if (problem.startsWith('unreadable')) return `${BLOCKED_BY_DEPENDENCY}: ${ref} is open and its Project #5 Status is ${problem}; ${BLOCKER_RULE}`;
+  return `${BLOCKED_BY_DEPENDENCY}: ${ref} is open (${problem}); ${BLOCKER_RULE}`;
+}
+
 export function dependencyBlockers(snapshot, repository, registry = loadRegistry()) {
   const profile = getRepositoryProfile(repository, registry);
   if (profile?.capabilities.relationships !== 'required') return [];
   if (snapshot?.relationsReadable !== true) return [];
-  return (snapshot.blockedBy ?? [])
-    .filter(item => item?.state !== 'closed')
-    .map(item => `${BLOCKED_BY_DEPENDENCY}: ${item?.repository ?? 'unknown'}#${item?.number ?? '?'} is ${item?.state ?? 'unreadable'}; close it or have a human remove the native edge.`);
+  return (snapshot.blockedBy ?? []).filter(item => !blockerSatisfied(item)).map(blockerDiagnostic);
 }
 
 // ---------------------------------------------------------------------------

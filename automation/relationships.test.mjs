@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { readAdmission, verifyAdmission } from './issue-admission.mjs';
+import { blockerProjectStatus, readIssueSnapshot } from './github-metadata.mjs';
 import { run as runIntake } from './issue-intake.mjs';
 import { safeAdmissionDiagnostics } from './issue-admission-transport.mjs';
 import {
@@ -118,7 +119,230 @@ test('blocker gate: open or unreadable blockers fail; closed pass; only for rela
   assert.deepEqual(dependencyBlockers(snap('open'), OUT), []);
   assert.deepEqual(dependencyBlockers({ relationsReadable: false, blockedBy: [] }, FE), []);
   assert.equal(safeAdmissionDiagnostics(open, 'p', 't')[0].code, BLOCKED_BY_DEPENDENCY);
-  assert.match(safeAdmissionDiagnostics(open, 'p', 't')[0].remedy, /Close the blocking Issue/);
+  assert.match(safeAdmissionDiagnostics(open, 'p', 't')[0].remedy, /closed or open with Project #5 Status Awaiting release\/Done/);
+  assert.match(safeAdmissionDiagnostics(open, 'p', 't')[0].remedy, /Executor must not edit relationships/);
+});
+
+// .github#307: an open blocker whose Project #5 Status is Awaiting release or Done is satisfied.
+const blocker = (state, projectStatus, projectStatusError = null) => ({ repository: FE, number: 490, state, projectStatus, projectStatusError });
+const gate = (...items) => dependencyBlockers({ relationsReadable: true, blockedBy: items }, FE);
+
+test('blocker gate (.github#307): closed passes whatever its Project Status', () => {
+  assert.deepEqual(gate(blocker('closed', 'Done')), []);
+  assert.deepEqual(gate(blocker('closed', null, 'unreadable: x')), []);
+  assert.deepEqual(gate(blocker('closed', 'Todo')), []);
+});
+
+test('blocker gate (.github#307): open + Awaiting release or Done passes', () => {
+  assert.deepEqual(gate(blocker('open', 'Awaiting release')), []);
+  assert.deepEqual(gate(blocker('open', 'Done')), []);
+});
+
+test('blocker gate (.github#307): open + Todo / In Progress / Backlog blocks with the Status in the diagnostic', () => {
+  for (const status of ['Todo', 'In Progress', 'Backlog', 'awaiting release', 'Awaiting Release ']) {
+    const [line, ...rest] = gate(blocker('open', status));
+    assert.equal(rest.length, 0);
+    assert.equal(line, `${BLOCKED_BY_DEPENDENCY}: ${FE}#490 is open (Project #5 Status: ${status}); it must be closed or in Awaiting release/Done, or a human removes the native edge.`);
+  }
+});
+
+test('blocker gate (.github#307): open without a Project #5 item, or with several, blocks', () => {
+  assert.deepEqual(gate(blocker('open', null, 'no Project #5 item')),
+    [`${BLOCKED_BY_DEPENDENCY}: ${FE}#490 is open (no Project #5 item); it must be closed or in Awaiting release/Done, or a human removes the native edge.`]);
+  assert.match(gate(blocker('open', null, '2 Project #5 items'))[0], /is open \(2 Project #5 items\)/);
+});
+
+test('blocker gate (.github#307): open with unreadable Status blocks; only a denied read names the token scope', () => {
+  const [denied] = gate(blocker('open', null, 'unreadable: Projects read denied'));
+  assert.match(denied, /^BLOCKED_BY_DEPENDENCY: ChipIn-one\/chipin-frontend#490 is open and its Project #5 Status is unreadable: Projects read denied;/);
+  assert.match(denied, /lacks Projects read \(classic read:project, or fine-grained organization Projects: read\)/);
+  const [other] = gate(blocker('open', null, 'unreadable: blocker Project read failed'));
+  assert.match(other, /is open and its Project #5 Status is unreadable: blocker Project read failed; it must be closed/);
+  assert.doesNotMatch(other, /Projects read \(/);
+  // Empty Status: its own reason, no token hint, still blocks.
+  assert.deepEqual(gate(blocker('open', null, 'Project #5 Status is empty')),
+    [`${BLOCKED_BY_DEPENDENCY}: ${FE}#490 is open (Project #5 Status is empty); it must be closed or in Awaiting release/Done, or a human removes the native edge.`]);
+  // A snapshot without the Status fields (older producer) or an error that hides a passing Status still blocks.
+  assert.match(gate({ repository: FE, number: 490, state: 'open' })[0], /Project #5 Status is unreadable: Project #5 Status was not read/);
+  assert.equal(gate(blocker('open', 'Done', 'unreadable: x')).length, 1);
+  // Unreadable or unknown native state still blocks regardless of Status.
+  assert.match(gate(blocker(undefined, 'Done'))[0], /#490 is unreadable;/);
+  assert.match(gate(blocker('OPEN', 'Done'))[0], /#490 is OPEN;/);
+  assert.equal(safeAdmissionDiagnostics([denied], 'p', 't')[0].code, BLOCKED_BY_DEPENDENCY);
+});
+
+test('blocker gate (.github#307): mixed blockers report only the unsatisfied ones', () => {
+  const lines = dependencyBlockers({ relationsReadable: true, blockedBy: [
+    { repository: FE, number: 489, state: 'closed', projectStatus: 'Done', projectStatusError: null },
+    { repository: FE, number: 490, state: 'open', projectStatus: 'Awaiting release', projectStatusError: null },
+    { repository: BE, number: 7, state: 'open', projectStatus: 'In Progress', projectStatusError: null },
+  ] }, FE);
+  assert.deepEqual(lines, [`${BLOCKED_BY_DEPENDENCY}: ${BE}#7 is open (Project #5 Status: In Progress); it must be closed or in Awaiting release/Done, or a human removes the native edge.`]);
+});
+
+// --- blocker Project Status read (github-metadata readIssueSnapshot) --------------------------
+const ORG_OWNER = { __typename: 'Organization', login: 'ChipIn-one' };
+const item = (status, owner = ORG_OWNER, number = 5) => ({ id: 'PVTI', project: { number, owner },
+  fieldValueByName: status === undefined ? null : { __typename: 'ProjectV2ItemFieldSingleSelectValue', name: status } });
+const projectItems = (...nodes) => ({ totalCount: nodes.length, nodes });
+
+test('blockerProjectStatus: exactly one org Project #5 item with a Status', () => {
+  assert.deepEqual(blockerProjectStatus({ projectItems: projectItems(item('Awaiting release')) }, 5, 'ChipIn-one'), { projectStatus: 'Awaiting release', projectStatusError: null });
+  assert.deepEqual(blockerProjectStatus({ projectItems: projectItems(item('Todo', ORG_OWNER, 3), item('Done')) }, 5, 'ChipIn-one'), { projectStatus: 'Done', projectStatusError: null });
+});
+
+test('blockerProjectStatus: other-owner same-numbered Projects never count (.github#218)', () => {
+  const user = { __typename: 'User', login: 'ChipIn-one' };
+  const otherOrg = { __typename: 'Organization', login: 'Elsewhere' };
+  assert.deepEqual(blockerProjectStatus({ projectItems: projectItems(item('Done', user), item('Done', otherOrg)) }, 5, 'ChipIn-one'),
+    { projectStatus: null, projectStatusError: 'no Project #5 item' });
+  assert.deepEqual(blockerProjectStatus({ projectItems: projectItems(item('Done', otherOrg), item('Todo')) }, 5, 'ChipIn-one'),
+    { projectStatus: 'Todo', projectStatusError: null });
+});
+
+test('blockerProjectStatus: missing, truncated, ambiguous or unreadable reads fail closed', () => {
+  const read = node => blockerProjectStatus(node, 5, 'ChipIn-one');
+  assert.deepEqual(read({ projectItems: projectItems() }), { projectStatus: null, projectStatusError: 'no Project #5 item' });
+  assert.deepEqual(read({ projectItems: projectItems(item('Done'), item('Done')) }), { projectStatus: null, projectStatusError: '2 Project #5 items' });
+  assert.deepEqual(read({}), { projectStatus: null, projectStatusError: 'unreadable: projectItems missing' });
+  assert.deepEqual(read({ projectItems: null }), { projectStatus: null, projectStatusError: 'unreadable: projectItems missing' });
+  assert.deepEqual(read({ projectItems: { totalCount: 21, nodes: [item('Done')] } }), { projectStatus: null, projectStatusError: 'unreadable: projectItems incomplete: read 1 of 21' });
+  assert.deepEqual(read({ projectItems: projectItems(item('Done', null)) }), { projectStatus: null, projectStatusError: 'unreadable: Project #5 owner is unreadable' });
+  assert.deepEqual(read({ projectItems: projectItems(item(undefined)) }), { projectStatus: null, projectStatusError: 'Project #5 Status is empty' });
+  assert.deepEqual(read({ projectItems: projectItems({ ...item('x'), fieldValueByName: { __typename: 'ProjectV2ItemFieldTextValue' } }) }),
+    { projectStatus: null, projectStatusError: 'unreadable: Status value is not a single-select option' });
+});
+
+function snapshotClient({ blockedBy = [], graphql }) {
+  const calls = { graphql: 0 };
+  return {
+    calls,
+    async request(path) {
+      if (path.endsWith('/parent')) return null;
+      return { number: 493, state: 'open', repository_url: `https://api.github.com/repos/${FE}` };
+    },
+    async listAll(path) { return path.endsWith('/dependencies/blocked_by') ? blockedBy : []; },
+    async graphql(query, variables) { calls.graphql += 1; return graphql(query, variables); },
+  };
+}
+const restBlocker = (repository, number, state) => ({ repository_url: `https://api.github.com/repos/${repository}`, number, state });
+const gqlBlocker = (repository, number, items) => ({ number, repository: { nameWithOwner: repository }, projectItems: items });
+
+const gqlAnswer = (...nodes) => () => ({ repository: { issue: { number: 493, blockedBy: { totalCount: nodes.length, nodes } } } });
+
+test('readIssueSnapshot: one GraphQL read attaches each open blocker\'s Project #5 Status; none without open blockers', async () => {
+  const none = snapshotClient({ graphql: () => { throw new Error('must not be called'); } });
+  assert.deepEqual((await readIssueSnapshot(none, FE, 493)).blockedBy, []);
+  assert.equal(none.calls.graphql, 0);
+
+  let seen;
+  const client = snapshotClient({
+    blockedBy: [restBlocker(FE, 490, 'open'), restBlocker(FE, 489, 'closed'), restBlocker(BE, 7, 'open')],
+    graphql: (query, variables) => {
+      seen = { query, variables };
+      return gqlAnswer(gqlBlocker(FE, 490, projectItems(item('Awaiting release'))), gqlBlocker(FE, 489, projectItems(item('Done'))),
+        gqlBlocker(BE, 7, projectItems(item('Todo'))))();
+    },
+  });
+  const snapshot = await readIssueSnapshot(client, FE, 493);
+  assert.equal(client.calls.graphql, 1);
+  assert.deepEqual(seen.variables, { owner: 'ChipIn-one', repo: 'chipin-frontend', number: 493 });
+  assert.match(seen.query, /blockedBy\(first: 50\)[\s\S]*projectItems\(first: 20, includeArchived: false\)[\s\S]*fieldValueByName\(name: "Status"\)/);
+  assert.doesNotMatch(seen.query, /includeArchived: true/, 'an archived blocker item counts as no item');
+  assert.deepEqual(snapshot.blockedBy, [
+    { repository: FE, number: 490, state: 'open', projectStatus: 'Awaiting release', projectStatusError: null },
+    { repository: FE, number: 489, state: 'closed', projectStatus: null, projectStatusError: null },
+    { repository: BE, number: 7, state: 'open', projectStatus: 'Todo', projectStatusError: null },
+  ]);
+  assert.deepEqual(dependencyBlockers(snapshot, FE), [`${BLOCKED_BY_DEPENDENCY}: ${BE}#7 is open (Project #5 Status: Todo); it must be closed or in Awaiting release/Done, or a human removes the native edge.`]);
+});
+
+test('readIssueSnapshot: closed-only blockers need no GraphQL read and carry no Status', async () => {
+  const client = snapshotClient({ blockedBy: [restBlocker(FE, 489, 'closed')], graphql: () => { throw new Error('must not be called'); } });
+  const snapshot = await readIssueSnapshot(client, FE, 493);
+  assert.equal(client.calls.graphql, 0);
+  assert.deepEqual(snapshot.blockedBy, [{ repository: FE, number: 489, state: 'closed', projectStatus: null, projectStatusError: null }]);
+  assert.deepEqual(dependencyBlockers(snapshot, FE), []);
+});
+
+test('readIssueSnapshot: transient blocker Project read failures are rethrown, never dependency blockers', async () => {
+  const rest = [restBlocker(FE, 490, 'open')];
+  const transportError = Object.assign(new Error('TRANSPORT_ERROR'), { code: 'TRANSPORT_ERROR' });
+  for (const failure of [new Error('GraphQL -> 502: <html>bad gateway</html>'), new Error('GraphQL -> 429: slow down'), transportError,
+    Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } }), new Error('You have exceeded a secondary rate limit')]) {
+    await assert.rejects(readIssueSnapshot(snapshotClient({ blockedBy: rest, graphql: () => { throw failure; } }), FE, 493), error => error === failure);
+  }
+  // Through readAdmission the rethrow is the existing fail-closed, retried "Native Issue unreadable" path.
+  const result = await readAdmission({ client: snapshotClient({ blockedBy: rest, graphql: () => { throw transportError; } }), config, repository: FE, number: 493,
+    overrides: { readOrgSchema: async () => [], readProjectSnapshot: async () => projectSnapshot() } });
+  assert.equal(result.receipt.status, 'BLOCKED');
+  assert.ok(result.blockers.includes('Native Issue unreadable: TRANSPORT_ERROR'));
+  assert.ok(!result.blockers.some(line => line.startsWith(BLOCKED_BY_DEPENDENCY)));
+});
+
+test('readIssueSnapshot: denied, malformed or mismatched blocker Project reads mark open blockers unreadable with stable reasons', async () => {
+  const rest = [restBlocker(FE, 490, 'open'), restBlocker(FE, 489, 'closed')];
+  const read = graphql => readIssueSnapshot(snapshotClient({ blockedBy: rest, graphql }), FE, 493);
+  const reasons = snapshot => snapshot.blockedBy.map(b => b.projectStatusError);
+  for (const message of ['GraphQL -> 403: {"message":"Resource not accessible by integration"}', 'Resource not accessible by personal access token',
+    "Your token has not been granted the required scopes to execute this query. The 'id' field requires one of the following scopes: ['read:project']",
+    'GraphQL -> 401: Bad credentials']) {
+    const denied = await read(() => { throw new Error(message); });
+    assert.deepEqual(reasons(denied), ['unreadable: Projects read denied', null]);
+    assert.equal(denied.relationsReadable, true);
+    const lines = dependencyBlockers(denied, FE);
+    assert.equal(lines.length, 1, 'the closed blocker still passes');
+    assert.match(lines[0], /#490 is open and its Project #5 Status is unreadable: Projects read denied; the admission token lacks Projects read/);
+    assert.doesNotMatch(lines[0], /Resource not accessible|Bad credentials|scopes/, 'no raw error body in the diagnostic');
+  }
+  assert.deepEqual(reasons(await read(() => { throw Object.assign(new Error('PERMISSION_DENIED'), { code: 'PERMISSION_DENIED' }); })), ['unreadable: Projects read denied', null]);
+  assert.deepEqual(reasons(await read(() => { throw new Error('Field "blockedBy" doesn\'t exist on type "Issue"'); })), ['unreadable: blocker Project read failed', null]);
+  assert.deepEqual(reasons(await read(() => ({ repository: { issue: { number: 1, blockedBy: { totalCount: 0, nodes: [] } } } }))), ['unreadable: Issue identity mismatch in blocker Project read', null]);
+  assert.deepEqual(reasons(await read(() => ({ repository: { issue: { number: 493 } } }))), ['unreadable: blockedBy missing in blocker Project read', null]);
+  // totalCount mismatch with the REST blocker list (or a truncated GraphQL page) fails the open blockers closed.
+  assert.deepEqual(reasons(await read(gqlAnswer(gqlBlocker(FE, 490, projectItems(item('Done')))))), ['unreadable: blockedBy count mismatch: GraphQL 1 of 1, REST 2', null]);
+  assert.deepEqual(reasons(await read(() => ({ repository: { issue: { number: 493, blockedBy: { totalCount: 2, nodes: [gqlBlocker(FE, 490, projectItems(item('Done')))] } } } }))),
+    ['unreadable: blockedBy count mismatch: GraphQL 1 of 2, REST 2', null]);
+  // Join: equal counts but a different ref, or a null repository on either side, is unreadable.
+  assert.deepEqual(reasons(await read(gqlAnswer(gqlBlocker(FE, 491, projectItems(item('Done'))), gqlBlocker(FE, 489, projectItems(item('Done')))))),
+    ['unreadable: blocker missing from GraphQL blockedBy read', null]);
+  assert.deepEqual(reasons(await read(gqlAnswer({ number: 490, repository: null, projectItems: projectItems(item('Done')) }, gqlBlocker(FE, 489, projectItems(item('Done')))))),
+    ['unreadable: blocker missing from GraphQL blockedBy read', null]);
+  const nullRest = await readIssueSnapshot(snapshotClient({ blockedBy: [{ repository_url: null, number: 490, state: 'open' }],
+    graphql: gqlAnswer({ number: 490, repository: { nameWithOwner: null }, projectItems: projectItems(item('Done')) }) }), FE, 493);
+  assert.deepEqual(reasons(nullRest), ['unreadable: blocker missing from GraphQL blockedBy read']);
+  assert.equal(dependencyBlockers(nullRest, FE).length, 1);
+  const otherProject = await read(gqlAnswer(gqlBlocker(FE, 490, projectItems(item('Done', { __typename: 'User', login: 'syllik' }))), gqlBlocker(FE, 489, projectItems(item('Done')))));
+  assert.match(dependencyBlockers(otherProject, FE)[0], /#490 is open \(no Project #5 item\)/);
+  // An archived item is not returned with includeArchived: false, so the fixture is an empty connection.
+  assert.match(dependencyBlockers(await read(gqlAnswer(gqlBlocker(FE, 490, projectItems()), gqlBlocker(FE, 489, projectItems()))), FE)[0], /#490 is open \(no Project #5 item\)/);
+  const empty = await read(gqlAnswer(gqlBlocker(FE, 490, projectItems(item(undefined))), gqlBlocker(FE, 489, projectItems(item('Done')))));
+  assert.deepEqual(reasons(empty), ['Project #5 Status is empty', null]);
+});
+
+test('readAdmission forwards config Project number/organization to readIssueSnapshot', async () => {
+  const seen = [];
+  await readAdmission({ client: {}, config: { ...config, organization: 'Org-X', project: { ...config.project, number: 9 } }, repository: FE, number: 71,
+    overrides: { readOrgSchema: async () => [], readProjectSnapshot: async () => projectSnapshot(),
+      readIssueSnapshot: async (...args) => { seen.push(args.slice(1)); return snapshotWith([]); } } });
+  assert.ok(seen.length >= 1);
+  for (const args of seen) assert.deepEqual(args, [FE, 71, { projectNumber: 9, organization: 'Org-X' }]);
+});
+
+test('admission revision: an open blocker\'s Status is part of it; closed-only blockers read twice give the same one', async () => {
+  const revisionWith = projectStatus => verifyAdmission({ config, repository: FE, number: 71, project: projectSnapshot(),
+    snapshot: snapshotWith([{ repository: BE, number: 7, state: 'open', projectStatus, projectStatusError: null }]) }).receipt.revision;
+  assert.notEqual(revisionWith('Awaiting release'), revisionWith('Done'));
+  assert.notEqual(revisionWith('Todo'), revisionWith('Awaiting release'));
+
+  const client = snapshotClient({ blockedBy: [restBlocker(BE, 7, 'closed')], graphql: () => { throw new Error('must not be called'); } });
+  const revisions = [];
+  for (let i = 0; i < 2; i++) {
+    const native = await readIssueSnapshot(client, FE, 71);
+    revisions.push(verifyAdmission({ config, repository: FE, number: 71, project: projectSnapshot(), snapshot: { ...snapshotWith(native.blockedBy) } }).receipt.revision);
+  }
+  assert.equal(revisions[0], revisions[1]);
+  assert.equal(client.calls.graphql, 0);
 });
 
 // --- admission integration ---------------------------------------------------------------------
@@ -153,6 +377,10 @@ test('admission fails with BLOCKED_BY_DEPENDENCY while a blocker is open and pas
   assert.match(blocked.blockers.join('\n'), /BLOCKED_BY_DEPENDENCY: ChipIn-one\/chipin-backend#143 is open/);
   const clear = await admit([{ repository: BE, number: 143, state: 'closed' }]);
   assert.equal(clear.receipt.status, 'INTAKE_COMPLETE');
+  const released = await admit([{ repository: BE, number: 143, state: 'open', projectStatus: 'Awaiting release', projectStatusError: null }]);
+  assert.equal(released.receipt.status, 'INTAKE_COMPLETE');
+  const todo = await admit([{ repository: BE, number: 143, state: 'open', projectStatus: 'Todo', projectStatusError: null }]);
+  assert.match(todo.blockers.join('\n'), /BLOCKED_BY_DEPENDENCY: ChipIn-one\/chipin-backend#143 is open \(Project #5 Status: Todo\)/);
   assert.equal((await admit([])).receipt.status, 'INTAKE_COMPLETE');
 });
 
