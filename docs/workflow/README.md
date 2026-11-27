@@ -16,6 +16,7 @@ Canonical files: [FLOW](FLOW.md), [workspace](workspace.yaml), [project index](p
 | [relationships.md](relationships.md) | native Issue relationships contract and blocker gate |
 | [release.md](release.md) | release policy: tags, GitHub Releases, version from `Version impact` |
 | [conformance.md](conformance.md) | what the conformance audit checks |
+| [tokens.md](tokens.md) | inventory of the workflow tokens and secrets, minimal permissions, renewal |
 | [completion.md](completion.md) | completion policy: which merge closes an Issue per registry strategy, the evidence required, when the engine leaves it open |
 | [notifications.md](notifications.md) | team notifications in Slack: events, channels, secrets, how to add a caller, decisions D21 to D24 |
 
