@@ -136,7 +136,7 @@ The admission/intake modules (`issue-admission.mjs`, `issue-admission-pr.mjs`, `
 Planned in [#153](https://github.com/ChipIn-one/.github/issues/153). `ChipIn-one/.github/.github/workflows/` gets two `workflow_call` workflows that wrap the existing composite actions:
 
 - `pr-gate.yml` — inputs `pull-request-number`, `head-sha`; secret `admission-token`. Steps by registry capability: admission (`issue-admission-action`) →
-  relationships gate (read-only: an open `blockedBy` on the Task identity → `BLOCKED_BY_DEPENDENCY`, exit 1) → development link (`development-link-action`) →
+  relationships gate (read-only: a `blockedBy` on the Task identity that is neither closed nor open in Project #5 `Awaiting release`/`Done` → `BLOCKED_BY_DEPENDENCY`, exit 1) → development link (`development-link-action`) →
   PR metadata (`pr-metadata-action`, when `prMetadata: required`). It never checks out PR code. Output: one job `pr-gate` with a summary receipt artifact.
 - `issue-gate.yml` — input `issue-number`; read-only check of declared relationships (format, direction, target existence, cycles) and intake completeness;
   used by the conformance audit and manual dispatch.
@@ -192,7 +192,7 @@ Summary; the full contract is in [relationships.md](relationships.md).
 
 | Edge | Native object | Meaning | Gate |
 | --- | --- | --- | --- |
-| `Blocked by: owner/repo#N` | `blockedBy` (reverse: `blocking`) | true ordering dependency | admission `BLOCKED_BY_DEPENDENCY` while the blocker is open |
+| `Blocked by: owner/repo#N` | `blockedBy` (reverse: `blocking`) | true ordering dependency | admission `BLOCKED_BY_DEPENDENCY` while the blocker is open and not in Project #5 `Awaiting release`/`Done` |
 | `Blocks: owner/repo#N` | `blocking` | same, declared from the blocker | as above, for the target |
 | `Relates to: owner/repo#N` | `relatesTo` | paired work without order (FE↔BE of one feature) | none |
 | `Parent: owner/repo#N` | `parent` / `subIssues` | decomposition; cross-repository product parents live in KB (per schema), process epics in `.github` | none; Project shows `Sub-issues progress` |

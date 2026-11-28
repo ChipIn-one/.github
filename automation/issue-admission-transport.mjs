@@ -148,7 +148,7 @@ export function safeAdmissionDiagnostics(blockers, principal, transport) {
       : /Native Issue unreadable/i.test(s) ? 'NATIVE_ISSUE_UNREADABLE'
       : 'INVALID_METADATA';
     return { code, principal, transport, capability: code === 'PROJECT_UNREADABLE' ? 'Project #5' : 'canonical admission',
-      remedy: code === 'BLOCKED_BY_DEPENDENCY' ? 'Close the blocking Issue or have a human remove the native edge; Executor must not edit relationships.'
+      remedy: code === 'BLOCKED_BY_DEPENDENCY' ? 'A blocking Issue must be closed or open with Project #5 Status Awaiting release/Done (if its Status is unreadable, the read principal needs Projects read), or a human removes the native edge; Executor must not edit relationships.'
         : code === 'STALE_REVISION' ? 'Obtain a fresh full canonical read-back.'
         : code === 'INVALID_METADATA' ? 'Use canonical issue-intake owner; Executor must not repair metadata.'
         : 'Confirm existing principal can read org Issue Fields, native Issue and Project #5.' };

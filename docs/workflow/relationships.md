@@ -9,7 +9,7 @@ Live acceptance on real FE↔BE pairs passed on 2026-10-22 ([#152](https://githu
 
 | Declaration | Native object | Gate |
 | --- | --- | --- |
-| `Blocked by: owner/repo#N` | `blockedBy` | open blocker → `BLOCKED_BY_DEPENDENCY` (fail) |
+| `Blocked by: owner/repo#N` | `blockedBy` | blocker not satisfied (see [Gate](#gate)) → `BLOCKED_BY_DEPENDENCY` (fail) |
 | `Blocks: owner/repo#N` | `blocking` | same, for the target |
 | `Relates to: owner/repo#N` | `relatesTo` | none |
 | `Parent: owner/repo#N` | `parent` / `subIssues` | none |
@@ -88,11 +88,13 @@ appends to the other side of every native edge (`Blocks: ChipIn-one/chipin-front
 
 ## Gate
 
-With `relationships: required`, admission reads `blockedBy` for the Task identity; any blocker that is not positively `closed` (open or unreadable) fails with `BLOCKED_BY_DEPENDENCY`.
+With `relationships: required`, admission reads `blockedBy` for the Task identity; a blocker is satisfied only when it is positively `closed`, or `open` with exactly one ChipIn-one Project #5 item whose Status is `Awaiting release` or `Done` (merged work waiting for the Production release sweep, .github#307). Any other open Status, no or several Project #5 items, an unreadable state or an unreadable Status fails with `BLOCKED_BY_DEPENDENCY` (fail closed).
 The check lives in `readAdmission()` (`dependencyBlockers()` in `relationships.mjs`), so `issue-admission.mjs`, `issue-admission-preflight.mjs`, `issue-admission-pr.mjs` (and through it the Development link and PR
 metadata) and the future `pr-gate` all fail the same way, with diagnostic code `BLOCKED_BY_DEPENDENCY`. Intake completeness (`verifyAdmission()` without the execution gate) deliberately ignores blockers: an
 Issue can be fully admitted metadata-wise and still blocked from execution.
-The only ways to clear it are closing the blocker or a human removing the edge. Automation never closes an Issue and never moves Status when a blocker clears.
+Open + `Done` is an invalid state (a reopened Issue), normally reset to `In Progress` by the Project #5 "item reopened" workflow and otherwise by the completion sweep when Project reconciliation is on; until then the gate treats it as satisfied.
+The only ways to clear it are the blocker being closed, reaching `Awaiting release` or `Done`, or a human removing the edge. The gate itself never closes an Issue or moves Status.
+The completion engine still moves an Issue to `Awaiting release` only when its own blockers are closed, so a chain advances one link per release step (tracked separately).
 Legacy Issues without declarations are not touched in bulk; an edge appears only from an explicit declaration or a manual action.
 
 ## Visibility
