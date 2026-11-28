@@ -491,8 +491,11 @@ test("runCompletion picks the strategy from the registry and refuses manual or u
   assert.equal(receipt.projectNumber, 5);
   assert.equal(receipt.results[0].decision.code, "closed-completed");
 
-  await assert.rejects(() => runCompletion(fakeClient(), { repository: "ChipIn-one/chipin-backend", reconcileProjectStatus: false }),
-    (error) => error instanceof CompletionBlocked && error.code === "COMPLETION_NOT_AUTOMATIC");
+  // the live backend record is automatic since chipin-backend#184; a manual backend record (fixture) is refused
+  const manualBackend = await backendManualRegistry();
+  await assert.rejects(() => runCompletion(fakeClient(), {
+    repository: "ChipIn-one/chipin-backend", registry: manualBackend, reconcileProjectStatus: false,
+  }), (error) => error instanceof CompletionBlocked && error.code === "COMPLETION_NOT_AUTOMATIC");
   await assert.rejects(() => runCompletion(fakeClient(), { repository: "ChipIn-one/unknown", reconcileProjectStatus: false }),
     (error) => error.code === "UNKNOWN_REPOSITORY");
   await assert.rejects(() => runCompletion(fakeClient(), { repository: "ChipIn-one/chipin-notifications", reconcileProjectStatus: false }),
@@ -566,7 +569,7 @@ test("summary names repository and strategy and escapes the diagnostic", () => {
   assert.match(summary, /\| #2 \| missing-development \| x \|/u);
 });
 
-test("registry: .github and the knowledge base are automatic integration-merge, backend stays manual", () => {
+test("registry: .github and the knowledge base are automatic integration-merge, backend is automatic deployment-receipt", () => {
   const registry = loadRegistry();
   for (const repository of [ORG, KB]) {
     const profile = registry.repositories.find((candidate) => candidate.repository === repository);
@@ -574,7 +577,8 @@ test("registry: .github and the knowledge base are automatic integration-merge, 
     assert.equal(profile.capabilities.completion, "automatic", repository);
   }
   const backend = registry.repositories.find((candidate) => candidate.repository === "ChipIn-one/chipin-backend");
-  assert.equal(backend.capabilities.completion, "manual");
+  assert.equal(backend.completion, "deployment-receipt");
+  assert.equal(backend.capabilities.completion, "automatic");
   assert.throws(() => validateRegistry({
     ...registry,
     repositories: registry.repositories.map((profile) => (profile.repository === ORG
@@ -1734,18 +1738,32 @@ const BE_RUN_URL = (id) => "https://github.com/ChipIn-one/chipin-backend/actions
 const BE_EVIDENCE_LINE = "    productionEvidence: { environment: production-receipt, creator: \"github-actions[bot]\", task: \"deploy:image-receipt\","
   + " verifier: workflow-run, workflow: .github/workflows/deploy-production.yml, branch: develop, job: record-receipt }\n";
 
-// The later registry switch (docs/workflow/backend.md rollout), simulated: the live backend record stays manual.
+// The live backend record is switched (chipin-backend#184): completion deployment-receipt with the workflow-run verifier.
+const BE_STRATEGY_LINE = /^    completion: deployment-receipt +# #156;[^\n]*\n/mu;
+const BE_CAPABILITY = /(prMetadata: required, relationships: required, )completion: automatic(, milestones: enabled, dependabot: required, agentRouting: required \})/u;
 async function backendReceiptRegistry() {
   const live = await readFile(new URL("../workflow-registry.yaml", import.meta.url), "utf8");
-  const strategy = /^    completion: manual {18}# deployment-receipt decided \(#156\)[^\n]*\n/mu;
-  const capability = /(prMetadata: required, relationships: required, )completion: manual(, milestones: enabled, dependabot: required, agentRouting: required \})/u;
-  assert.match(live, strategy, "the live backend record is completion: manual");
-  assert.match(live, capability);
-  // the switch replaces release.productionSource (conformance, .github#254) by productionEvidence: only one is allowed
-  const productionSource = /^      productionSource: [^\n]*\n/mu;
-  assert.match(live, productionSource);
+  assert.match(live, BE_STRATEGY_LINE, "the live backend record is completion: deployment-receipt");
+  assert.ok(live.includes(BE_EVIDENCE_LINE), "the live backend record declares the workflow-run productionEvidence");
+  assert.match(live, BE_CAPABILITY);
+  // productionEvidence replaced release.productionSource (conformance, .github#254): only one is allowed
+  assert.doesNotMatch(live, /^      productionSource: /mu);
+  return loadRegistry({ text: live });
+}
+
+// Fixture: the backend record as it was before the switch (completion manual, release.productionSource), so the
+// refusal of a manual record stays covered after the live switch.
+async function backendManualRegistry() {
+  const live = await readFile(new URL("../workflow-registry.yaml", import.meta.url), "utf8");
+  assert.match(live, BE_STRATEGY_LINE);
+  assert.ok(live.includes(BE_EVIDENCE_LINE));
+  assert.match(live, BE_CAPABILITY);
+  const tagPrefix = /^      tagPrefix: v +# production SHA for conformance[^\n]*\n/mu;
+  assert.match(live, tagPrefix);
   return loadRegistry({
-    text: live.replace(strategy, "    completion: deployment-receipt\n" + BE_EVIDENCE_LINE).replace(capability, "$1completion: automatic$2").replace(productionSource, ""),
+    text: live.replace(BE_STRATEGY_LINE, "    completion: manual\n").replace(BE_EVIDENCE_LINE, "")
+      .replace(BE_CAPABILITY, "$1completion: manual$2")
+      .replace(tagPrefix, "      tagPrefix: v\n      productionSource: { environment: production-receipt, creator: \"github-actions[bot]\", task: \"deploy:image-receipt\" }\n"),
   });
 }
 
@@ -1767,7 +1785,8 @@ function beStatus({ id = 7000, runId = BE_RUN, createdAt = "2026-10-08T10:05:01Z
 function beRun({ id = BE_RUN, ...overrides } = {}) {
   return {
     id, path: ".github/workflows/deploy-production.yml", event: "workflow_dispatch", head_branch: "develop",
-    status: "completed", conclusion: "success", head_sha: RUN_HEAD, run_number: id - 4900, created_at: "2026-10-08T10:00:00Z", updated_at: "2026-10-08T10:06:00Z",
+    status: "completed", conclusion: "success", head_sha: RUN_HEAD, run_number: id - 4900, run_attempt: 1,
+    created_at: "2026-10-08T10:00:00Z", run_started_at: "2026-10-08T10:00:00Z", updated_at: "2026-10-08T10:06:00Z",
     html_url: BE_RUN_URL(id), repository: { full_name: BE }, head_repository: { full_name: BE }, ...overrides,
   };
 }
@@ -1844,7 +1863,7 @@ function beClient({
       }
       if ((match = /\/deployments\/(\d+)\/statuses\?per_page=100$/u.exec(path))) return answer(statuses, match[1], path);
       if ((match = /\/actions\/runs\/(\d+)$/u.exec(path))) return answer(runs, match[1], path);
-      if (path.endsWith("/actions/workflows/deploy-production.yml/runs?per_page=10")) {
+      if (path.endsWith("/actions/workflows/deploy-production.yml/runs?per_page=100")) {
         if (listedRuns instanceof Error) throw listedRuns;
         return { total_count: listedRuns.length, workflow_runs: listedRuns };
       }
@@ -1872,12 +1891,20 @@ const beRunCompletion = async (client) => runCompletion(client, {
 });
 const closes = (client) => client.log.filter((entry) => entry.startsWith("PATCH "));
 
-test("backend: the live record stays manual; the switched record validates with the workflow-run verifier", async () => {
+test("backend: the live record is switched and validates with the workflow-run verifier; the manual record is refused", async () => {
   const live = loadRegistry().repositories.find((profile) => profile.repository === BE);
-  assert.equal(live.completion, "manual");
-  assert.equal(live.capabilities.completion, "manual");
-  assert.equal(Object.hasOwn(live, "productionEvidence"), false);
+  assert.equal(live.completion, "deployment-receipt");
+  assert.equal(live.capabilities.completion, "automatic");
+  assert.equal(Object.hasOwn(live.release, "productionSource"), false);
+  const manual = (await backendManualRegistry()).repositories.find((profile) => profile.repository === BE);
+  assert.equal(manual.completion, "manual");
+  assert.equal(manual.capabilities.completion, "manual");
+  assert.equal(Object.hasOwn(manual, "productionEvidence"), false);
+  const manualRegistry = await backendManualRegistry();
+  await assert.rejects(() => runCompletion(beClient(), { repository: BE, registry: manualRegistry, reconcileProjectStatus: false }),
+    (error) => error instanceof CompletionBlocked && error.code === "COMPLETION_NOT_AUTOMATIC");
   const switched = (await backendReceiptRegistry()).repositories.find((profile) => profile.repository === BE);
+  assert.deepEqual(switched, live);
   assert.equal(switched.completion, "deployment-receipt");
   assert.deepEqual(switched.productionEvidence, {
     environment: "production-receipt", creator: "github-actions[bot]", task: "deploy:image-receipt", verifier: "workflow-run",
@@ -2006,7 +2033,9 @@ test("backend: the cited run must be the newest successful deploy (deleted newer
   assert.equal((await beRunCompletion(beClient({ newestRuns: [] }))).results[0].decision.code, "closed-completed");
   await untrusted("no run_number", { runs: { [BE_RUN]: beRun({ run_number: null }) } }, "run-number-unreadable");
   // an unreadable list is unreadable, not untrusted
-  for (const newestRuns of [new Error("GET runs -> 403: Resource not accessible"), new Error("GET runs -> 404: Not Found"), [{ run_number: "x" }]]) {
+  for (const newestRuns of [new Error("GET runs -> 403: Resource not accessible"), new Error("GET runs -> 404: Not Found"), [{ run_number: "x" }],
+    [beRun(), beRun({ id: 4990, run_attempt: null })], [beRun(), beRun({ id: 4990, run_attempt: 0 })],
+    [beRun(), beRun({ id: 4990, run_attempt: "2" })], [beRun({ id: 5009, run_attempt: null }), beRun()]]) {
     const flaky = beClient({ newestRuns });
     assert.equal((await beRunCompletion(flaky)).results[0].decision.code, "production-evidence-unreadable");
     assert.deepEqual(closes(flaky), []);
@@ -2019,6 +2048,45 @@ test("backend: the cited run must be the newest successful deploy (deleted newer
     assert.equal((await beRunCompletion(flaky)).results[0].decision.code, "production-evidence-unreadable");
     assert.deepEqual(closes(flaky), []);
   }
+});
+
+test("backend: a re-run of an older deploy run after the cited run keeps Issues open (rerun-after-receipt)", async () => {
+  // cited run 5000 is created at 10:00:00 and writes receipt 700 at 10:05:00; run 4990 is older (lower run_number)
+  const older = (overrides) => beRun({ id: 4990, created_at: "2026-10-01T10:00:00Z", ...overrides });
+  const code = async (newestRuns) => (await beRunCompletion(beClient({ newestRuns }))).results[0].decision.code;
+  // re-run of the older run after the receipt (it may have redeployed an older image, run_number unchanged)
+  await untrusted("older run re-run after the receipt", { newestRuns: [beRun(), older({
+    run_attempt: 2, run_started_at: "2026-10-09T10:00:00Z", updated_at: "2026-10-09T10:06:00Z" })] }, "rerun-after-receipt");
+  // a re-run that ended between the cited run's start and its receipt (overlap without a concurrency group)
+  await untrusted("older run re-run overlapping the cited run", { newestRuns: [beRun(), older({
+    run_attempt: 3, conclusion: "failure", run_started_at: "2026-10-08T09:59:00Z", updated_at: "2026-10-08T10:04:00Z" })] },
+  "rerun-after-receipt");
+  // any other run not completed, re-run or first attempt (queued, in progress), fails closed
+  for (const attempt of [1, 2]) {
+    await untrusted("older run still in progress (attempt " + attempt + ")", { newestRuns: [beRun(), older({
+      run_attempt: attempt, status: "in_progress", conclusion: null, updated_at: "2026-10-01T10:04:30Z" })] }, "rerun-after-receipt");
+  }
+  // an unreadable updated_at of a re-run fails closed
+  for (const updated_at of [null, "soon"]) {
+    await untrusted("older re-run with unreadable updated_at", { newestRuns: [beRun(), older({ run_attempt: 2, updated_at })] }, "rerun-after-receipt");
+  }
+  // one blocking re-run among several fine ones blocks
+  await untrusted("one bad re-run of several", { newestRuns: [beRun(),
+    older({ run_attempt: 2, updated_at: "2026-10-05T10:06:00Z" }),
+    beRun({ id: 4980, run_attempt: 2, updated_at: "2026-10-08T10:01:00Z" })] }, "rerun-after-receipt");
+  // a re-run completed before the cited run was created is fine, also exactly at that time
+  assert.equal(await code([beRun(), older({ run_attempt: 2, run_started_at: "2026-10-05T10:00:00Z", updated_at: "2026-10-05T10:06:00Z" })]),
+    "closed-completed");
+  assert.equal(await code([beRun(), older({ run_attempt: 2, updated_at: "2026-10-08T10:00:00Z" })]), "closed-completed");
+  // a completed first attempt of an older run is not a re-run, whatever its times (concurrency queues the next dispatch)
+  assert.equal(await code([beRun(), older({ updated_at: "2026-10-08T10:01:00Z" })]), "closed-completed");
+  // the cited run itself is not affected by this rule (its own re-runs are judged by the run window, the job evidence
+  // and run-id-cited-twice)
+  const citedRerun = beRun({ run_attempt: 2 });
+  assert.equal((await beRunCompletion(beClient({ runs: { [BE_RUN]: citedRerun }, newestRuns: [citedRerun] }))).results[0].decision.code,
+    "closed-completed");
+  // a newer run is judged first: run-not-newest-deploy, whatever its run_attempt
+  await untrusted("newer re-run", { newestRuns: [beRun({ id: 5009, run_attempt: 2 }), beRun()] }, "run-not-newest-deploy");
 });
 
 test("backend: an injected receipt notice next to the legitimate one makes the receipt ambiguous", async () => {

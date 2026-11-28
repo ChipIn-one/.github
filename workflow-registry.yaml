@@ -49,15 +49,15 @@ repositories:
     owner: olegbal
     branches: { default: develop, integration: develop }
     deploymentProfile: production
-    completion: manual                  # deployment-receipt decided (#156); manual until the evidence step (chipin-backend#213), see docs/workflow/backend.md
+    completion: deployment-receipt      # #156; engine on since chipin-backend#184: receipt of record-receipt, verified against its Deploy Production run (docs/workflow/backend.md)
+    productionEvidence: { environment: production-receipt, creator: "github-actions[bot]", task: "deploy:image-receipt", verifier: workflow-run, workflow: .github/workflows/deploy-production.yml, branch: develop, job: record-receipt }
     protection: unavailable             # until the Team upgrade (#161)
     requiredChecks: [Unit and integration tests]
     release:                            # tag + GitHub Release after every successful Deploy Production
       strategy: deploy-tag
       trigger: production-deploy
-      tagPrefix: v
-      productionSource: { environment: production-receipt, creator: "github-actions[bot]", task: "deploy:image-receipt" }   # the deployed image SHA (record-receipt), read by conformance (#254)
-    capabilities: { admission: advisory, developmentLink: required, prMetadata: required, relationships: required, completion: manual, milestones: enabled, dependabot: required, agentRouting: required }
+      tagPrefix: v                      # production SHA for conformance: productionEvidence above (#254)
+    capabilities: { admission: advisory, developmentLink: required, prMetadata: required, relationships: required, completion: automatic, milestones: enabled, dependabot: required, agentRouting: required }
   - repository: ChipIn-one/chipin-knowledge-base
     kind: docs
     visibility: private

@@ -119,8 +119,11 @@ export function checkCallers(profile, pins) {
 
 // Triggers a deployment-receipt completion caller needs (docs/workflow/completion.md, .github#212): the receipt
 // event closes the Issue, the push writes Awaiting release. Read from the top-level `on:` block of the workflow
-// file that uses completion-action (block or one-line flow form).
+// file that uses completion-action (block or one-line flow form). With `productionEvidence.verifier: workflow-run`
+// (the backend, chipin-backend#184) the receipt event is `workflow_run` of the deploy workflow, not
+// deployment_status: the receipt status is written while that run is still in progress.
 const RECEIPT_CALLER_TRIGGERS = ['deployment_status', 'push'];
+const WORKFLOW_RUN_CALLER_TRIGGERS = ['workflow_run', 'push'];
 
 export function workflowTriggers(text) {
   const lines = String(text).split(/\r?\n/);
@@ -144,11 +147,15 @@ export function checkCompletionCaller(profile, workflows, pins) {
   const paths = new Set(pins.filter(pin => pin.name === 'completion-action').map(pin => pin.path));
   if (!paths.size) return []; // CALLER_MISSING already reports the missing caller
   const triggers = new Set(workflows.filter(file => paths.has(file.path)).flatMap(file => workflowTriggers(file.text)));
-  const missing = RECEIPT_CALLER_TRIGGERS.filter(trigger => !triggers.has(trigger));
+  const workflowRun = profile.productionEvidence?.verifier === 'workflow-run';
+  const missing = (workflowRun ? WORKFLOW_RUN_CALLER_TRIGGERS : RECEIPT_CALLER_TRIGGERS).filter(trigger => !triggers.has(trigger));
   if (!missing.length) return [];
+  const remediation = workflowRun
+    ? `Use templates/caller-completion-deployment-receipt.yml with workflow_run (completed) of the deploy workflow ${profile.productionEvidence.workflow} instead of deployment_status; push to ${profile.branches.integration} writes Awaiting release.`
+    : `Use templates/caller-completion-deployment-receipt.yml: deployment_status (success only) closes on the production receipt, push to ${profile.branches.integration} writes Awaiting release.`;
   return [finding('COMPLETION_TRIGGER_MISSING', 'drift',
     `completion is deployment-receipt but the completion-action caller (${[...paths].join(', ')}) has no ${missing.join(' or ')} trigger.`,
-    `Use templates/caller-completion-deployment-receipt.yml: deployment_status (success only) closes on the production receipt, push to ${profile.branches.integration} writes Awaiting release.`)];
+    remediation)];
 }
 
 // `completionRunner: org-sweep` (.github#217): the engine runs only from an org sweep workflow of ChipIn-one/.github
@@ -916,7 +923,7 @@ export class GitHubConformanceSource {
     return data.status;
   }
   // Production SHA of a versioned record (checkProductionRelease). semver-by-impact: the release branch head.
-  // deploy-tag: the Deployments of productionEvidence (frontend) or else release.productionSource (backend: the
+  // deploy-tag: the Deployments of productionEvidence (frontend; backend with verifier workflow-run) or else release.productionSource (a record without it: the
   // production-receipt of record-receipt); neither declared is RELEASE_PRODUCTION_UNVERIFIABLE, never a guess. The
   // newest 100 per environment name (readProductionDeployments; a productionEvidence list of exact names, .github#287,
   // is read name by name and merged newest first) are filtered by exact environment name, creator and task. A receipt source
@@ -1085,14 +1092,16 @@ export class GitHubConformanceSource {
         },
       };
     }
-    const { environment, creator } = profile.productionEvidence ?? {};
+    // A verifier record (backend) also filters by task, as the engine does; the audit does not repeat the engine's
+    // run proof, so this read-only note may count a receipt the engine would reject (conformance.md).
+    const { environment, creator, task, verifier } = profile.productionEvidence ?? {};
     const environments = productionEnvironments(environment);
     if (!environments.length || !creator) throw new Error(`${repository} has no productionEvidence in the registry`);
     const integrationHeadSha = await readBranchHead(this.client, repository, profile.branches.integration);
     const window = await readProductionDeployments(this.client, repository, { environment });
     const named = environments.join(' or ');
     const resolver = createReceiptResolver({
-      deployments: window.deployments.filter(d => environments.includes(d?.environment) && d?.creator?.login === creator),
+      deployments: window.deployments.filter(d => environments.includes(d?.environment) && d?.creator?.login === creator && (!verifier || d?.task === task)),
       environment, creator, integrationHeadSha, containsCommit,
       readStatuses: id => this.client.request(`/repos/${repository}/deployments/${id}/statuses?per_page=${RECEIPT_STATUS_PAGE_SIZE}`),
     });
